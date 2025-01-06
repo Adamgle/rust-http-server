@@ -1,0 +1,76 @@
+CURRENT TREAT ON THE AGENDA: Parse the headers, make a coffee.
+
+Buzzwords:
+- TCP Connection/TCP Protocol
+- Frontend --> Web Browser/CURL
+- Backend -> self
+- HTTP server: 
+    1. serves files:
+        - WHAT IS IT: File is a sequence of bytes structured in a certain way that is defined by the type of a file.
+            Every file has certain encoding, size, type (extension defined), metadata, 
+        - Attaches headers: 
+            - WHAT IS IT:   
+            - request headers, user defined
+            - response headers that are server defined, dependent on request headers
+            
+Steps:
+1. TCP Connection -> Binding to socket
+2. Sending multivariate resources (files, text, In our case html valid strings to interpret via http protocol)
+3. Receiving requests
+4. Responding to requests
+
+!!! TODOS !!!
+1. Consider using making Config struct to accept options for running the server. <CHECK>
+2. Figure out why this is so unstable, sometimes request is handled properly and web page is shown, sometimes it sends "This site can't be reached".
+    -> The problem laid in the issue with client requests reading to the dynamic data structure, It was something related to the EOF reaching by functions 
+    -> that operate on dynamically allocated data structures like read_vectorized or read_to_string which was impossible to reach somehow, 
+    -> maybe EOF is not even present in the stream, I don't know, but somehow It made it hang while receiving the request and made a response when request was dropped
+    -> or after 4 minutes which is time in which TCP connection requests get aborted. not sure about this timeout because untests but I've read that on stackoverflow 
+    -> https://stackoverflow.com/questions/30552187/reading-from-a-tcpstream-with-readread-to-string-hangs-until-the-connection-is <CHECK>
+3. Figure out how to send different responses, not just statically hard coded responses.
+    -> This is kinda silly because sending different responses is just what http does on different request, you just have to implement the 
+    -> functionality of sending variate amounts of data based on user input.
+    -> It always will be "hard coded" because what we are doing is using native HTTP protocol and sending the resources over TCP to HTTP protocol to interpret
+    -> the data that we are sending. ACTUALLY the information about how to send the resource lays in the headers, 
+    -> you need to parse the headers and do stuff that specific headers is bound to do. <CHECK>
+4. Routing can be done by reading the path from Referer field: Referer: http://192.168.0.140:5000/<route>, this is from stream that come with an http request.
+    --- Regarding that
+        - Parse the path from the Referer header to travel the directory with the pages to read the actual pages and send them over TCP
+        - writing appropriate response headers while sending the page which is tricky
+            --- Regarding that
+            - Client can send a request to the server through scripts, fetch
+            - QUESTION: How do we know what kind of resource gets requests, is that html file or text file or sound file?
+            - ANSWER: 
+                - MIME type that comes with request should be used, alternatively extension of file that is requested but we will try to avoid using extension as 
+                - the identifier of the resource, also I've heard that some browsers identify resource type based of bytes of that resource, 
+                - they look up on the header encoded in the bytes of a resource. <CHECK>
+        - definitely we will need some functionality to parse the headers because writing them plain is a pain in the ass.
+    --- GOALS
+    1. Parse the path from Referer field or first line of the request header "GET /data HTTP/1.1", this contains the relative path that was requested
+    2. Send routed web page
+5. Think about making struct TcpConnection -> 
+    --- Regarding that
+    - You could hold connection dependencies in one data container, pass it through functions and handlers if necessary.
+        Know it is not necessary so leave that be, but this is a good way of holding things Like Config and connection itself.
+    - You could hold information about protocol for example because it stays unchanged across connections, 
+6. Implement a function that returns a response with error message, It could be done mostly statically and using the information in HttpRequestError <CHECK>
+7. Think about how to propagate full error messages to the client JUST FOR FUN <CHECK>
+8. Think about validating headers that comes with a request
+9. Errors yield by client are not handled on the server, like `PUT http://127.0.0.1:5000/ 501 (Not Implemented)`
+
+ON THE AGENDA: 
+1. Multithreading is on the agenda which will enable us to handle multiple requests simultaneously but far away and we do not bother just know
+
+DREAMLAND
+Let's try to develop something...
+We will make a stateful todo-app with a static file as a database.
+    --- Regarding that
+        --- GOALS
+        We want to make this app as much as possible to communicate with the server
+        We want to maximize number of http requests made
+        We want to avoid frontend
+        --- IDEAS
+        1. We could add functionality of sending files via http, like files with default request or images that lays on the server
+        2. We will use json file as a database
+        3. We could sent css spreadsheets via http request
+        4. Database could be secured <PREMIUM IDEA>

@@ -1,0 +1,33 @@
+body {
+    background-color: #f0f0f0;
+    font-family: sans-serif;
+    padding: 0;
+    margin: 0
+}
+
+.header-content {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: #333;
+    color: #fff;
+    padding: 10px;
+    text-align: center;
+}
+
+#app {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+}
+
+.main-content {
+    display: flex;
+    flex-direction: row;
+    align-items: space-between;
+    justify-content: space-evenly;
+    max-width: 728px;
+    width: 100%
+}

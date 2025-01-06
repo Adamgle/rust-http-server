@@ -1,0 +1,12 @@
+use rust_http_server::tcp_handlers::run_tcp_server;
+use rust_http_server::Config;
+use std::{env, error::Error};
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let args = env::args().collect::<Vec<String>>();
+
+    let config: Config = Config::parse_args(args)?;
+    run_tcp_server(config)?;
+
+    Ok(())
+}
