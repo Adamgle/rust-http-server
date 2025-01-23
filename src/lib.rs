@@ -1,94 +1,273 @@
 use std::collections::HashMap;
 use std::error::Error;
-use std::net::{SocketAddrV4, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::net::{TcpListener, TcpStream};
 
-pub struct Config {
-    server_root: PathBuf,
-    host: SocketAddrV4,
-    options: Option<HashMap<String, String>>,
+pub mod database {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct DatabaseEntry {
+        pub value: String,
+        pub id: u32,
+    }
 }
 
-impl Config {
-    pub fn new(
-        host: SocketAddrV4,
-        options: Option<HashMap<String, String>>,
-        server_root: PathBuf,
-    ) -> Self {
-        // Project base path
-        Config {
-            host,
-            options,
-            server_root,
+pub mod config {
+    use std::collections::HashMap;
+    use std::error::Error;
+    use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
+    use std::path::PathBuf;
+
+    pub struct Config {
+        pub server_root: PathBuf,
+        pub socket_address: SocketAddrV4,
+        pub options: Option<HashMap<String, String>>,
+        pub http_host: url::Url,
+        // NOTE: It's not optional because in the near future we will create the file with default when the server starts
+        pub config_file: config_file::ServerConfigFile,
+    }
+
+    // TODO: Config file should be generate when server is first started with some crap that is default and required
+    // for server to work, like `protocol` field.
+    pub mod config_file {
+        use serde::Deserialize;
+
+        use super::Config;
+        use std::fs;
+
+        #[derive(serde::Serialize, Debug)]
+        pub enum ConfigHttpProtocol {
+            HTTP,
+            HTTPS,
+        }
+
+        // impl for deserialization to lowercase of the protocol field
+        impl<'de> Deserialize<'de> for ConfigHttpProtocol {
+            fn deserialize<D>(deserializer: D) -> Result<ConfigHttpProtocol, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let s = String::deserialize(deserializer)?;
+                match s.to_lowercase().as_str() {
+                    "http" => Ok(ConfigHttpProtocol::HTTP),
+                    "https" => Ok(ConfigHttpProtocol::HTTPS),
+                    _ => Err(serde::de::Error::custom("Invalid protocol")),
+                }
+            }
+        }
+
+        impl std::fmt::Display for ConfigHttpProtocol {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    ConfigHttpProtocol::HTTP => write!(f, "http"),
+                    ConfigHttpProtocol::HTTPS => write!(f, "https"),
+                }
+            }
+        }
+
+        #[derive(serde::Deserialize, serde::Serialize, Debug)]
+        pub struct RedirectPathsEntry {
+            pub from: url::Url,
+            pub to: url::Url,
+        }
+
+        // Alias for RedirectPathsEntry, basically the same structure
+        #[derive(serde::Deserialize, serde::Serialize, Debug)]
+        pub struct RedirectDomainsEntry {
+            pub from: String,
+            pub to: String,
+        }
+
+        #[derive(serde::Deserialize, serde::Serialize, Debug)]
+        pub struct RedirectEntry {
+            pub domains: Option<Vec<RedirectDomainsEntry>>,
+            pub paths: Option<Vec<RedirectPathsEntry>>,
+        }
+
+        #[derive(serde::Deserialize, serde::Serialize, Debug)]
+        pub struct ServerConfigFile {
+            pub redirect: Option<RedirectEntry>,
+            pub protocol: ConfigHttpProtocol,
+        }
+
+        impl ServerConfigFile {
+            pub fn get_config() -> Result<ServerConfigFile, Box<dyn std::error::Error>> {
+                let config_path = Config::get_server_root().join("config/config.json");
+                let mut config =
+                    serde_json::from_str::<ServerConfigFile>(&fs::read_to_string(config_path)?)?;
+
+                // Map the domains with port number if specified
+                if let Some(redirect) = config.redirect.as_mut() {
+                    if let Some(domains) = redirect.domains.as_mut() {
+                        for domain in domains {
+                            // NOTE: That allowance of port number in domain could change in the future
+                            // Check if domain is supplied with port number, because even thought
+                            // this is invalid, we will allow it
+                            // port number in http URL is right after the domain name
+                            // so we could split the domain by `:` and check for the second element presence, parsing it accordingly
+
+                            if let None = domain.from.split(':').collect::<Vec<&str>>().get(1) {
+                                domain.from =
+                                    format!("{}:{}", domain.from, std::env::var("SERVER_PORT")?);
+                            }
+                            if let None = domain.to.split(':').collect::<Vec<&str>>().get(1) {
+                                domain.to =
+                                    format!("{}:{}", domain.to, std::env::var("SERVER_PORT")?);
+                            }
+                        }
+                    }
+                }
+
+                Ok(config)
+            }
+            pub fn domain_to_url(&self, domain: &str) -> Result<url::Url, url::ParseError> {
+                Ok(url::Url::parse(&format!("{}://{}", self.protocol, domain))?)
+            }
         }
     }
 
-    /// Parses user defined args while executing the program
-    pub fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn Error>> {
-        if args.len() < 2 {
-            return Err(format!("Usage: {} <address:port> [server_root_path]", args[0]).into());
+    impl Config {
+        pub fn new(
+            socket_address: SocketAddrV4,
+            options: Option<HashMap<String, String>>,
+            server_root: PathBuf,
+            http_host: url::Url,
+            config_file: config_file::ServerConfigFile,
+        ) -> Self {
+            // Project base path
+            Config {
+                socket_address,
+                options,
+                server_root,
+                http_host,
+                config_file,
+            }
         }
 
-        let host = args[1].parse::<SocketAddrV4>()?;
-        let options = Config::parse_options(args.get(2));
+        /// Parses user defined args while executing the program
+        pub fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn Error>> {
+            if args.len() < 2 {
+                return Err(format!("Usage: {} <address:port> [server_root_path]", args[0]).into());
+            }
 
-        // Check if SERVER_ROOT env specified, if not check command line argument, if not use default
-        // as `{working_dir}/public`
-        let server_root = match std::env::var("SERVER_ROOT") {
-            Ok(server_root) => PathBuf::from(server_root),
-            Err(_) => args
-                .get(3)
-                .map(|path| Ok::<PathBuf, Box<dyn Error>>(PathBuf::from(path)))
-                .unwrap_or_else(|| {
-                    // Default path
-                    let default_path = std::env::current_dir()?.join("public");
-                    println!("Using: {:?} as server_root", default_path);
-                    Ok(default_path)
-                })?,
-        };
+            // Required instead of parsing to SocketAddrV4 because we could not supply `localhost` as a socket
+            // because parsing would fail
+            let socket_address = match args[1].to_socket_addrs()?.find(|addr| addr.is_ipv4()) {
+                Some(SocketAddr::V4(addr)) => addr,
+                _ => return Err("Invalid IPv4 socket address".into()),
+            };
 
-        // Set the SERVER_ROOT environment variable
-        // refer as std::env::var("SERVER_ROOT") to get the value
-        std::env::set_var("SERVER_ROOT", &server_root);
+            let options = Config::parse_options(args.get(2));
 
-        Ok(Config::new(host, options, server_root))
-    }
+            // Check if SERVER_ROOT env specified, if not check command line argument, if not use default
+            // as `{working_dir}/public`
+            let server_root = match std::env::var("SERVER_ROOT") {
+                Ok(server_root) => PathBuf::from(server_root),
+                Err(_) => args
+                    .get(3)
+                    .map(|path| Ok::<PathBuf, Box<dyn Error>>(PathBuf::from(path)))
+                    .unwrap_or_else(|| {
+                        // Default path
+                        let default_path = std::env::current_dir()?;
+                        println!("Using: {:?} as server_root", default_path);
+                        Ok(default_path)
+                    })?,
+            };
 
-    pub fn parse_options(options: Option<&String>) -> Option<HashMap<String, String>> {
-        match options {
-            // TODO: TBD
-            Some(_data) => return Some(HashMap::<String, String>::new()),
-            None => None,
+            // Set the SERVER_ROOT, SERVER_PUBLIC, SERVER_PORT environment variables
+            // refer as std::env::var("SERVER_ROOT") to get the value
+            std::env::set_var("SERVER_ROOT", &server_root);
+            std::env::set_var("SERVER_PUBLIC", &server_root.join("public"));
+            std::env::set_var("SERVER_PORT", socket_address.port().to_string());
+
+            // println!("{:?}", std::env::var("SERVER_ROOT"));
+            // println!("{:?}", std::env::var("SERVER_PUBLIC"));
+            // println!("{:?}", std::env::var("SERVER_PORT"));
+
+            Ok(Config::new(
+                socket_address,
+                options,
+                server_root,
+                // This will normalize localhost and 127.0.0.1 in URL
+                url::Url::parse(&format!("http://{}", socket_address))?,
+                config_file::ServerConfigFile::get_config()?,
+            ))
         }
-    }
 
-    /// This function does not operator on the Config instance, path is returned from
-    /// environment variables
-    ///
-    /// NOTE: We are assuming env always exists, if not the error would be thrown earlier, so it is safe to unwrap.
-    /// Cannot be used internally in Config methods because that could panic when env is not set
-    pub fn get_server_root() -> PathBuf {
-        PathBuf::from(std::env::var("SERVER_ROOT").unwrap())
+        pub fn parse_options(options: Option<&String>) -> Option<HashMap<String, String>> {
+            match options {
+                // TODO: TBD
+                Some(_data) => return Some(HashMap::<String, String>::new()),
+                None => None,
+            }
+        }
+
+        /// This function does not operator on the Config instance, path is returned from
+        /// environment variables
+        ///
+        /// NOTE: We are assuming env always exists, if not the error would be thrown earlier, so it is safe to unwrap.
+        /// Cannot be used internally in Config methods because that could panic when env is not set
+        pub fn get_server_public() -> PathBuf {
+            // Also we are assuming that the actual path exists, because of the call to canonicalize.
+            PathBuf::from(std::env::var("SERVER_PUBLIC").unwrap())
+                .canonicalize()
+                .expect("Server public path set in the SERVER_PUBLIC env does not exists")
+        }
+
+        /// Natively return current working directory.
+        ///
+        /// NOTE: This function does not operator on the Config instance, path is returned from environment variables
+        ///
+        /// NOTE: We are assuming env always exists, if not the error would be thrown earlier, so it is safe to unwrap.
+        /// Cannot be used internally in Config methods because that could panic when env is not set
+        pub fn get_server_root() -> PathBuf {
+            PathBuf::from(std::env::var("SERVER_ROOT").unwrap())
+                .canonicalize()
+                .expect("Server root path set in the SERVER_ROOT env does not exists")
+        }
+
+        pub fn get_server_port() -> String {
+            std::env::var("SERVER_PORT").expect("server_port not set in the SERVER_PORT env")
+        }
     }
 }
 
 pub mod tcp_handlers {
+    use crate::database::DatabaseEntry;
+    use serde::de::IntoDeserializer;
+    use serde::{Deserialize, Serialize};
     use std::borrow::Cow;
     use std::fmt::Display;
     use std::fs::{self, OpenOptions};
-    use std::io::{Read, Write};
+    use std::io::{Read, Seek, Write};
     use std::net;
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
 
-    use crate::Config;
+    use crate::config::Config::{self};
+
     use crate::*;
 
-    // NOTE: This should be propagated to user if it occurs
-    #[derive(Debug)]
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    /// `status_code` and `status_text` are specific to the HTTP protocol, specifically the start line of HTTP message
+    /// `content_type` is used to return appropriate response to the client
+    /// `message` is used to inform the user about the error, not standardized in HTTP
     struct HttpRequestError {
         status_code: u16,
         status_text: String,
+        content_type: Option<String>,
+        message: Option<String>,
+    }
+
+    impl Default for HttpRequestError {
+        fn default() -> Self {
+            Self {
+                status_code: 500,
+                status_text: String::from("Internal Server Error"),
+                content_type: Some(String::from("text/html")),
+                message: None,
+            }
+        }
     }
 
     impl Display for HttpRequestError {
@@ -111,7 +290,8 @@ pub mod tcp_handlers {
     #[derive(Debug)]
     struct HttpRequest<'a> {
         headers: String,
-        parsed_headers: Option<HttpHeaders<'a>>,
+        parsed_headers: HttpHeaders<'a>,
+        body: Option<String>,
     }
 
     #[derive(Debug)]
@@ -133,6 +313,7 @@ pub mod tcp_handlers {
                 _ => Err(HttpRequestError {
                     status_code: 505,
                     status_text: String::from("HTTP Version Not Supported"),
+                    ..Default::default()
                 }),
             }
         }
@@ -155,6 +336,16 @@ pub mod tcp_handlers {
         status_text: Option<&'a str>,
     }
 
+    impl<'a> HttpResponseStartLine<'a> {
+        fn new(protocol: HttpProtocol, status_code: u16, status_text: &'a str) -> Self {
+            Self {
+                protocol,
+                status_code,
+                status_text: status_text.into(),
+            }
+        }
+    }
+
     impl<'a> Display for HttpResponseStartLine<'a> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(
@@ -167,12 +358,13 @@ pub mod tcp_handlers {
         }
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Clone)]
     enum HttpRequestMethod {
         GET,
         POST,
         DELETE,
         UPDATE,
+        PUT,
     }
 
     impl Display for HttpRequestMethod {
@@ -193,6 +385,7 @@ pub mod tcp_handlers {
                 _ => Err(HttpRequestError {
                     status_code: 501,
                     status_text: String::from("Not Implemented"),
+                    ..Default::default()
                 }),
             }
         }
@@ -217,6 +410,7 @@ pub mod tcp_handlers {
                 return Err(HttpRequestError {
                     status_code: 400,
                     status_text: String::from("Bad Request line"),
+                    ..Default::default()
                 });
             }
 
@@ -225,11 +419,12 @@ pub mod tcp_handlers {
                 .ok_or_else(|| HttpRequestError {
                     status_code: 400,
                     status_text: String::from("Bad Request"),
+                    ..Default::default()
                 })?
                 .try_into()
                 .unwrap();
 
-            let base_path = Config::get_server_root();
+            let base_path = Config::get_server_public();
 
             let request_target: PathBuf = match request_target {
                 p if p == "/" => base_path.join("pages/index.html"),
@@ -287,132 +482,158 @@ pub mod tcp_handlers {
         }
 
         fn detect_mime_type(&self) -> &str {
-            for (key, value) in self.headers.iter() {
-                if key == &"Content-Type" {
-                    return value;
+            match self.headers.get("Content-Type") {
+                Some(content_type) => return content_type,
+                None => {
+                    // If not found, look up for extension
+                    // and return MIME type based on that
+                    // We will use <request_target> field from HttpRequestRequestLine,
+                    // if there is no extension, we will assume `text/plain`
+                    // NOTE: It will fail if request_target does not have a extension,
+                    // but we will leave that be for now. We could try to recognize the extension
+                    // based on the bytes of the file, or just use the appropriate library.
+
+                    let requested_resource = &self.request_line.as_ref().unwrap().request_target;
+
+                    // If requested resource is root, return `text/html`
+                    if requested_resource.as_path() == Path::new("/") {
+                        return "text/html";
+                    }
+
+                    match requested_resource.extension() {
+                        Some(extension) => {
+                            // NOTE: That is controversial string conversion
+                            return match extension.to_str().unwrap() {
+                                "html" => "text/html",
+                                "css" => "text/css",
+                                "js" => "text/javascript",
+                                "json" => "application/json",
+                                "xml" => "application/xml",
+                                "png" => "image/png",
+                                "jpg" | "jpeg" => "image/jpeg",
+                                "gif" => "image/gif",
+                                "svg" => "image/svg+xml",
+                                "ico" => "image/x-icon",
+                                "webp" => "image/webp",
+                                "mp4" => "video/mp4",
+                                "webm" => "video/webm",
+                                "ogg" => "audio/ogg",
+                                "mp3" => "audio/mpeg",
+                                "wav" => "audio/wav",
+                                "flac" => "audio/flac",
+                                "pdf" => "application/pdf",
+                                "zip" => "application/zip",
+                                "tar" => "application/x-tar",
+                                "gz" => "application/gzip",
+                                "bz2" => "application/x-bzip2",
+                                "7z" => "application/x-7z-compressed",
+                                "rar" => "application/vnd.rar",
+                                "exe" => "application/x-msdownload",
+                                "msi" => "application/x-msi",
+                                "deb" => "application/vnd.debian.binary-package",
+                                "rpm" => "application/x-rpm",
+                                "apk" => "application/vnd.android.package-archive",
+                                "jar" => "application/java-archive",
+                                "war" => "application/java-archive",
+                                "ear" => "application/java-archive",
+                                "class" => "application/java-vm",
+                                "py" => "text/x-python",
+                                "rb" => "text/x-ruby",
+                                "php" => "text/x-php",
+                                "c" => "text/x-c",
+                                "cpp" => "text/x-c++",
+                                "h" => "text/x-c-header",
+                                "hpp" => "text/x-c++-header",
+                                "cs" => "text/x-csharp",
+                                "java" => "text/x-java",
+                                "kt" => "text/x-kotlin",
+                                "rs" => "text/x-rust",
+                                "go" => "text/x-go",
+                                // Return default `text/plain` if all of the above fails
+                                _ => "text/plain",
+                            };
+                        }
+                        None => return "text/plain",
+                    }
                 }
             }
 
-            // If for loop did not terminate, look up for extension
-            // and return MIME type based on that
-            // We will use <request_target> field from HttpRequestRequestLine,
-            // if there is no extension, we will assume `text/plain`
-            // NOTE: It will fail if request_target does not have a extension,
-            // but we will leave that be for now. We could try to recognize the extension
-            // based on the bytes of the file, or just use the appropriate library.
-
-            let requested_resource = &self.request_line.as_ref().unwrap().request_target;
-
-            // If requested resource is root, return `text/html`
-            if requested_resource.as_path() == Path::new("/") {
-                return "text/html";
-            }
-
-            match requested_resource.extension() {
-                Some(extension) => {
-                    // NOTE: That is controversial string conversion
-                    return match extension.to_str().unwrap() {
-                        "html" => "text/html",
-                        "css" => "text/css",
-                        "js" => "text/javascript",
-                        "json" => "application/json",
-                        "xml" => "application/xml",
-                        "png" => "image/png",
-                        "jpg" | "jpeg" => "image/jpeg",
-                        "gif" => "image/gif",
-                        "svg" => "image/svg+xml",
-                        "ico" => "image/x-icon",
-                        "webp" => "image/webp",
-                        "mp4" => "video/mp4",
-                        "webm" => "video/webm",
-                        "ogg" => "audio/ogg",
-                        "mp3" => "audio/mpeg",
-                        "wav" => "audio/wav",
-                        "flac" => "audio/flac",
-                        "pdf" => "application/pdf",
-                        "zip" => "application/zip",
-                        "tar" => "application/x-tar",
-                        "gz" => "application/gzip",
-                        "bz2" => "application/x-bzip2",
-                        "7z" => "application/x-7z-compressed",
-                        "rar" => "application/vnd.rar",
-                        "exe" => "application/x-msdownload",
-                        "msi" => "application/x-msi",
-                        "deb" => "application/vnd.debian.binary-package",
-                        "rpm" => "application/x-rpm",
-                        "apk" => "application/vnd.android.package-archive",
-                        "jar" => "application/java-archive",
-                        "war" => "application/java-archive",
-                        "ear" => "application/java-archive",
-                        "class" => "application/java-vm",
-                        "py" => "text/x-python",
-                        "rb" => "text/x-ruby",
-                        "php" => "text/x-php",
-                        "c" => "text/x-c",
-                        "cpp" => "text/x-c++",
-                        "h" => "text/x-c-header",
-                        "hpp" => "text/x-c++-header",
-                        "cs" => "text/x-csharp",
-                        "java" => "text/x-java",
-                        "kt" => "text/x-kotlin",
-                        "rs" => "text/x-rust",
-                        "go" => "text/x-go",
-                        // Return default `text/plain` if all of the above fails
-                        _ => "text/plain",
-                    };
-                }
-                None => return "text/plain",
-            }
+            // for (key, value) in self.headers.iter() {
+            //     if key == &"Content-Type" {
+            //         return value;
+            //     }
+            // }
         }
     }
 
     impl<'a> HttpRequest<'a> {
         // Creates new HttpRequest instance from TcpStream, reads the stream to UTF-8 String and parses the headers
-
         fn new(stream: &mut TcpStream) -> Result<Self, Box<dyn Error>> {
             // Parse the TCP stream
             let headers = read_tcp_stream(stream)?;
-            let parsed_headers = Some(Self::parse_headers(headers.clone())?);
+            let (parsed_headers, body) = Self::parse_headers(headers.clone())?;
 
             Ok(Self {
                 headers,
                 parsed_headers,
+                body,
             })
         }
 
-        fn parse_headers(headers: String) -> Result<HttpHeaders<'a>, Box<dyn Error>> {
-            //   Ignore the CRLF at both ends of headers
+        // Parses headers from the String, returns HttpHeaders and optional body that comes with request
+        // We know that `headers` is non empty stream read from TCPStream, UTF-8 encoded
+        fn parse_headers(
+            headers: String,
+        ) -> Result<(HttpHeaders<'a>, Option<String>), Box<dyn Error>> {
+            // Ignore the CRLF at both ends of headers
+
             let mut headers_iter = headers.trim().lines();
 
             let request_line: HttpRequestRequestLine = HttpRequestRequestLine::new(
                 headers_iter.next().expect("Request line not found").trim(),
             )?;
 
+            let method = request_line.method.clone();
+
             let mut parsed_headers = HttpRequest::new_headers(request_line);
+            let mut body: Option<String> = None;
 
-            // NOTE: If you want some advanced parsing
-            // 1. Header name and header value is separated by `:` character
-            // 2. Value separated by "," could contain additional delimiters like `;` -> (this signal that value after that is delimited by ";" and contains key=value pair, like q=0.9) or `=`
-            //  2.2 If the value contains `,` character it should be collected to a Vector
-            //  2.3. If the value contains `=` character it should be split into key-value pair
-            //  2.4. (Unsupported) Values could also be wrapped in parentheses, and follow recursive parsing rules,
-            //      meaning all of the above rules apply to the value inside the parentheses, they create a separate group of value parsing.
+            for header in &mut headers_iter {
+                // NOTE: I assume that empty header is not possible and the only indication of empty
+                // string is a CRLF between headers and body
 
-            for header in headers_iter {
+                // Consume rest of the iterator treating is as the body of the request
+                if (header == "" || header == "\r\n")
+                    && (method == HttpRequestMethod::POST
+                        || method == HttpRequestMethod::UPDATE
+                        || method == HttpRequestMethod::PUT)
+                {
+                    let rest = headers_iter.collect::<String>();
+                    if rest.trim() != "" {
+                        body = Some(rest);
+                    } else {
+                        // POST, PUT, UPDATE request with empty body
+                    }
+
+                    break;
+                }
+
                 let entry = header.split(": ").collect::<Vec<_>>();
 
                 let (key, value) = entry
                     .get(0..2)
                     .map(|entry| (entry[0].to_string(), entry[1].to_string()))
+                    // Termination there
                     .ok_or_else(|| HttpRequestError {
                         status_code: 400,
                         status_text: String::from("Bad Request"),
+                        ..Default::default()
                     })?;
 
                 parsed_headers.add(Cow::from(key), Cow::from(value));
             }
 
-            Ok(parsed_headers)
+            return Ok((parsed_headers, body));
         }
 
         fn new_headers(request_line: HttpRequestRequestLine) -> HttpHeaders<'a> {
@@ -423,23 +644,52 @@ pub mod tcp_handlers {
             }
         }
 
-        /// Takes Response `HttpHeaders` and write `Content-Type` and `Content-Length` headers, returning the requested resource as a String
-        fn read_requested_resource(
-            &'a mut self,
-            // request: &'a HttpHeaders<'a>,
-            response_headers: &mut HttpHeaders<'a>,
-        ) -> Result<String, Box<dyn Error>> {
-            let resource_path = &self
+        // Make a getter
+        fn get_method(&self) -> &HttpRequestMethod {
+            &self.parsed_headers.request_line.as_ref().unwrap().method
+        }
+
+        /// Returns absolute path to the requested resource
+        fn get_resource_path(&self) -> &PathBuf {
+            &self
                 .parsed_headers
-                .as_ref()
-                .unwrap()
                 .request_line
                 .as_ref()
                 .unwrap()
-                .request_target;
+                .request_target
+        }
+
+        /// Returns relative path to the requested resource
+        ///
+        /// Equivalent to http path that was given in the request
+        fn get_resource_path_relative(&self) -> &Path {
+            self.get_resource_path()
+                // .canonicalize()
+                .strip_prefix(Config::get_server_public())
+                .unwrap()
+        }
+
+        /// Takes Response `HttpHeaders` and write `Content-Type` and `Content-Length` headers, returning the requested resource as a String
+        /// Walks `/public` directory looking for path
+        fn read_requested_resource(
+            &'a self,
+            // request: &'a HttpHeaders<'a>,
+            response_headers: &mut HttpHeaders<'a>,
+        ) -> Result<String, Box<dyn Error>> {
+            let resource_path = self.get_resource_path();
 
             if let Ok(path) = resource_path.canonicalize() {
-                println!("Requesting: {:?}", path);
+                let base = Config::get_server_root();
+
+                let requested_path = match path.strip_prefix(&base) {
+                    Ok(stripped) => stripped,
+                    Err(_) => {
+                        eprintln!("Base path is not a prefix of the requested path");
+                        path.as_path()
+                    }
+                };
+
+                println!("Requesting: {:?}", requested_path);
 
                 // Read the file
                 let requested_resource = fs::read_to_string(path)?;
@@ -451,7 +701,7 @@ pub mod tcp_handlers {
 
                 response_headers.add(
                     Cow::from("Content-Type"),
-                    Cow::from(self.parsed_headers.as_ref().unwrap().detect_mime_type()),
+                    Cow::from(self.parsed_headers.detect_mime_type()),
                 );
 
                 return Ok(requested_resource);
@@ -459,7 +709,7 @@ pub mod tcp_handlers {
                 // If path does not exists on the server, return 404
                 // NOTE: We could return silent error messages instead of panicking the server
 
-                println!(
+                eprintln!(
                     "Path not found: Requesting: {:?} Canonicalized: {:?}",
                     resource_path,
                     resource_path.canonicalize()
@@ -468,6 +718,7 @@ pub mod tcp_handlers {
                 return Err(HttpRequestError {
                     status_code: 404,
                     status_text: String::from("Not Found"),
+                    ..Default::default()
                 })?;
             }
         }
@@ -475,31 +726,100 @@ pub mod tcp_handlers {
 
     #[derive(Debug)]
     struct HttpResponse<'a> {
-        body: Option<String>, // This could be &[u8] bytes Or just `Bytes` struct, because that is at the lower level and actually every resource in TCP is stream as chunks of u8 bytes.
+        body: Option<String>, // This could be [u8] bytes Or just `Bytes` struct, because that is at the lower level and actually every resource in TCP is stream as chunks of u8 bytes.
         headers: HttpHeaders<'a>,
         serialized: Option<Vec<u8>>,
     }
 
     impl<'a> HttpResponse<'a> {
-        fn new(headers: HttpHeaders<'a>, body: String) -> Self {
-            Self {
-                body: Some(body),
-                headers,
+        /// Initializes HttpResponse and adds appropriate headers based on request_headers
+        ///
+        /// If request_headers are None, it means responding with some kind of critical error, regardless of the request
+
+        // NOTE: I find it very stupid that writing headers is somehow automated
+        // so we will opt out of that idea.
+        fn new(
+            response_headers: HttpHeaders<'a>,
+            body: Option<String>,
+        ) -> Result<Self, Box<dyn Error>> {
+            // if let Some(request) = request {
+            //     if let Some(start_line) = response_headers.start_line.as_ref() {
+            //         match start_line.status_code {
+            //             308 => {
+            // response_headers.add(Cow::from("Content-Length"), Cow::from("0"));
+            //             }
+            //             _ => (),
+            //         };
+            //     }
+
+            // match request.parsed_headers.request_line.as_ref().unwrap().
+
+            //     request
+            //         .parsed_headers
+            //         .headers
+            //         .iter()
+            //         .for_each(|(key, value)| {
+            //             match key.as_ref() {
+            //                 "Connection" => {
+            //                     response_headers.add(Cow::from("Connection"), value.clone())
+            //                 }
+            //                 // "Origin" => {
+            //                 //     // NOTE: That could be useless
+            //                 //     let origin_url =
+            //                 //         url::Url::parse(value).expect("Invalid origin header");
+
+            //                 //     if let Some(url) = &mut url {
+            //                 //         if let Some(host) = origin_url.host_str() {
+            //                 //             // Normalize loopback address
+            //                 //             if host == "127.0.0.1" || host == "localhost" {
+            //                 //                 url.set_host(Some(host))
+            //                 //                     .expect("Invalid hostname for url");
+            //                 //             }
+            //                 //         }
+
+            //                 //         response_headers.add(
+            //                 //             Cow::from("Access-Control-Allow-Origin"),
+            //                 //             url.to_string().into(),
+            //                 //         )
+            //                 //     }
+            //                 // }
+            //                 _ => (),
+            //             }
+            //             // Know you can implement every single response header based on the request headers
+            //             // The problem is that you have to know what to do with every header
+            //             // Responding to the request headers is not a straightforward task
+            //             // because every path and every method should be handled differently
+            //         });
+            // }
+
+            Ok(Self {
+                body,
+                headers: response_headers,
                 serialized: None,
-            }
+            })
         }
 
         /// Initializes HttpHeaders with start line, providing default value for headers field with `HashMap::<&str, Cow<str>>::new()`
-        fn new_headers(start_line: HttpResponseStartLine<'a>) -> HttpHeaders<'a> {
+        /// Start line is initialized with `HTTP/1.1 200 OK` status code and status text,
+        /// any errors and changes to start line COULD be done after initialization on the mutable reference to the headers
+        /// or by providing custom start line as an argument to the function.
+        fn new_headers(start_line: Option<HttpResponseStartLine<'a>>) -> HttpHeaders<'a> {
             HttpHeaders {
                 headers: HashMap::<Cow<str>, Cow<str>>::new(),
-                start_line: Some(start_line),
+                start_line: match start_line {
+                    Some(start_line) => Some(start_line),
+                    None => Some(HttpResponseStartLine {
+                        protocol: HttpProtocol::HTTP1_1,
+                        status_code: 200,
+                        status_text: Some("OK"),
+                    }),
+                },
                 request_line: None,
             }
         }
 
         /// Parses headers field  from HashMap<String, String> and body to Vec<u8> bytes vector and saves it in parsed_headers field
-        fn parse_headers(&mut self) -> Option<&Vec<u8>> {
+        fn parse_http_message(&mut self) -> Option<&Vec<u8>> {
             // In theory, data returned from this function is a REFERENCE to headers field
             // so we should be able to return a reference to underlining data instead of owning it explicitly
             // We should probably allocate some static buffer of size self.headers.len() + self.body.len() + 1024
@@ -537,31 +857,44 @@ pub mod tcp_handlers {
             buffer.extend("\r\n".as_bytes());
 
             // body formatting
-            buffer.extend(self.body.as_ref().unwrap().as_bytes());
-
+            if let Some(body) = &self.body {
+                buffer.extend(body.as_bytes());
+            }
             // NOTE: Generally speaking saving parsed_headers is useless after we sent the response
             self.serialized = Some(buffer);
 
             self.serialized.as_ref()
         }
+
+        fn write(&mut self, stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
+            // We could invoke the headers writing match statement here
+
+            log_tcp_stream(format!("--- Response ---\n{:#?}\r\n", self.headers))?;
+
+            stream.write_all(self.parse_http_message().unwrap())?;
+            stream.flush()?;
+
+            stream.shutdown(net::Shutdown::Write)?;
+            Ok(())
+        }
     }
 
     pub fn connect(config: &Config) -> Result<TcpListener, Box<dyn Error>> {
-        return TcpListener::bind(config.host).map_err(|e| e.into());
+        return TcpListener::bind(config.socket_address).map_err(|e| e.into());
     }
 
     /// NOTE: Can log anything that implements `std::fmt::Display`
     ///
     /// Logs request or response that come from the client or response from the server to ./log.txt
     fn log_tcp_stream<T: Display>(stream: T) -> Result<(), Box<dyn Error>> {
-        let file_log_path = Path::new("log.txt");
+        let file_log_path = Path::new("logs/log.txt");
         let mut file_log = OpenOptions::new()
             .append(true)
             .truncate(false)
             .open(file_log_path)?;
 
-        file_log.write_all(stream.to_string().as_bytes())?;
-        file_log.write_all("\r\n".as_bytes())?;
+        file_log.write_all(stream.to_string().trim().as_bytes())?;
+        file_log.write_all("\r\n\r\n".as_bytes())?;
         file_log.flush()?;
 
         Ok(())
@@ -569,66 +902,101 @@ pub mod tcp_handlers {
 
     /// Sends error response to the client, based on the error that occurred during request handling
     /// downcasting to the specific error type from `Box<dyn Error>` and handling it accordingly
+    ///
+    /// If stream is None,
+    /// If err is None, send default 500 Internal Server Error response
     fn send_error_response(
         stream: &mut TcpStream,
         // http_err: Option<&HttpRequestError>,
-        err: Option<Box<dyn Error>>,
+        mut err: Option<Box<dyn Error>>,
     ) -> Result<(), Box<dyn Error>> {
         let pages_path = std::path::Path::new("public/pages/");
-        let html_file_data = std::fs::read_to_string(pages_path.join("error.html"))?;
 
-        match err {
-            Some(err) => {
-                if let Some(http_err) = err.downcast_ref::<HttpRequestError>() {
-                    let start_line = HttpResponseStartLine {
-                        protocol: HttpProtocol::HTTP1_1,
-                        status_code: http_err.status_code,
-                        status_text: Some(&http_err.status_text),
-                    };
-
-                    let mut response_headers = HttpResponse::new_headers(start_line);
-
-                    response_headers.add(Cow::from("Content-Type"), Cow::from("text/html"));
-                    response_headers.add(
-                        Cow::from("Content-Length"),
-                        Cow::from(html_file_data.len().to_string()),
-                    );
-
-                    let mut response = HttpResponse::new(response_headers, html_file_data);
-                    stream.write_all(response.parse_headers().unwrap().as_ref())?;
-                    stream.flush()?;
-                }
-                // NOTE: This is how you can handle different errors by downcasting to the specific error type
-                // else if let Some(io_err) = err.downcast_ref::<std::io::Error>() {}
-                else {
-                    // You could propagate anything to the client there, for example for dev purposes:
-                    // NOTE: It propagates full error message to the client
-                    eprintln!("Error handling request: {:#?}", err);
-
-                    let start_line = HttpResponseStartLine {
-                        protocol: HttpProtocol::HTTP1_1,
-                        status_code: 500,
-                        status_text: Some("Internal Server Error"),
-                    };
-                    let mut headers = HttpResponse::new_headers(start_line);
-
-                    headers.add(Cow::from("Content-Type"), Cow::from("text/plain"));
-                    let body = format!("Error handling request:\n{:#?}", err);
-                    headers.add(
-                        Cow::from("Content-Length"),
-                        Cow::from(body.len().to_string()),
-                    );
-
-                    let mut response = HttpResponse::new(headers, body);
-
-                    stream.write_all(response.parse_headers().unwrap().as_ref())?;
-                    stream.flush()?;
-                }
-            }
-            None => panic!("Error handling request: {:#?}", err),
+        // If err is None, send default 500 Internal Server Error response
+        if err.is_none() {
+            err = Some(Box::new(HttpRequestError::default()))
         }
 
-        stream.shutdown(net::Shutdown::Write)?;
+        if let Some(err) = err {
+            let mut log_file = OpenOptions::new().append(true).open("logs/log.txt")?;
+            log_file.write_all(format!("{err:?}\r\n").as_bytes())?;
+
+            if let Some(http_err) = err.downcast_ref::<HttpRequestError>() {
+                // This branch is also called when `err` is not suppliedS
+
+                // JAMMING: If you want to send error response as a page to the client it could be done
+                // JAMMING: if it is requested from an entity that can interpret the HTML
+                // JAMMING: For example, given POST request, you COULD NOT response with an HTML page
+                // JAMMING: that would be shown in the browser, client would receive the HTML page, but could not interpret it
+                // JAMMING: In this instance we need to create custom TcpStream instead writing to the existing one
+                // JAMMING: We should also respond to the client with some information about moved request or redirection
+
+                let mut response_headers = HttpResponse::new_headers(
+                    HttpResponseStartLine::new(
+                        HttpProtocol::HTTP1_1,
+                        http_err.status_code,
+                        &http_err.status_text,
+                    )
+                    .into(),
+                );
+
+                // Setting default content-type as text/html
+                response_headers.add(
+                    Cow::from("Content-Type"),
+                    Cow::from(
+                        http_err
+                            .content_type
+                            .clone()
+                            .unwrap_or(String::from("text/html")),
+                    ),
+                );
+
+                let body = match &http_err.content_type {
+                    Some(content_type) if content_type == "application/json" => {
+                        serde_json::to_string(http_err)?
+                    }
+                    Some(content_type) if content_type == "text/plain" => {
+                        format!("{:#?}", http_err)
+                    }
+                    // NOTE: matching different content-types
+                    // Some(content_type) if content_type == "application/x-www-form-urlencoded"
+                    _ => std::fs::read_to_string(pages_path.join("error.html"))?,
+                };
+
+                response_headers.add(
+                    Cow::from("Content-Length"),
+                    Cow::from(body.len().to_string()),
+                );
+
+                let mut response = HttpResponse::new(response_headers, Some(body))?;
+                return response.write(stream);
+            } else {
+                // Sending text/plain as the error message if the error is not of the HttpRequestError type
+                eprintln!("Error handling request: {:#?}", err);
+
+                let mut headers = HttpResponse::new_headers(
+                    HttpResponseStartLine::new(HttpProtocol::HTTP1_1, 500, "Internal Server Error")
+                        .into(),
+                );
+
+                headers.add(Cow::from("Content-Type"), Cow::from("text/plain"));
+
+                let body = format!("Error handling request:\n{:#?}", err);
+
+                headers.add(
+                    Cow::from("Content-Length"),
+                    Cow::from(body.len().to_string()),
+                );
+
+                let mut response = HttpResponse::new(headers, Some(body))?;
+
+                return response.write(stream);
+            }
+            // NOTE: This is how you can handle different errors by downcasting to the specific error type
+            // else if let Some(io_err) = err.downcast_ref::<std::io::Error>() {}
+        } // You could propagate anything to the client there, for example for dev purposes:
+          // NOTE: It propagates full error message to the client
+
         Ok(())
     }
 
@@ -643,20 +1011,23 @@ pub mod tcp_handlers {
 
         // TODO: Make the logging file initialization somewhere else,
         // Obscure logging, make the file when
-        let tcp_file_log_path = Path::new("log.txt");
+        let tcp_file_log_path = Path::new("logs/log.txt");
         OpenOptions::new()
             .write(true)
             .truncate(true)
             .open(tcp_file_log_path)?;
 
         for stream in listener.incoming() {
-            println!("Incoming request: {:?}", stream);
-
             match stream {
-                Ok(mut stream) => match self::handle_client(&mut stream) {
-                    Ok(_) => println!("Request handled successfully"),
-                    Err(err) => send_error_response(&mut stream, Some(err))?,
-                },
+                Ok(mut stream) => {
+                    if let Err(err) = self::handle_client(&mut stream, &config) {
+                        eprintln!("Error handling request: {:#?}", err);
+                        send_error_response(&mut stream, Some(err))?;
+                    } else {
+                        // Request termination
+                        // println!("Request handled successfully")
+                    }
+                }
                 Err(err) => eprintln!("Invalid TCP client stream: {}", err),
             }
         }
@@ -670,12 +1041,21 @@ pub mod tcp_handlers {
         // and the buffer has to be statically allocated because somehow dynamic memory allocation
         // fails us, nothing new.
 
+        // NOTE: That buffer may overflow
         let mut buffer = [0u8; 1024];
         let bytes_read = stream.read(&mut buffer)?;
         stream.flush()?;
 
         if bytes_read == 0 {
             return Err("No bytes read from the stream".into());
+        }
+
+        if buffer
+            .iter()
+            .fold(0, |acc, &ele| if ele != 0 { acc + 1 as i32 } else { acc })
+            >= 1024
+        {
+            println!("NOTE: !!! Buffer could be overflown !!!");
         }
 
         let message_decoded = String::from_utf8_lossy(&buffer[0..bytes_read]).to_string();
@@ -685,30 +1065,186 @@ pub mod tcp_handlers {
         return Ok(message_decoded);
     }
 
-    /// Handles incoming request from the client.
-    fn handle_client(stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
-        let mut request: HttpRequest<'_> = HttpRequest::new(stream)?;
+    /// This function is not meant to work as a redirection to specified URL
+    /// Instead we will configure paths that should be redirected
+    ///
+    /// Configuration is derived from `config/config.json`
+    ///
+    /// Return bool indicating if the request was redirected
+    fn redirect_request<'a>(
+        request: &'a HttpRequest<'a>,
+        stream: &mut TcpStream,
+        config: &'a Config,
+    ) -> Result<bool, Box<dyn Error>> {
+        // if Host is http://127.0.0.1:5000 then redirect the request to http://localhost:5000
+        // QUESTION: Should request be supplied?
+        // No if we're redirecting based on config file, that is useless
+        // Doing it based on request in runtime would be basically hardcoding the paths
 
-        // TODO: This should also be dynamic
-        let response_start_line = HttpResponseStartLine {
-            protocol: HttpProtocol::HTTP1_1,
-            status_code: 200,
-            status_text: Some("OK"),
+        // We need to make new request, that would require to instantiate new TCPStream
+        // write appropriate headers, also take note that what we are doing is server side navigation
+        // We could think about taking information about incoming request actually based on the request supplied
+        // Because think about it, request to 127.0.0.1:<port> comes in, it could be GET or POST or whatever,
+        // and we have to make sure that no request and no method will reach that path because it is corrupted,
+        // So yeah it would be useful if we could just make the browser write the request
+        // but we can't cause we are on the SERVER!. Given that we actually need to rewrite that request,
+        // take the headers that was sent to the server and rewrite them to the new request, that is the only way
+
+        // Does not make sens because the request is already sent so changing its headers is useless
+        // We need to create new request with new Host header and respond to the previous one with 301 Moved Permanently
+
+        // Something to think about
+        // Note: In the Fetch Standard, when a user agent receives a 301 in response to a POST request,
+        // it uses the GET method in the subsequent redirection request, as permitted by the HTTP specification.
+        // To avoid user agents modifying the request, use 308 Permanent Redirect instead,
+        // as altering the method after a 308 response is prohibited.
+
+        for (key, value) in request.parsed_headers.headers.iter() {
+            match key.as_ref() {
+                "Host" => {
+                    if let Some(redirect) = &config.config_file.redirect {
+                        // Redirection to domains
+                        if let Some(domains) = &redirect.domains {
+                            for domain in domains {
+                                // We need to match incoming request to domain.from to redirect it to domain.to
+                                if value.to_string() == domain.from {
+                                    // Write 301 Moved Permanently || 308 Permanent Redirect to the stream, supply the Location header
+                                    // We will use 308
+
+                                    let mut response_headers = HttpResponse::new_headers(
+                                        HttpResponseStartLine::new(
+                                            HttpProtocol::HTTP1_1,
+                                            308,
+                                            "Permanent Redirect",
+                                        )
+                                        .into(),
+                                    );
+
+                                    // Redirecting to Location we should remember that
+                                    // when we do POST request to some URL with a path
+                                    // like database/data.json we should set the location header
+                                    // not only to the domain but also suffix it with the incoming path
+                                    // for request to be valid and correctly redirected
+
+                                    // NOTE: What if domain is invalid and the path is invalid
+                                    // then we would have to redirect both.
+
+                                    // NOTE: Macro for writing headers would be great
+                                    let mut location =
+                                        config.config_file.domain_to_url(&domain.to)?;
+
+                                    location.set_path(
+                                        request.get_resource_path_relative().to_str().unwrap(),
+                                    );
+
+                                    response_headers
+                                        .add("Location".into(), location.to_string().into());
+
+                                    response_headers
+                                        .add(Cow::from("Content-Length"), Cow::from("0"));
+
+                                    let mut response: HttpResponse<'_> =
+                                        HttpResponse::new(response_headers, None)?;
+
+                                    response.write(stream)?;
+                                    return Ok(true);
+                                }
+                            }
+                        }
+                    }
+                }
+                // To redirect based on paths you need to match appropriate header, maybe Referer, than we will parse to url::Url
+                // and try to match the path to the one in the config file
+                _ => (),
+            }
+        }
+        // println!("{request:?}");
+        Ok(false)
+    }
+
+    /// Handles incoming request from the client.
+    fn handle_client(stream: &mut TcpStream, config: &Config) -> Result<(), Box<dyn Error>> {
+        let request: HttpRequest<'_> = HttpRequest::new(stream)?;
+        let mut response_headers: HttpHeaders<'_> = HttpResponse::new_headers(None);
+
+        // This will be executed for every request and try to match paths that should be redirected
+        // although the only redirection that we are doing is from http://127.0.0.1:<port> to http://localhost:<port>
+        // paths are defined in the config file under 'domain' field, for domains and path redirect in the "paths" field
+
+        // Give back the reference supplied to the function
+        if redirect_request(&request, stream, config)? {
+            return Ok(());
         };
 
-        let mut response_headers = HttpResponse::new_headers(response_start_line);
-        let requested_resource = request.read_requested_resource(&mut response_headers)?;
+        // --- How to handle POST requests ---
+        let request_method = request.get_method();
 
-        // Attach headers
-        response_headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
+        let response_body = match request_method {
+            HttpRequestMethod::GET => Some(request.read_requested_resource(&mut response_headers)?),
+            HttpRequestMethod::POST => {
+                // This would return Path not found if the path does not exists
+                // If we would want to make custom endpoints without actual path existence
+                // then it should be rewritten
 
-        log_tcp_stream(format!("--- Response ---\n{:#?}\n", response_headers))?;
-        let mut response = HttpResponse::new(response_headers, requested_resource);
+                let resource = request.get_resource_path().canonicalize()?;
+                let path = resource.strip_prefix(Config::get_server_public())?;
 
-        stream.write_all(response.parse_headers().unwrap())?;
-        stream.flush()?;
+                println!("Response body POST path: {path:?}");
 
-        stream.shutdown(net::Shutdown::Write)?;
+                match path {
+                    p if p == Path::new("database/data.json") => {
+                        // Default already created, we are not changing anything else besides status code
+                        // response_headers.start_line.as_mut().unwrap().status_code = 201;
+
+                        let mut database =
+                            OpenOptions::new().write(true).read(true).open(resource)?;
+                        let mut buffer = Vec::<u8>::new();
+
+                        database.read_to_end(&mut buffer)?;
+
+                        let error = HttpRequestError {
+                            content_type: Some(String::from("application/json")),
+                            message: Some(String::from("Internal Server Error")),
+                            ..Default::default()
+                        };
+
+                        println!("Post body: {:?}", request.body);
+                        let body = request.body.as_ref().ok_or(error.clone())?;
+
+                        // At this point we could throw error to client
+                        let entry = serde_json::from_str::<DatabaseEntry>(body)?;
+
+                        // Also there
+                        let mut serialized = serde_json::from_slice::<Vec<DatabaseEntry>>(&buffer)?;
+
+                        serialized.push(entry);
+
+                        database.seek(std::io::SeekFrom::Start(0))?;
+                        database.set_len(0)?;
+
+                        database.write_all(serde_json::to_vec(&serialized)?.as_slice())?;
+                        database.flush()?;
+
+                        Some(String::from("Ok"))
+                    }
+                    _ => {
+                        return Err(HttpRequestError {
+                            status_code: 404,
+                            status_text: String::from("Not Found"),
+                            message: String::from("Path does not exists on the server or the method used is unsupported for that path").into(),
+                            content_type: "text/plain".to_string().into()
+                        })?;
+                    }
+                }
+            }
+            HttpRequestMethod::DELETE => todo!(),
+            HttpRequestMethod::UPDATE => todo!(),
+            HttpRequestMethod::PUT => todo!(),
+        };
+
+        let mut response: HttpResponse<'_> = HttpResponse::new(response_headers, response_body)?;
+
+        response.write(stream)?;
         Ok(())
     }
 }

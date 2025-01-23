@@ -1,0 +1,11 @@
+{
+  "protocol": "HTTP",
+  "redirect": {
+    "domains": [
+      {
+        "from": "127.0.0.1",
+        "to": "localhost"
+      }
+    ]
+  }
+}

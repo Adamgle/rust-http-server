@@ -21,18 +21,18 @@ Steps:
 
 !!! TODOS !!!
 1. Consider using making Config struct to accept options for running the server. <CHECK>
-2. Figure out why this is so unstable, sometimes request is handled properly and web page is shown, sometimes it sends "This site can't be reached".
+2. Figure out why this is so unstable, sometimes request is handled properly and web page is shown, sometimes it sends "This site can't be reached". <CHECK>
     -> The problem laid in the issue with client requests reading to the dynamic data structure, It was something related to the EOF reaching by functions 
     -> that operate on dynamically allocated data structures like read_vectorized or read_to_string which was impossible to reach somehow, 
     -> maybe EOF is not even present in the stream, I don't know, but somehow It made it hang while receiving the request and made a response when request was dropped
     -> or after 4 minutes which is time in which TCP connection requests get aborted. not sure about this timeout because untests but I've read that on stackoverflow 
-    -> https://stackoverflow.com/questions/30552187/reading-from-a-tcpstream-with-readread-to-string-hangs-until-the-connection-is <CHECK>
-3. Figure out how to send different responses, not just statically hard coded responses.
+    -> https://stackoverflow.com/questions/30552187/reading-from-a-tcpstream-with-readread-to-string-hangs-until-the-connection-is 
+3. Figure out how to send different responses, not just statically hard coded responses. <CHECK>
     -> This is kinda silly because sending different responses is just what http does on different request, you just have to implement the 
     -> functionality of sending variate amounts of data based on user input.
     -> It always will be "hard coded" because what we are doing is using native HTTP protocol and sending the resources over TCP to HTTP protocol to interpret
     -> the data that we are sending. ACTUALLY the information about how to send the resource lays in the headers, 
-    -> you need to parse the headers and do stuff that specific headers is bound to do. <CHECK>
+    -> you need to parse the headers and do stuff that specific headers is bound to do.
 4. Routing can be done by reading the path from Referer field: Referer: http://192.168.0.140:5000/<route>, this is from stream that come with an http request.
     --- Regarding that
         - Parse the path from the Referer header to travel the directory with the pages to read the actual pages and send them over TCP
@@ -56,7 +56,24 @@ Steps:
 6. Implement a function that returns a response with error message, It could be done mostly statically and using the information in HttpRequestError <CHECK>
 7. Think about how to propagate full error messages to the client JUST FOR FUN <CHECK>
 8. Think about validating headers that comes with a request
-9. Errors yield by client are not handled on the server, like `PUT http://127.0.0.1:5000/ 501 (Not Implemented)`
+9. Errors yield by client are not handled on the server, like `PUT http://127.0.0.1:5000/ 501 (Not Implemented)` <CHECK>
+10. Rewrite request to http://localhost:<port> if http://127.0.0.1/:<port> is supplied <CHECK>
+11. Write macro for header creation
+
+ISSUES
+1. Sometimes request is stuck when changing domains from localhost to 127.0.0.1, even thought request is redirected
+    -> there is an pending state on the server of that request and after long enough time it throw "No bytes read from the stream"
+    -> It could be caused by incorrect redirection handling from that domain, although when you first start the server
+    -> it works fine.
+2. Redirection seem not to work as expected, if request is originated from the browser it works fine, but if you make a request for example 
+    -> from python then redirection is just not happening and responds with 200, meaning you can reach the website with invalid domain
+3. There is a critical unexplained error, when you make a request to the 127.0.0.1 domain it gets correctly redirected, but the second time it throws
+    -> 500 Internal Server Error. It seem like the body of the request is not being sent properly but I am not sure about that.
+
+IDEAS
+1. It would be nice to have a command on the server that could show incoming request, as they get queued,
+    -> or abort them early, just for debugging purposes.
+
 
 ON THE AGENDA: 
 1. Multithreading is on the agenda which will enable us to handle multiple requests simultaneously but far away and we do not bother just know

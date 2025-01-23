@@ -1,5 +1,5 @@
+use rust_http_server::config::Config;
 use rust_http_server::tcp_handlers::run_tcp_server;
-use rust_http_server::Config;
 use std::{env, error::Error};
 
 fn main() -> Result<(), Box<dyn Error>> {
