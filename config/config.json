@@ -1,4 +1,5 @@
 {
+  "index_path": "pages/index.html",
   "protocol": "HTTP",
   "redirect": {
     "domains": [

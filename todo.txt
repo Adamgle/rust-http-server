@@ -59,16 +59,33 @@ Steps:
 9. Errors yield by client are not handled on the server, like `PUT http://127.0.0.1:5000/ 501 (Not Implemented)` <CHECK>
 10. Rewrite request to http://localhost:<port> if http://127.0.0.1/:<port> is supplied <CHECK>
 11. Write macro for header creation
+12. Default config file while starting the server
 
 ISSUES
 1. Sometimes request is stuck when changing domains from localhost to 127.0.0.1, even thought request is redirected
-    -> there is an pending state on the server of that request and after long enough time it throw "No bytes read from the stream"
+    -> there is an pending state on the server of that request and after long enough time it throw "No bytes read from the stream" <RESOLVED>
     -> It could be caused by incorrect redirection handling from that domain, although when you first start the server
     -> it works fine.
+        => Update it seem to work fine in browser, but when using headless client which does not firstly initiate GET to the root, 
+        => instead making POST request, it freezes
 2. Redirection seem not to work as expected, if request is originated from the browser it works fine, but if you make a request for example 
     -> from python then redirection is just not happening and responds with 200, meaning you can reach the website with invalid domain
 3. There is a critical unexplained error, when you make a request to the 127.0.0.1 domain it gets correctly redirected, but the second time it throws
     -> 500 Internal Server Error. It seem like the body of the request is not being sent properly but I am not sure about that.
+    -> PROCESS:
+        -> We will improve error handling to investigate the issue 
+        -> There is an issue while checking the existence of the path on the server or more precisely existence of the HTTP path,
+        -> current implementation checks for the existence of the path based on the file system, but if we will implement some kind of API endpoints
+        -> that could be valid in terms of our future API implementation but not in terms of the methods that are used to retrieve, normalize,
+        -> return absolute or relative path to that resource
+4. There is a buffer overflow if big enough payload is send in read_tcp_stream
+    -> This is partially solved by implementing BufReader and I guess it is more performant as it avoids multiple sys calls to read the stream
+    -> but even thought buffer seem still to does not fit all of the payload, 8192 bytes is size seem to be maximum that I can send.
+5. HttpResponse::write is fucked up, http://localhost:5000 throws panic
+6. Redirection does not work as expected, it redirect from http://127.0.0.1:5000 to http::/localhost:5000/pages/index.html but should redirect to the root 
+    -> The location should change relatively
+7. Requesting alternated domains, despite the redirection, freezes next request that uses the other domain
+    ===> Race conditions should be investigated for all above issues, specifically how TCPStream is handled
 
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,
