@@ -1,7 +1,7 @@
 mod http;
 mod http_request;
 mod http_response;
-mod logger;
+pub mod logger;
 
 use std::error::Error;
 use std::net::{TcpListener, TcpStream};
@@ -22,6 +22,8 @@ pub mod config {
     use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
     use std::path::PathBuf;
 
+    use crate::logger::Logger;
+
     #[derive(Debug)]
     pub struct Config {
         pub server_root: PathBuf,
@@ -30,7 +32,7 @@ pub mod config {
         pub http_host: url::Url,
         // NOTE: It's not optional because in the near future we will create the file with default when the server starts
         pub config_file: config_file::ServerConfigFile,
-        // pub logger: Logger,
+        pub logger: Logger,
     }
 
     // TODO: Config file should be generate when server is first started with some crap that is default and required
@@ -114,8 +116,8 @@ pub mod config {
                             // Port number in http URL is right after the domain name
                             // so we could check for the presence of  `:` to check if port is supplied
 
-                            domain.from = ServerConfigFile::suffix_domain_with_port(&domain.to);
-                            domain.to = ServerConfigFile::suffix_domain_with_port(&domain.from);
+                            domain.from = ServerConfigFile::suffix_domain_with_port(&domain.from);
+                            domain.to = ServerConfigFile::suffix_domain_with_port(&domain.to);
                         }
                     }
                 }
@@ -127,9 +129,9 @@ pub mod config {
                 // Check if domain is supplied with port number
                 if domain.contains(":") {
                     // If not supplied, suffix with the SERVER_PORT
-                    format!("{}:{}", domain, Config::get_server_port())
-                } else {
                     domain.to_string()
+                } else {
+                    format!("{}:{}", domain, Config::get_server_port())
                 }
             }
             pub fn domain_to_url(&self, domain: &str) -> Result<url::Url, url::ParseError> {
@@ -145,6 +147,7 @@ pub mod config {
             server_root: PathBuf,
             http_host: url::Url,
             config_file: config_file::ServerConfigFile,
+            logger: Logger,
         ) -> Self {
             Config {
                 socket_address,
@@ -152,6 +155,7 @@ pub mod config {
                 server_root,
                 http_host,
                 config_file,
+                logger,
             }
         }
 
@@ -186,6 +190,7 @@ pub mod config {
             };
 
             // Initialize the log file, open for appending
+            let logger = Logger::new()?;
 
             // In all the above did not throw and error, we will set the environment variables
             // Set the SERVER_ROOT, SERVER_PUBLIC, SERVER_PORT environment variables
@@ -201,6 +206,7 @@ pub mod config {
                 // This will normalize localhost and 127.0.0.1 in URL
                 url::Url::parse(&format!("http://{}", socket_address))?,
                 config_file::ServerConfigFile::get_config()?,
+                logger,
             ))
         }
 
@@ -255,12 +261,12 @@ pub mod tcp_handlers {
     use http_response::HttpResponse;
     use std::borrow::Cow;
     use std::fs::OpenOptions;
-    use std::io::{self, BufRead, Read, Seek, Write};
+    use std::io::{Read, Seek, Write};
     use std::path::Path;
 
     use crate::*;
 
-    pub fn connect(config: &Config) -> Result<TcpListener, Box<dyn Error>> {
+    pub fn connect(config: &mut Config) -> Result<TcpListener, Box<dyn Error>> {
         return TcpListener::bind(config.socket_address).map_err(|e| e.into());
     }
 
@@ -274,7 +280,7 @@ pub mod tcp_handlers {
     /// If stream is None,
     /// If err is None, send default 500 Internal Server Error response
     fn send_error_response(
-        config: &Config,
+        config: &mut Config,
         stream: &mut TcpStream,
         // http_err: Option<&HttpRequestError>,
         mut err: Option<Box<dyn Error>>,
@@ -287,9 +293,6 @@ pub mod tcp_handlers {
         }
 
         if let Some(err) = err {
-            let mut log_file = OpenOptions::new().append(true).open("logs/log.txt")?;
-            log_file.write_all(format!("{err:#?}\r\n\r\n").as_bytes())?;
-
             if let Some(http_err) = err.downcast_ref::<HttpRequestError>() {
                 let start_line = HttpResponseStartLine::new(
                     HttpProtocol::HTTP1_1,
@@ -329,7 +332,7 @@ pub mod tcp_handlers {
                 );
 
                 let mut response = HttpResponse::new(response_headers, Some(body))?;
-                return response.write(stream);
+                return response.write(config, stream);
             } else {
                 // Sending text/plain as the error message if the error is not of the HttpRequestError type
 
@@ -354,7 +357,7 @@ pub mod tcp_handlers {
 
                 let mut response = HttpResponse::new(headers, Some(body))?;
 
-                return response.write(stream);
+                return response.write(config, stream);
             }
             // NOTE: This is how you can handle different errors by downcasting to the specific error type
             // else if let Some(io_err) = err.downcast_ref::<std::io::Error>() {}
@@ -365,8 +368,9 @@ pub mod tcp_handlers {
     }
 
     /// Starts TCP server with provided `Config`, continuously listens for incoming request and propagates them further.
-    pub fn run_tcp_server(config: &Config) -> Result<(), Box<dyn Error>> {
+    pub fn run_tcp_server(config: &mut Config) -> Result<(), Box<dyn Error>> {
         let listener = self::connect(config)?;
+        // listener.set_nonblocking(true)?;
 
         println!(
             "TCP Connection Established at {:?}\nListening...",
@@ -376,7 +380,7 @@ pub mod tcp_handlers {
         for stream in listener.incoming() {
             match stream {
                 Ok(mut stream) => {
-                    if let Err(err) = self::handle_client(&mut stream, &config) {
+                    if let Err(err) = self::handle_client(&mut stream, config) {
                         eprintln!("Error handling request: {}", err);
                         send_error_response(config, &mut stream, Some(err))?;
                     } else {
@@ -392,39 +396,62 @@ pub mod tcp_handlers {
     }
 
     /// Reads `TcpStream` to statically allocated buffer 1024 bytes in size
-    pub fn read_tcp_stream(stream: &mut TcpStream) -> Result<String, Box<dyn Error>> {
-        // NOTE: Investigate how this works, as I practically copied it from GitHub
-        // shoutout to the author https://github.com/thepacketgeek/rust-tcpstream-demo/tree/master/raw
+    // pub fn read_tcp_stream(
+    //     config: &mut Config,
+    //     stream: &mut TcpStream,
+    // ) -> Result<String, Box<dyn Error>> {
+    //     // NOTE: Investigate how this works, as I practically copied it from GitHub
+    //     // shoutout to the author https://github.com/thepacketgeek/rust-tcpstream-demo/tree/master/raw
 
-        // for i in 1..100 {
-        //     println!("BLOCKING! {}", i);
-        // }
+    //     for i in 1..10000 {
+    //         println!("BLOCKING! {}", i);
+    //     }
 
-        // Maximum request payload is 1 MiB, could be too much
-        let mut reader = io::BufReader::with_capacity(1024 * 1024 * 1024, stream);
-        let buffer = reader.fill_buf()?.to_vec();
+    //     // Maximum request payload is 1 MiB, could be too much
+    //     // let mut reader = io::BufReader::with_capacity(1024 * 1024, stream);
+    //     let mut reader = io::BufReader::new(stream);
+    //     let mut buffer = Vec::<u8>::new();
 
-        // let mut buffer_line = Vec::<u8>::new();
-        // reader.read_line(&mut buffer_line)?;
+    //     loop {
+    //         println!("{reader:?}");
+    //         let chunk = reader.fill_buf()?;
 
-        reader.consume(buffer.len());
+    //         if chunk.is_empty() {
+    //             break;
+    //         }
 
-        let message = String::from_utf8(buffer).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Couldn't parse received string as utf8",
-            )
-        })?;
+    //         let bytes_read = chunk.len();
 
-        println!("{reader:?}");
+    //         println!("{bytes_read:?}");
+    //         buffer.extend_from_slice(&chunk);
 
-        // log_tcp_stream(config, &message)?;
-        return Ok(message);
-    }
+    //         println!(
+    //             "Buffer size: {} | chunk size: {}",
+    //             buffer.len(),
+    //             chunk.len(),
+    //         );
+
+    //         reader.consume(bytes_read);
+    //     }
+
+    //     let message = String::from_utf8(buffer).map_err(|_| {
+    //         io::Error::new(
+    //             io::ErrorKind::InvalidData,
+    //             "Couldn't parse received string as utf8",
+    //         )
+    //     })?;
+
+    //     config
+    //         .logger
+    //         .log_tcp_stream(&message.replace("\r\n", " "))?;
+
+    //     return Ok(message);
+    // }
 
     /// Handles incoming request from the client.
-    fn handle_client(stream: &mut TcpStream, config: &Config) -> Result<(), Box<dyn Error>> {
+    fn handle_client(stream: &mut TcpStream, config: &mut Config) -> Result<(), Box<dyn Error>> {
         let request: HttpRequest<'_> = HttpRequest::new(config, stream)?;
+
         let mut response_headers: HttpHeaders<'_> = HttpResponse::new_headers(None);
 
         let (method, path) = (request.get_method(), request.get_path_segment(config)?);
@@ -474,17 +501,15 @@ pub mod tcp_handlers {
                             ..Default::default()
                         };
 
-                        let body = request
-                            .get_body()
-                            .ok_or_else(|| {
-                                eprintln!("Request body is empty");
+                        let body = request.get_body().ok_or_else(|| {
+                            eprintln!("Request body is empty");
 
-                                error.message = Some(String::from("Request body is empty"));
-                                error.clone()
-                            })?
-                            .trim();
+                            error.message = Some(String::from("Request body is empty"));
+                            error.clone()
+                        })?;
+                        // .trim();
 
-                        let entry = serde_json::from_str::<DatabaseEntry>(body).map_err(|e| {
+                        let entry = serde_json::from_slice::<DatabaseEntry>(body).map_err(|e| {
                             eprintln!("Error deserializing database entry: {:#?}", e);
                             error.clone()
                         })?;
@@ -525,7 +550,7 @@ pub mod tcp_handlers {
 
         let mut response: HttpResponse<'_> = HttpResponse::new(response_headers, response_body)?;
 
-        response.write(stream)?;
+        response.write(config, stream)?;
         Ok(())
     }
 }

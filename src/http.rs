@@ -33,10 +33,12 @@ impl Default for HttpRequestError {
 impl Display for HttpRequestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
-                f,
-                "Something went wrong! Status code: {}, Status text: {}, Message: {:?}, Content-Type: {:?}",
-                self.status_code, self.status_text, self.message, self.content_type
-            )
+            f,
+            "HTTP Error {}: {} ({})",
+            self.status_code,
+            self.status_text,
+            self.message.to_owned().unwrap_or("None".to_string())
+        )
     }
 }
 
@@ -91,7 +93,7 @@ pub struct HttpRequestRequestLine {
 }
 
 impl<'a> HttpRequestRequestLine {
-    pub fn new(config: &Config, line: &'a str) -> Result<Self, HttpRequestError> {
+    pub fn new(config: &mut Config, line: &'a str) -> Result<Self, HttpRequestError> {
         let fields = line.split_whitespace().collect::<Vec<&'a str>>();
 
         // NOTE: I think this is redundant
@@ -266,6 +268,24 @@ impl<'a> HttpHeaders<'a> {
             start_line,
             request_line,
         }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Cow<str>> {
+        self.headers.get(key)
+    }
+
+    pub fn add_header_binary(
+        &mut self,
+        key: &mut Option<Vec<u8>>,
+        value: &mut Option<Vec<u8>>,
+    ) -> () {
+        let (key_s, value_s) = (
+            String::from_utf8(key.as_ref().expect("Key not found").to_vec()).unwrap(),
+            String::from_utf8(value.as_ref().expect("Value not found").to_vec()).unwrap(),
+        );
+
+        self.add(Cow::from(key_s), Cow::from(value_s));
+        (*key, *value) = (None, None);
     }
 
     /// Here's the docs: https://datatracker.ietf.org/doc/html/rfc2616#section-14

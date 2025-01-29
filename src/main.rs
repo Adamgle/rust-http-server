@@ -4,26 +4,20 @@ use std::{env, error::Error};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = env::args().collect::<Vec<String>>();
-    let config: Config = Config::parse_args(args)?;
+    let mut config: Config = Config::parse_args(args)?;
 
-    // Clone config for use in the ctrl-c handler
-
-    // match config.logger.get_file_log().try_clone().ok() {
-    //     Some(mut file) => {
-    //         ctrlc::set_handler(move || {
-    //             file.seek(std::io::SeekFrom::Start(0)).unwrap();
-
-    //             if let Err(e) = file.set_len(0) {
-    //                 eprintln!("Error truncating file on shutdown: {}", e);
-    //             }
-
-    //             std::process::exit(0);
-    //         })?;
+    // ctrlc::set_handler(move || {
+    //     // Ok(file) => {
+    //     if let Err(e) = Logger::truncate_file_log() {
+    //         eprintln!("Failed to truncate log file {}", e);
     //     }
-    //     None => todo!(),
-    // }
 
-    run_tcp_server(&config)?;
+    //     std::process::exit(0);
+    // })?;
+
+    run_tcp_server(&mut config)?;
+
+    // Logger::truncate_file_log()?;
 
     Ok(())
 }

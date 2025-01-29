@@ -1,8 +1,8 @@
+use crate::config::Config;
 use crate::http::{HttpHeaders, HttpProtocol, HttpResponseStartLine};
-use crate::logger::Logger;
 use std::error::Error;
 use std::io::{self, Write};
-use std::net::{self, TcpStream};
+use std::net::TcpStream;
 
 #[derive(Debug)]
 pub struct HttpResponse<'a> {
@@ -86,9 +86,15 @@ impl<'a> HttpResponse<'a> {
         self.serialized.as_ref()
     }
 
-    pub fn write(&mut self, stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
-        let mut logger = Logger::new()?;
-        logger.log_tcp_stream(format!("--- Response ---\r\n{:#?}\r\n", self.headers))?;
+    pub fn write(
+        &mut self,
+        config: &mut Config,
+        stream: &mut TcpStream,
+    ) -> Result<(), Box<dyn Error>> {
+        // let mut logger = Logger::new()?;
+        config
+            .logger
+            .log_tcp_stream(format!("--- Response ---\r\n{:?}\r\n", self.headers))?;
 
         let data = self.parse_http_message().unwrap();
 
@@ -110,7 +116,7 @@ impl<'a> HttpResponse<'a> {
         }
 
         stream.flush()?;
-        stream.shutdown(net::Shutdown::Write)?;
+        // stream.shutdown(net::Shutdown::Write)?;
         Ok(())
     }
 }
