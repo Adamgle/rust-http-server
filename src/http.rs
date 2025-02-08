@@ -1,6 +1,4 @@
-use crate::config::Config;
-use serde::{Deserialize, Serialize};
-
+// pub mod http {
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -8,6 +6,180 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
+
+pub use request_request_line::{HttpRequestMethod, HttpRequestRequestLine};
+pub use response_start_line::HttpResponseStartLine;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug)]
+pub enum HttpProtocol {
+    HTTP1,
+    HTTP1_1,
+    // HTTP2, NOTE: HTTP2 uses frames not request lines so unsupported here.
+}
+
+impl FromStr for HttpProtocol {
+    type Err = HttpRequestError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "HTTP/1" => Ok(HttpProtocol::HTTP1),
+            "HTTP/1.1" => Ok(HttpProtocol::HTTP1_1),
+            // NOTE: The server SHOULD generate a representation for the 505 response that describes why
+            // that version is not supported and what other protocols are supported by that server.
+            _ => Err(HttpRequestError {
+                status_code: 505,
+                status_text: String::from("HTTP Version Not Supported"),
+                ..Default::default()
+            }),
+        }
+    }
+}
+
+impl Display for HttpProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HttpProtocol::HTTP1 => write!(f, "HTTP/1"),
+            HttpProtocol::HTTP1_1 => write!(f, "HTTP/1.1"),
+        }
+    }
+}
+
+mod request_request_line {
+    use super::{HttpProtocol, HttpRequestError};
+    use crate::config::Config;
+    use std::fmt::Display;
+    use std::path::PathBuf;
+    use std::str::FromStr;
+
+    #[derive(Debug)]
+    pub struct HttpRequestRequestLine {
+        method: HttpRequestMethod,
+        // NOTE: I think this should be absolute path to the resource on the server
+        request_target: PathBuf,
+        protocol: HttpProtocol,
+    }
+
+    // trait RequestLine {
+    //     fn get_method(&self) -> &HttpRequestMethod;
+    //     fn get_protocol(&self) -> &HttpProtocol;
+    //     fn get_request_target(&self) -> &PathBuf;
+    // }
+
+    impl<'a> HttpRequestRequestLine {
+        pub fn new(config: &mut Config, line: &'a str) -> Result<Self, HttpRequestError> {
+            let fields = line.split_whitespace().collect::<Vec<&'a str>>();
+
+            let [method, request_target, protocol] = fields
+                .get(0..3)
+                .ok_or_else(|| {
+                    eprintln!("Bad Request line: {:?}", fields);
+                    HttpRequestError {
+                        status_code: 400,
+                        status_text: String::from("Bad Request"),
+                        ..Default::default()
+                    }
+                })?
+                .try_into()
+                .map_err(|e| {
+                    eprint!("Error converting slice to array: {}", e);
+                    HttpRequestError {
+                        status_code: 400,
+                        status_text: String::from("Bad Request"),
+                        ..Default::default()
+                    }
+                })?;
+
+            let base_path = Config::get_server_public();
+
+            // This maps the request_target to the actual file on the server
+            // resolving "/" to the index.html file
+            let request_target: PathBuf = match request_target {
+                // "pages/index.html"
+                p if p == "/" => base_path.join(config.get_index_path()),
+                p => base_path.join(p.strip_prefix("/").unwrap()),
+            };
+
+            Ok(Self {
+                method: HttpRequestMethod::from_str(method)?,
+                protocol: HttpProtocol::from_str(protocol)?,
+                request_target,
+            })
+        }
+
+        pub(super) fn get_method(&self) -> &HttpRequestMethod {
+            &self.method
+        }
+
+        pub(super) fn get_protocol(&self) -> &HttpProtocol {
+            &self.protocol
+        }
+
+        pub(super) fn get_request_target(&self) -> &PathBuf {
+            &self.request_target
+        }
+    }
+
+    #[derive(Debug, PartialEq, Clone)]
+    pub enum HttpRequestMethod {
+        GET,
+        POST,
+        DELETE,
+        UPDATE,
+        PUT,
+    }
+
+    impl Display for HttpRequestMethod {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{:?}", self)
+        }
+    }
+}
+mod response_start_line {
+    use super::HttpProtocol;
+
+    #[derive(Debug)]
+    pub struct HttpResponseStartLine<'a> {
+        protocol: HttpProtocol,
+        // status_code should be typed for all available status codes
+        status_code: u16,
+        status_text: Option<&'a str>,
+    }
+
+    impl<'a> HttpResponseStartLine<'a> {
+        pub fn new(protocol: HttpProtocol, status_code: u16, status_text: &'a str) -> Self {
+            Self {
+                protocol,
+                status_code,
+                status_text: status_text.into(),
+            }
+        }
+
+        pub(super) fn get_protocol(&self) -> &HttpProtocol {
+            &self.protocol
+        }
+
+        pub(super) fn get_status_code(&self) -> u16 {
+            self.status_code
+        }
+
+        pub(super) fn get_status_text(&self) -> Option<&str> {
+            self.status_text
+        }
+    }
+
+    impl<'a> std::fmt::Display for HttpResponseStartLine<'a> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "{} {} {}\r\n",
+                self.protocol,
+                self.status_code,
+                self.status_text.unwrap()
+            )
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 /// `status_code` and `status_text` are specific to the HTTP protocol, specifically the start line of HTTP message
@@ -50,124 +222,6 @@ impl From<HttpRequestError> for std::io::Error {
     }
 }
 
-#[derive(Debug)]
-pub enum HttpProtocol {
-    HTTP1,
-    HTTP1_1,
-    // HTTP2, NOTE: HTTP2 uses frames not request lines so unsupported here.
-}
-
-impl FromStr for HttpProtocol {
-    type Err = HttpRequestError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "HTTP/1" => Ok(HttpProtocol::HTTP1),
-            "HTTP/1.1" => Ok(HttpProtocol::HTTP1_1),
-            // NOTE: The server SHOULD generate a representation for the 505 response that describes why
-            // that version is not supported and what other protocols are supported by that server.
-            _ => Err(HttpRequestError {
-                status_code: 505,
-                status_text: String::from("HTTP Version Not Supported"),
-                ..Default::default()
-            }),
-        }
-    }
-}
-
-impl Display for HttpProtocol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            HttpProtocol::HTTP1 => write!(f, "HTTP/1"),
-            HttpProtocol::HTTP1_1 => write!(f, "HTTP/1.1"),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct HttpRequestRequestLine {
-    method: HttpRequestMethod,
-    // NOTE: I think this should be absolute path to the resource on the server
-    request_target: PathBuf,
-    protocol: HttpProtocol,
-}
-
-impl<'a> HttpRequestRequestLine {
-    pub fn new(config: &mut Config, line: &'a str) -> Result<Self, HttpRequestError> {
-        let fields = line.split_whitespace().collect::<Vec<&'a str>>();
-
-        // NOTE: I think this is redundant
-        // if fields.len() != 3 {
-        //     return Err(HttpRequestError {
-        //         status_code: 400,
-        //         status_text: String::from("Bad Request line"),
-        //         ..Default::default()
-        //     });
-        // }
-
-        let [method, request_target, protocol] = fields
-            .get(0..3)
-            .ok_or_else(|| {
-                eprintln!("Bad Request line: {:?}", fields);
-                HttpRequestError {
-                    status_code: 400,
-                    status_text: String::from("Bad Request"),
-                    ..Default::default()
-                }
-            })?
-            .try_into()
-            .map_err(|e| {
-                eprint!("Error converting slice to array: {}", e);
-                HttpRequestError {
-                    status_code: 400,
-                    status_text: String::from("Bad Request"),
-                    ..Default::default()
-                }
-            })?;
-
-        let base_path = Config::get_server_public();
-
-        let request_target: PathBuf = match request_target {
-            // "pages/index.html"
-            p if p == "/" => base_path.join(config.get_index_path()),
-            p => base_path.join(p.strip_prefix("/").unwrap()),
-        };
-
-        Ok(Self {
-            method: HttpRequestMethod::from_str(method)?,
-            protocol: HttpProtocol::from_str(protocol)?,
-            request_target,
-        })
-    }
-
-    pub fn get_method(&self) -> &HttpRequestMethod {
-        &self.method
-    }
-
-    // pub fn get_protocol(&self) -> &HttpProtocol {
-    //     &self.protocol
-    // }
-
-    pub fn get_request_target(&self) -> &PathBuf {
-        &self.request_target
-    }
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum HttpRequestMethod {
-    GET,
-    POST,
-    DELETE,
-    UPDATE,
-    PUT,
-}
-
-impl Display for HttpRequestMethod {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
 // HttpRequestMethod::new("GET") -> HttpRequestMethod::GET
 impl FromStr for HttpRequestMethod {
     type Err = HttpRequestError;
@@ -184,48 +238,6 @@ impl FromStr for HttpRequestMethod {
                 ..Default::default()
             }),
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct HttpResponseStartLine<'a> {
-    protocol: HttpProtocol,
-    // status_code should be typed for all available status codes
-    status_code: u16,
-    status_text: Option<&'a str>,
-}
-
-impl<'a> HttpResponseStartLine<'a> {
-    pub fn new(protocol: HttpProtocol, status_code: u16, status_text: &'a str) -> Self {
-        Self {
-            protocol,
-            status_code,
-            status_text: status_text.into(),
-        }
-    }
-
-    // pub fn get_protocol(&self) -> &HttpProtocol {
-    //     &self.protocol
-    // }
-
-    // pub fn get_status_code(&self) -> u16 {
-    //     self.status_code
-    // }
-
-    // pub fn get_status_text(&self) -> Option<&str> {
-    //     self.status_text
-    // }
-}
-
-impl<'a> Display for HttpResponseStartLine<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} {} {}\r\n",
-            self.protocol,
-            self.status_code,
-            self.status_text.unwrap()
-        )
     }
 }
 
@@ -274,24 +286,26 @@ impl<'a> HttpHeaders<'a> {
         self.headers.get(key)
     }
 
-    pub fn add_header_binary(
-        &mut self,
-        key: &mut Option<Vec<u8>>,
-        value: &mut Option<Vec<u8>>,
-    ) -> () {
-        let (key_s, value_s) = (
-            String::from_utf8(key.as_ref().expect("Key not found").to_vec()).unwrap(),
-            String::from_utf8(value.as_ref().expect("Value not found").to_vec()).unwrap(),
-        );
+    // This should validate the correctness of the header line
+    pub fn add_header_line(&mut self, line: String) -> () {
+        // Header should not contain more than one delimiter of ": " also there should be not
+        // CRLF's thought that would be handled by the Lines Iterator, thought we also need to check,
+        // also the key is not empty, and if the value is not empty
 
-        self.add(Cow::from(key_s), Cow::from(value_s));
-        (*key, *value) = (None, None);
+        // Assuming all CRLF's are removed by the Lines iterator
+        let [key, value]: [String; 2] = line
+            .split(": ")
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("Incorrect header. Request is malformed.");
+
+        self.add(key.into(), value.into());
     }
 
     /// Here's the docs: https://datatracker.ietf.org/doc/html/rfc2616#section-14
     /// Suck on this <Writes on a rock, SASSY office reference>
     pub fn add(&mut self, key: Cow<'a, str>, value: Cow<'a, str>) {
-        // self.headers.insert(key, value);
         self.headers.insert(key, value);
     }
 
@@ -307,7 +321,7 @@ impl<'a> HttpHeaders<'a> {
                 // but we will leave that be for now. We could try to recognize the extension
                 // based on the bytes of the file, or just use the appropriate library.
 
-                let requested_resource = &self.request_line.as_ref().unwrap().request_target;
+                let requested_resource = self.get_request_target().unwrap();
 
                 // If requested resource is root, return `text/html`
                 if requested_resource.as_path() == Path::new("/") {
@@ -373,14 +387,58 @@ impl<'a> HttpHeaders<'a> {
         }
     }
 
+    // Those getters are basically re-exporting functionality on the embedded structs
+    // It is impossible to access methods from the embedded structs directly
+    // as they are relatively public to the http module
+
     pub fn get_request_line(&self) -> Option<&HttpRequestRequestLine> {
         self.request_line.as_ref()
+    }
+    pub fn get_method(&self) -> Option<&HttpRequestMethod> {
+        self.get_request_line()
+            .expect("Request line not found")
+            .get_method()
+            .into()
+    }
+
+    pub fn get_request_target(&self) -> Option<&PathBuf> {
+        self.get_request_line()
+            .expect("Request line not found")
+            .get_request_target()
+            .into()
+    }
+
+    pub fn get_request_protocol(&self) -> Option<&HttpProtocol> {
+        self.get_request_line()
+            .expect("Request line not found")
+            .get_protocol()
+            .into()
     }
 
     pub fn get_start_line(&self) -> Option<&HttpResponseStartLine> {
         self.start_line.as_ref()
     }
 
+    pub fn get_status_code(&self) -> Option<u16> {
+        self.get_start_line()
+            .expect("Start line not found")
+            .get_status_code()
+            .into()
+    }
+
+    pub fn get_status_text(&self) -> Option<&str> {
+        self.get_start_line()
+            .expect("Start line not found")
+            .get_status_text()
+            .into()
+    }
+
+    pub fn get_response_protocol(&self) -> Option<&HttpProtocol> {
+        self.get_start_line()
+            .expect("Start line not found")
+            .get_protocol()
+            .into()
+    }
     pub fn get_headers(&self) -> &HashMap<Cow<str>, Cow<str>> {
         &self.headers
     }

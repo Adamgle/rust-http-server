@@ -1,36 +1,15 @@
+import collections
+import json
 import requests
 from pprint import pprint
 import string
 import socket
+import functools
+import threading
+import typing
 
 URL_BASE = "http://localhost:5000/"
 URL_REDIRECT = "http://127.0.0.1:5000/"
-# This is maximum payload size that you can send, assuming UTF-8 encoding takes 1 bytes per character
-# that would 7950 bytes, thought that is indicated by the client, server says this is
-
-
-def test_post(URL: string, payload: string):
-    print(f"{URL}database/data.json")
-
-    response = requests.post(
-        f"{URL}database/data.json",
-        json={
-            "value": payload,
-            "id": 123,
-        },
-    )
-
-    # pprint(
-    #     {
-    #         "message": response.text,
-    #         "status_code": response.status_code,
-    #         "is_redirect": response.is_redirect,
-    #         "is_permanent_redirect": response.is_permanent_redirect,
-    #     },
-    #     sort_dicts=False,
-    # )
-
-    return response.status_code
 
 
 def write_note(payload: str):
@@ -39,73 +18,125 @@ def write_note(payload: str):
 
 
 def tests():
-    tests = dict()
+    tests = collections.defaultdict(list)
+
+    build_payload: typing.Callable[[int, str], str] = lambda id, payload: json.dumps(
+        {"id": id, "value": payload}
+    )
 
     def test_post(path: string, payload: string):
         response = requests.post(URL_BASE + path, json={"value": payload, "id": 123})
 
-        pprint(
-            {
-                "status_code": response.status_code,
-                "is_redirect": response.is_redirect,
-                "is_permanent_redirect": response.is_permanent_redirect,
-            },
-            sort_dicts=False,
-        )
-
-        if response.status_code == 200:
-            pprint(response.text)
+        return response.status_code
 
     def test_get(path: str):
         response = requests.get(
             URL_BASE + path,
-            # headers={"Accept": "text/plain", "User-Agent": "Mozilla/5.0\n\r"},
         )
 
-        pprint(response.request.headers)
-        pprint(response.status_code)
+        return response.status_code
 
-    payload = "A" * pow(10, 1)
-
-    def send_custom():
-        import socket
-
+    def send_custom(id: int, request: typing.Union["POST", "GET"]):
         # Target server and port
         host = "localhost"
         port = 5000
 
         # Craft the malicious HTTP request
-        request = (
-            "GET /database/data.json HTTP/1.1\r\n"
+        # NOTE: THIS IS NOT HEADER INJECTION YOU DUMB F'C
+
+        POST_payload = build_payload(id, "A" * pow(10, 1))
+
+        POST_request = (
+            "POST /database/data.json HTTP/1.1\r\n"
+            f"Content-Length: {len(POST_payload)}\r\n"
+            "Content-Type: application/json\r\n"
             "User-Agent: Mozilla/5.0\r\n"
             f"Host: {host}:{42069}\r\n"
             "X-Custom-Header: valid-value\r\n"
             "Injected-Header: malicious-value\r\n\r\n"
+            f"{POST_payload}"
         )
 
-        # Create a socket connection
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((host, port))
-            s.sendall(request.encode())  # Send the malicious request
-            response = s.recv(4096)  # Receive the response
+        GET_request = (
+            "GET /database/data.json HTTP/1.1\r\n"
+            "User-Agent: Mozilla/5.0\r\n"
+            f"Host: {host}:{42069}\r\n"
+            "X-Custom-Header: valid-value\r\n"
+            "Injected-Header: malicious-value\r\n"
+            "\r\n"
+        )
 
-        pprint(response)
+        def create_socket(request: string):  # Create a socket connection
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((host, port))
+                s.sendall(request.encode())
+                data = s.recv(1024)
 
-        print(response.decode())  # Print the server's response
+                return data.decode("utf-8")
 
-    tests["GET"] = [
-        [
-            # test_get("note.txt"),
-            # send_custom() if i % 2 == 0 else None,
-            test_post("database/data.json", payload),
-        ]
-        for i in range(10)
-    ]
-    
-    # tests["CUSTOM"] = send_custom()
+        return "200" in (
+            create_socket(POST_request)
+            if request == "POST"
+            else create_socket(GET_request)
+        )
+
+    def run():
+        for i in range(100):
+            keys = ["POST", "GET", "CUSTOM"]
+            for key in keys:
+                for _ in range(1):
+                    tests[key].append(
+                        test_get("database/data.json")
+                        if key == "GET"
+                        else (
+                            test_post("database/data.json", payload)
+                            if key == "POST"
+                            else send_custom()
+                        )
+                    )
+
+                if all([x == 200 for x in tests[key]]):
+                    print(f"{key}: All requests were successful")
+
+    def run_multithreaded(callback, **kwargs):
+        threads = []
+        results = []
+
+        id = 0
+
+        def worker(callback, **kwargs):
+            nonlocal id
+
+            thread_results = []
+
+            for _ in range(100):
+                id += 1
+                thread_results.append(callback(id, kwargs["request"]))
+
+            results.extend(thread_results)
+            # print(f"Thread results: {thread_results}")
+
+        for _ in range(10):  # Create 10 threads
+            thread = threading.Thread(
+                target=worker,
+                kwargs={"callback": callback, **kwargs},
+            )
+            threads.append(thread)
+            thread.start()
+
+        for idx, thread in enumerate(threads):
+            thread.join()
+            if all(results):
+                print(
+                    f"All requests of {idx} thread were successful: request count: {len(results)}"
+                )
+
+        return results
+
+    run_multithreaded(send_custom, request="POST")
+    # send_custom(1, "POST")
 
     return tests
 
 
 pprint(tests())
-# write_note("A" * pow(10, 9))

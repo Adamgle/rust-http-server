@@ -1,8 +1,12 @@
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+
 use crate::config::Config;
 use crate::http::{HttpHeaders, HttpProtocol, HttpResponseStartLine};
+// use crate::http::{HttpHeaders, HttpProtocol, HttpResponseStartLine};
 use std::error::Error;
 use std::io::{self, Write};
-use std::net::TcpStream;
+use std::net::Shutdown;
 
 #[derive(Debug)]
 pub struct HttpResponse<'a> {
@@ -86,37 +90,39 @@ impl<'a> HttpResponse<'a> {
         self.serialized.as_ref()
     }
 
-    pub fn write(
+    fn show_request_outcome(&self) {
+        println!("Response: {}", self.headers.get_start_line().unwrap())
+    }
+
+    pub async fn write(
         &mut self,
         config: &mut Config,
         stream: &mut TcpStream,
     ) -> Result<(), Box<dyn Error>> {
         // let mut logger = Logger::new()?;
-        config
-            .logger
-            .log_tcp_stream(format!("--- Response ---\r\n{:?}\r\n", self.headers))?;
+        // config
+        //     .logger
+        //     .log_tcp_stream(format!("--- Response ---\r\n{:?}\r\n", self.headers))?;
 
+        self.show_request_outcome();
         let data = self.parse_http_message().unwrap();
 
-        println!("Size of response payload: {}", data.len());
+        // println!("Size of response payload: {}", data.len());
 
-        // This requires to copy the stream, not sure if that is acceptable
-        let mut writer = io::BufWriter::with_capacity(1024 * 1024, stream.try_clone()?);
+        stream.writable().await?;
 
-        let bytes_written = writer.write(data)?;
+        // Refactor to Anyhow::Result
+        stream
+            .write_all(data)
+            .await
+            .inspect_err(|_| println!("Could not write to the stream"))?;
 
-        // Essential to call flush, as stated in the documentation
-        writer.flush()?;
+        stream
+            .flush()
+            .await
+            .inspect_err(|_| println!("Could not flush the stream after writing to it"))?;
 
-        if bytes_written < data.len() {
-            Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                format!("Sent {}/{} bytes", bytes_written, data.len()),
-            ))?;
-        }
-
-        stream.flush()?;
-        // stream.shutdown(net::Shutdown::Write)?;
+        stream.shutdown().await?;
         Ok(())
     }
 }

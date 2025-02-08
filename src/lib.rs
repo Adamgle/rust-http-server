@@ -4,7 +4,6 @@ mod http_response;
 pub mod logger;
 
 use std::error::Error;
-use std::net::{TcpListener, TcpStream};
 
 pub mod database {
     use serde::{Deserialize, Serialize};
@@ -24,7 +23,7 @@ pub mod config {
 
     use crate::logger::Logger;
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct Config {
         pub server_root: PathBuf,
         pub socket_address: SocketAddrV4,
@@ -43,7 +42,7 @@ pub mod config {
         use super::Config;
         use std::{fs, path::PathBuf};
 
-        #[derive(serde::Serialize, Debug)]
+        #[derive(serde::Serialize, Debug, Clone)]
         pub enum ConfigHttpProtocol {
             HTTP,
             HTTPS,
@@ -73,26 +72,26 @@ pub mod config {
             }
         }
 
-        #[derive(serde::Deserialize, serde::Serialize, Debug)]
+        #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
         pub struct RedirectPathsEntry {
             pub from: url::Url,
             pub to: url::Url,
         }
 
         // Alias for RedirectPathsEntry, basically the same structure
-        #[derive(serde::Deserialize, serde::Serialize, Debug)]
+        #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
         pub struct RedirectDomainsEntry {
             pub from: String,
             pub to: String,
         }
 
-        #[derive(serde::Deserialize, serde::Serialize, Debug)]
+        #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
         pub struct RedirectEntry {
             pub domains: Option<Vec<RedirectDomainsEntry>>,
             pub paths: Option<Vec<RedirectPathsEntry>>,
         }
 
-        #[derive(serde::Deserialize, serde::Serialize, Debug)]
+        #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
         // `index_path` and `protocol` are not optional because they are required for server to work
         // and they will be set to defaults if not supplied
         pub struct ServerConfigFile {
@@ -116,6 +115,8 @@ pub mod config {
                             // Port number in http URL is right after the domain name
                             // so we could check for the presence of  `:` to check if port is supplied
 
+                            // NOTE: This should probably create different key-value in that config
+                            // because this is not a valid domain given that transformation
                             domain.from = ServerConfigFile::suffix_domain_with_port(&domain.from);
                             domain.to = ServerConfigFile::suffix_domain_with_port(&domain.to);
                         }
@@ -190,7 +191,8 @@ pub mod config {
             };
 
             // Initialize the log file, open for appending
-            let logger = Logger::new()?;
+            // let logger = Logger::new()?;
+            let logger = Logger {};
 
             // In all the above did not throw and error, we will set the environment variables
             // Set the SERVER_ROOT, SERVER_PUBLIC, SERVER_PORT environment variables
@@ -257,17 +259,31 @@ pub mod tcp_handlers {
     use super::http_request::HttpRequest;
     use crate::config::Config::{self};
     use crate::database::DatabaseEntry;
+    use crate::*;
     use http::{HttpRequestError, HttpResponseStartLine};
     use http_response::HttpResponse;
     use std::borrow::Cow;
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, Write};
     use std::path::Path;
+    use std::time::Duration;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::time::timeout;
 
-    use crate::*;
+    // QUESTION: Why there server you are about to make is asynchronous, not multithreaded?
+    // => FOLLOW UP QUESTION:
+    //  -> Can certain tasks be handled in async manner and the other in threading manner. If any, which one should be handled in which way.
+    // ANSWER: Handling multiple connection, which spawn it's separate thread is computationally heavy, may include a system call to spawn a thread,
+    // otherwise in thread-pool.
+    // Actually the dispute is to use async or threaded approach for handling requests
+    // I will use async approach because sending a TCPStream is asynchronous task in time and the stream
+    // can come at different intervals of time. Thread approach would be great if you would like to parallelize bunch of requests
+    // that are independent of each other and this some sort of order of execution is not needed.
 
-    pub fn connect(config: &mut Config) -> Result<TcpListener, Box<dyn Error>> {
-        return TcpListener::bind(config.socket_address).map_err(|e| e.into());
+    pub async fn connect(config: &mut Config) -> Result<TcpListener, Box<dyn Error>> {
+        return TcpListener::bind(config.socket_address)
+            .await
+            .map_err(|e| e.into());
     }
 
     /// NOTE: Can log anything that implements `std::fmt::Display`
@@ -279,7 +295,7 @@ pub mod tcp_handlers {
     ///
     /// If stream is None,
     /// If err is None, send default 500 Internal Server Error response
-    fn send_error_response(
+    async fn send_error_response(
         config: &mut Config,
         stream: &mut TcpStream,
         // http_err: Option<&HttpRequestError>,
@@ -332,7 +348,7 @@ pub mod tcp_handlers {
                 );
 
                 let mut response = HttpResponse::new(response_headers, Some(body))?;
-                return response.write(config, stream);
+                return response.write(config, stream).await;
             } else {
                 // Sending text/plain as the error message if the error is not of the HttpRequestError type
 
@@ -357,7 +373,7 @@ pub mod tcp_handlers {
 
                 let mut response = HttpResponse::new(headers, Some(body))?;
 
-                return response.write(config, stream);
+                return response.write(config, stream).await;
             }
             // NOTE: This is how you can handle different errors by downcasting to the specific error type
             // else if let Some(io_err) = err.downcast_ref::<std::io::Error>() {}
@@ -368,8 +384,8 @@ pub mod tcp_handlers {
     }
 
     /// Starts TCP server with provided `Config`, continuously listens for incoming request and propagates them further.
-    pub fn run_tcp_server(config: &mut Config) -> Result<(), Box<dyn Error>> {
-        let listener = self::connect(config)?;
+    pub async fn run_tcp_server(config: &mut Config) -> Result<(), Box<dyn Error>> {
+        let listener = self::connect(config).await?;
         // listener.set_nonblocking(true)?;
 
         println!(
@@ -377,80 +393,44 @@ pub mod tcp_handlers {
             listener.local_addr().unwrap()
         );
 
-        for stream in listener.incoming() {
-            match stream {
-                Ok(mut stream) => {
-                    if let Err(err) = self::handle_client(&mut stream, config) {
-                        eprintln!("Error handling request: {}", err);
-                        send_error_response(config, &mut stream, Some(err))?;
-                    } else {
-                        // Request termination
-                        // println!("Request handled successfully")
+        loop {
+            // for stream in listener.incoming() {
+            match listener.accept().await {
+                Ok((mut stream, socket)) => {
+                    println!("Connection established with: {:?}", socket);
+
+                    let mut config_clone = config.clone();
+
+                    if let Err(res) = tokio::time::timeout(
+                        tokio::time::Duration::from_secs(5),
+                        tokio::spawn(async move {
+                            if let Err(err) =
+                                self::handle_client(&mut stream, &mut config_clone).await
+                            {
+                                eprintln!("Error handling request: {}", err);
+                                // send_error_response(&mut config_clone, &mut stream, Some(err)).await?;
+                            } else {
+                                // Request termination
+                                // println!("Request handled successfully")
+                            }
+                        }),
+                    )
+                    .await
+                    {
+                        eprintln!("Request timed out: {}", res);
                     }
                 }
                 Err(err) => eprintln!("Invalid TCP stream: {}", err),
             }
         }
-
-        Ok(())
     }
 
-    /// Reads `TcpStream` to statically allocated buffer 1024 bytes in size
-    // pub fn read_tcp_stream(
-    //     config: &mut Config,
-    //     stream: &mut TcpStream,
-    // ) -> Result<String, Box<dyn Error>> {
-    //     // NOTE: Investigate how this works, as I practically copied it from GitHub
-    //     // shoutout to the author https://github.com/thepacketgeek/rust-tcpstream-demo/tree/master/raw
-
-    //     for i in 1..10000 {
-    //         println!("BLOCKING! {}", i);
-    //     }
-
-    //     // Maximum request payload is 1 MiB, could be too much
-    //     // let mut reader = io::BufReader::with_capacity(1024 * 1024, stream);
-    //     let mut reader = io::BufReader::new(stream);
-    //     let mut buffer = Vec::<u8>::new();
-
-    //     loop {
-    //         println!("{reader:?}");
-    //         let chunk = reader.fill_buf()?;
-
-    //         if chunk.is_empty() {
-    //             break;
-    //         }
-
-    //         let bytes_read = chunk.len();
-
-    //         println!("{bytes_read:?}");
-    //         buffer.extend_from_slice(&chunk);
-
-    //         println!(
-    //             "Buffer size: {} | chunk size: {}",
-    //             buffer.len(),
-    //             chunk.len(),
-    //         );
-
-    //         reader.consume(bytes_read);
-    //     }
-
-    //     let message = String::from_utf8(buffer).map_err(|_| {
-    //         io::Error::new(
-    //             io::ErrorKind::InvalidData,
-    //             "Couldn't parse received string as utf8",
-    //         )
-    //     })?;
-
-    //     config
-    //         .logger
-    //         .log_tcp_stream(&message.replace("\r\n", " "))?;
-
-    //     return Ok(message);
-    // }
-
     /// Handles incoming request from the client.
-    fn handle_client(stream: &mut TcpStream, config: &mut Config) -> Result<(), Box<dyn Error>> {
-        let request: HttpRequest<'_> = HttpRequest::new(config, stream)?;
+    async fn handle_client(
+        stream: &mut TcpStream,
+        config: &mut Config,
+    ) -> Result<(), Box<dyn Error>> {
+        let request: HttpRequest<'_> = HttpRequest::new(config, stream).await?;
 
         let mut response_headers: HttpHeaders<'_> = HttpResponse::new_headers(None);
 
@@ -463,7 +443,7 @@ pub mod tcp_handlers {
         // paths are defined in the config file under 'domain' field, for domains and path redirect in the "paths" field
 
         // Give back the reference supplied to the function
-        if request.redirect_request(stream, config)? {
+        if request.redirect_request(stream, config).await? {
             return Ok(());
         };
 
@@ -481,6 +461,7 @@ pub mod tcp_handlers {
                         // Default already created, we are not changing anything else besides status code
                         // response_headers.start_line.as_mut().unwrap().status_code = 201;
 
+                        // NOTE: Maybe we should make this writing to database async
                         let mut database =
                             OpenOptions::new().write(true).read(true).open(resource)?;
 
@@ -548,9 +529,11 @@ pub mod tcp_handlers {
             HttpRequestMethod::PUT => todo!(),
         };
 
+        response_headers.add(Cow::from("Connection"), Cow::from("close"));
+
         let mut response: HttpResponse<'_> = HttpResponse::new(response_headers, response_body)?;
 
-        response.write(config, stream)?;
+        response.write(config, stream).await?;
         Ok(())
     }
 }

@@ -60,6 +60,10 @@ Steps:
 10. Rewrite request to http://localhost:<port> if http://127.0.0.1/:<port> is supplied <CHECK>
 11. Write macro for header creation
 12. Default config file while starting the server
+13. For the 4th time, refactor parse_request to async programming, as doing it without it is kind of a waste of time, maybe multithreading
+14. Refactor errors to Anyhow::Result<T>
+15. HttpHeaders::new() should not be exposed, we are providing specialized functions for constructing HttpRequestHeaders and HttpResponseHeaders
+16. 
 
 ISSUES
 1. Sometimes request is stuck when changing domains from localhost to 127.0.0.1, even thought request is redirected
@@ -86,15 +90,49 @@ ISSUES
     -> but even thought buffer seem still to does not fit all of the payload, 8192 bytes is size seem to be maximum that I can send.
         \\ 8192 bytes being maximum was caused by initial buffer set on BufReader, besides that we fix by reading data in chunks
         \\ checking for Content-Length, if provided, running until full payload is reach and so on.
-5. HttpResponse::write is f'ed up, http://localhost:5000 throws panic <RESOLVED>
+5. HttpResponse::write is f'ed up, http://localhost:5000 throws panic! <RESOLVED>
     \\ It is not f'ed up no longer, but there is still an area of improvement
 6. Redirection does not work as expected, it redirect from http://127.0.0.1:5000 to http::/localhost:5000/pages/index.html but should redirect to the root 
     -> The location should change relatively <RESOLVED>
     \\ Caused by incorrect index path handling, changing `/` to `pages/index.html` which is valid, but we want to display `/`
 7. Requesting alternated domains, despite the redirection, freezes next request that uses the other domain <PARTIALLY RESOLVED>
-    ===> Race conditions should be investigated for all above issues, specifically how TCPStream is handled 
+    -> Race conditions should be investigated for all above issues, specifically how TCPStream is handled 
     \\ Request is no longer freezing, not sure about the race conditions, they could be present.
-8. Request parsing pose a numerous security issues, like CRLF injection, header injection, 
+    \\ UPDATE => Not sure if that caused by the domains interchange, there an issue that was cause by `Connection: keep-alive` header
+    \\  -> sent in request that was not handled by the server. Now we are just responding with `Connection: close` which resolves the issue
+    \\  -> of a stuck request without response that could panic! on the server, but connection still freezes when bunch of requests
+    \\  -> interchange. The process could be described as:
+    \\  -> - We are initializing 1000 connections on the separate threads (10 threads) to overload the server with bunch of connection (though server does not throttle)
+    \\  -> - While requests are still `streamed` and responded, when you initialize new connection to the server, it will block the `stream` of requests until the page gets refreshed 
+    \\  -> - Refreshing unlocks the `stream` of the requests and locks them once again while the full response the new initialized connection is received 
+    \\  -> Possible explanation of why this happens is just we need to spawn the async tasks for each TcpStream (request)
+8. Request parsing pose a numerous security issues, like CRLF injection, header injection <RESOLVED>
+    \\ We have changed the mechanism of parsing the http message to more stable and maintainable way, probably more efficient to, effectively fixing the issue.
+9. There could be split delimiter of \n\r in the chunks, wrongly interpreting the presence of the body in the request <RESOLVED>
+    \\ It actually is divided across chunks, handling remaining_lfcrlf_shift, not well tested thought.
+    \\ UPDATE: We have changed the mechanism of parsing the http message to more stable and maintainable way, probably more efficient to, effectively fixing the issue.
+10. parse_request does not really check for the \r\n\r\n presence at the end of requests, we could technically take a slice of that 
+    -> chunk to check for the rest of the data being \n, (as it checks for \n\r, so rest of the data is \n) but that
+    -> is not a strict comparison as malicious request could be sent. Also there is a possibility for delimiter to be split
+    -> across chunk reads, so we would have to synchronize them
+    \\ UPDATE: We have changed the mechanism of parsing the http message to more stable and maintainable way, probably more efficient to, effectively fixing the issue.
+11. Server still sometimes gets stuck in request, it does not even go to parse_request function and timeout for TcpStream 
+    -> does not solve the problem
+    \\ I think it is solved, we are now using tokio async runtime to handle request allowing current handling of request that not block each other
+    \\ But I think the issue with additional message being sent could still happen, reading request incorrectly, although that no longer panic!'s
+12. The Logger is the worst and does not even work at all, the buffer is not flushed probably, though flushed technically
+    -> UPDATE: gave up onto that Logger, we'll write a new one, presumably multithreaded, surely one that will work in asynchronous environment
+13. There is a defined race condition when writing to database in multithreaded way, like 1000 requests on 10 threads, probably like one write to database
+    -> causes partial write or something because the other is interrupting resulting each with malformed database format or with lost data being written to database
+14. There is still a hanging request after you just start the server and wait a bit, it is handled so server does not panic! thought you can see it throw
+    -> Request timed out: deadline has elapsed and after you make consequent request it eprintln!'s 
+    -> `thread 'tokio-runtime-worker' panicked at ~\http_request.rs:172:21:
+    -> called `Option::unwrap()` on a `None` value
+    -> note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace`
+    -> Not sure what could be cause by the `Connection: keep-alive` header, although we already responding
+    -> with `Connection: close` thought it is worth to look closely onto that while debugging. 
+    -> NOTE: It happens every single request after a sufficient period, Wireshark shows [TCP keep-alive] AND [TCP Dup ACK]
+    -> which I think should imply something about the issue
 
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,
@@ -121,3 +159,4 @@ We will make a stateful todo-app with a static file as a database.
 CURRENT STATE OF APP:
 -> Completely fucked up, don't even know what next to do, what to fix, everything to fix, nothing can be fixed.
     -> We will try thought.
+    -> UPDATE: Now that is partially true, probably will stay that way.
