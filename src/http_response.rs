@@ -1,27 +1,21 @@
+use crate::config::Config;
+use crate::http::{HttpHeaders, HttpProtocol, HttpRequestError, HttpResponseStartLine};
+use std::error::Error;
+use std::io::Write;
+
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-use crate::config::Config;
-use crate::http::{HttpHeaders, HttpProtocol, HttpResponseStartLine};
-// use crate::http::{HttpHeaders, HttpProtocol, HttpResponseStartLine};
-use std::error::Error;
-use std::io::{self, Write};
-use std::net::Shutdown;
+use crate::prelude::*;
 
 #[derive(Debug)]
 pub struct HttpResponse<'a> {
     body: Option<String>, // This could be [u8] bytes Or just `Bytes` struct, because that is at the lower level and actually every resource in TCP is stream as chunks of u8 bytes.
     headers: HttpHeaders<'a>,
-    serialized: Option<Vec<u8>>,
+    // serialized: Option<Vec<u8>>,
 }
 
 impl<'a> HttpResponse<'a> {
-    /// Initializes HttpResponse and adds appropriate headers based on request_headers
-    ///
-    /// If request_headers are None, it means responding with some kind of critical error, regardless of the request
-
-    // NOTE: I find it very stupid that writing headers is somehow automated
-    // so we will opt out of that idea.
     pub fn new(
         response_headers: HttpHeaders<'a>,
         body: Option<String>,
@@ -29,14 +23,16 @@ impl<'a> HttpResponse<'a> {
         Ok(Self {
             body,
             headers: response_headers,
-            serialized: None,
+            // Maybe we would implement some sort of a middleware, and would want for it to affect the response then we could store it, but
+            // actually either way it would be better to just mutate the parsed version instead of serialized and just sent the requests
+            // after the middleware done it's job.
+            // serialized: None,
         })
     }
 
     /// Initializes HttpHeaders with start line, providing default value for headers field with `HashMap::<&str, Cow<str>>::new()`
     /// Start line is initialized with `HTTP/1.1 200 OK` status code and status text,
-    /// any errors and changes to start line COULD be done after initialization on the mutable reference to the headers
-    /// or by providing custom start line as an argument to the function.
+    /// custom start line as an argument to the function.
     pub fn new_headers(start_line: Option<HttpResponseStartLine<'a>>) -> HttpHeaders<'a> {
         HttpHeaders::new(
             match start_line {
@@ -49,45 +45,45 @@ impl<'a> HttpResponse<'a> {
 
     /// Parses headers field  from HashMap<String, String> and body to Vec<u8> bytes vector and saves it in parsed_headers field
     /// This could return an error when data is semantically incorrect then parsing would fail
-    fn parse_http_message(&mut self) -> Option<&Vec<u8>> {
-        // CONCLUSION: We could allocate static size buffer but this is just unnecessary and error prone,
-        // using reference is impossible because we are parsing the data in self.headers and self.start_line]
-        // making it own the data underneath effectively coping the data from headers with additional overhead,
-        // so we need to allocate the buffer that owns every chunk of parsed data.
+    fn parse_http_message(&mut self) -> Result<Vec<u8>, Box<dyn Error>> {
+        // QUESTION: Can we allocate statically sized buffer for that
+        // ANSWER: No, because we cannot predict the size of the response at compile time
+        // thought we could look onto Vec::with_capacity method to optimize the allocation
+
+        // TODO: Allocate static buffer size for response bytes
+        // NOTE: This cannot be allocate as it would have to be allocated in the runtime
+        // as the data that comes with response is dynamically sized and we
+        // cannot predict the size of the response at compile time. Thought we could
+        // look onto Vec::with_capacity method to optimize the allocation
+        // so to avoid resizing data, but that would be just premature optimization
 
         let mut buffer = Vec::<u8>::new();
 
-        // start-line formatting
-        buffer.extend(
-            self.headers
-                .get_start_line()
-                .unwrap()
-                .to_string()
-                .as_bytes(),
-        );
+        // start-line serialization
+
+        buffer.extend(self.headers.get_start_line().map_or_else(
+            || {
+                Err(HttpRequestError {
+                    message: "Start line is missing".to_string().into(),
+                    ..Default::default()
+                })
+            },
+            |start_line| Ok(start_line.to_string().as_bytes().to_vec()),
+        )?);
 
         // Write line with key-value pair structuring a header
-        // headers formatting
-        buffer.extend(self.headers.get_headers().iter().fold(
-            Vec::<u8>::new(),
-            |mut acc, (key, value)| {
-                acc.extend(format!("{key}: {value}\r\n").as_bytes());
-                acc
-            },
-        ));
 
-        // body formatting
+        for (key, value) in self.headers.get_headers() {
+            write!(buffer, "{}: {}\r\n", key, value)?;
+        }
+
         if let Some(body) = &self.body {
-            // injecting additional; CRLF before body
-            buffer.extend("\r\n".as_bytes());
-
-            buffer.extend(body.as_bytes());
+            write!(buffer, "\r\n{}", body)?;
         }
 
         // NOTE: Generally speaking saving serialized response in struct is useless after we sent the response
-        self.serialized = Some(buffer);
 
-        self.serialized.as_ref()
+        Ok(buffer)
     }
 
     fn show_request_outcome(&self) {
@@ -96,7 +92,7 @@ impl<'a> HttpResponse<'a> {
 
     pub async fn write(
         &mut self,
-        config: &mut Config,
+        config: &MutexGuard<'_, Config>,
         stream: &mut TcpStream,
     ) -> Result<(), Box<dyn Error>> {
         // let mut logger = Logger::new()?;
@@ -113,7 +109,7 @@ impl<'a> HttpResponse<'a> {
 
         // Refactor to Anyhow::Result
         stream
-            .write_all(data)
+            .write_all(&data)
             .await
             .inspect_err(|_| println!("Could not write to the stream"))?;
 

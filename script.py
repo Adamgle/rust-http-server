@@ -7,6 +7,7 @@ import socket
 import functools
 import threading
 import typing
+import time
 
 URL_BASE = "http://localhost:5000/"
 URL_REDIRECT = "http://127.0.0.1:5000/"
@@ -47,7 +48,7 @@ def tests():
         POST_payload = build_payload(id, "A" * pow(10, 1))
 
         POST_request = (
-            "POST /database/data.json HTTP/1.1\r\n"
+            "POST /database/tasks.json HTTP/1.1\r\n"
             f"Content-Length: {len(POST_payload)}\r\n"
             "Content-Type: application/json\r\n"
             "User-Agent: Mozilla/5.0\r\n"
@@ -58,7 +59,7 @@ def tests():
         )
 
         GET_request = (
-            "GET /database/data.json HTTP/1.1\r\n"
+            "GET /database/tasks.json HTTP/1.1\r\n"
             "User-Agent: Mozilla/5.0\r\n"
             f"Host: {host}:{42069}\r\n"
             "X-Custom-Header: valid-value\r\n"
@@ -86,10 +87,10 @@ def tests():
             for key in keys:
                 for _ in range(1):
                     tests[key].append(
-                        test_get("database/data.json")
+                        test_get("database/tasks.json")
                         if key == "GET"
                         else (
-                            test_post("database/data.json", payload)
+                            test_post("database/tasks.json", payload)
                             if key == "POST"
                             else send_custom()
                         )
@@ -133,7 +134,12 @@ def tests():
 
         return results
 
-    run_multithreaded(send_custom, request="POST")
+    start_time = time.time()
+    results = run_multithreaded(send_custom, request="POST")
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Execution time: {execution_time:.2f} seconds")
+    print(f"Average time per request: {(execution_time / len(results)):.4f} seconds")
     # send_custom(1, "POST")
 
     return tests

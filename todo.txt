@@ -33,7 +33,7 @@ Steps:
     -> It always will be "hard coded" because what we are doing is using native HTTP protocol and sending the resources over TCP to HTTP protocol to interpret
     -> the data that we are sending. ACTUALLY the information about how to send the resource lays in the headers, 
     -> you need to parse the headers and do stuff that specific headers is bound to do.
-4. Routing can be done by reading the path from Referer field: Referer: http://192.168.0.140:5000/<route>, this is from stream that come with an http request.
+4. Routing can be done by reading the path from Referer field: Referer: http://192.168.0.140:5000/<route>, this is from stream that come with an http request. <CHECK>
     --- Regarding that
         - Parse the path from the Referer header to travel the directory with the pages to read the actual pages and send them over TCP
         - writing appropriate response headers while sending the page which is tricky
@@ -48,22 +48,30 @@ Steps:
     --- GOALS
     1. Parse the path from Referer field or first line of the request header "GET /data HTTP/1.1", this contains the relative path that was requested
     2. Send routed web page
-5. Think about making struct TcpConnection -> 
+    \\ This was implemented differently, strictly based on resource path in request line relative to the server root where data that can be accessed by the client it stored. 
+5. Think about making struct TcpConnection -> <CHECK>
     --- Regarding that
     - You could hold connection dependencies in one data container, pass it through functions and handlers if necessary.
         Know it is not necessary so leave that be, but this is a good way of holding things Like Config and connection itself.
     - You could hold information about protocol for example because it stays unchanged across connections, 
+    \\ This will stay unimplemented because there is no need for that at the moment
 6. Implement a function that returns a response with error message, It could be done mostly statically and using the information in HttpRequestError <CHECK>
 7. Think about how to propagate full error messages to the client JUST FOR FUN <CHECK>
 8. Think about validating headers that comes with a request
 9. Errors yield by client are not handled on the server, like `PUT http://127.0.0.1:5000/ 501 (Not Implemented)` <CHECK>
-10. Rewrite request to http://localhost:<port> if http://127.0.0.1/:<port> is supplied <CHECK>
+10. Rewrite request to http://localhost:<port> if http://127.0.0.1/:<port> is requested <CHECK>
+    \\ Redirected not rewritten
 11. Write macro for header creation
 12. Default config file while starting the server
-13. For the 4th time, refactor parse_request to async programming, as doing it without it is kind of a waste of time, maybe multithreading
+13. For the 4th time, refactor parse_request to async programming, as doing it without it is kind of a waste of time, maybe multithreading <CHECK>
+    \\ At this point fully async, separate async task for each request
 14. Refactor errors to Anyhow::Result<T>
 15. HttpHeaders::new() should not be exposed, we are providing specialized functions for constructing HttpRequestHeaders and HttpResponseHeaders
-16. 
+15. Tests should be written
+    -> What tests are expected:
+        - Sending malicious formatted HTTP message with headers injection, like CRLF's injection
+16. Investigate the idea of allocating static buffer in parse_http_message (which technically parses the Response only the whole message so naming is f'ed up)
+17. Rename the config.database.root and config.database.wal to something explicitly state that this a path 
 
 ISSUES
 1. Sometimes request is stuck when changing domains from localhost to 127.0.0.1, even thought request is redirected
@@ -133,6 +141,7 @@ ISSUES
     -> with `Connection: close` thought it is worth to look closely onto that while debugging. 
     -> NOTE: It happens every single request after a sufficient period, Wireshark shows [TCP keep-alive] AND [TCP Dup ACK]
     -> which I think should imply something about the issue
+
 
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,

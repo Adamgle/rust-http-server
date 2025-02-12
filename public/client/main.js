@@ -1,5 +1,5 @@
 const SERVER_ROOT = "http://localhost:5000/";
-const DATABASE_ROOT = "database/data.json";
+const DATABASE_ROOT = "database/tasks.json";
 
 const buildUrl = (root, path) => {
   const url = new URL(root).href.replace("127.0.0.1", "localhost");

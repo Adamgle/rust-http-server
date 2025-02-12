@@ -1,4 +1,3 @@
-// pub mod http {
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -10,6 +9,8 @@ use std::{
 pub use request_request_line::{HttpRequestMethod, HttpRequestRequestLine};
 pub use response_start_line::HttpResponseStartLine;
 use serde::{Deserialize, Serialize};
+
+// use crate::prelude::*;
 
 #[derive(Debug)]
 pub enum HttpProtocol {
@@ -46,6 +47,8 @@ impl Display for HttpProtocol {
 }
 
 mod request_request_line {
+    use tokio::sync::MutexGuard;
+
     use super::{HttpProtocol, HttpRequestError};
     use crate::config::Config;
     use std::fmt::Display;
@@ -67,7 +70,10 @@ mod request_request_line {
     // }
 
     impl<'a> HttpRequestRequestLine {
-        pub fn new(config: &mut Config, line: &'a str) -> Result<Self, HttpRequestError> {
+        pub async fn new(
+            config: &MutexGuard<'_, Config>,
+            line: &'a str,
+        ) -> Result<Self, HttpRequestError> {
             let fields = line.split_whitespace().collect::<Vec<&'a str>>();
 
             let [method, request_target, protocol] = fields
@@ -232,6 +238,7 @@ impl FromStr for HttpRequestMethod {
             "POST" => Ok(HttpRequestMethod::POST),
             "DELETE" => Ok(HttpRequestMethod::DELETE),
             "UPDATE" => Ok(HttpRequestMethod::UPDATE),
+            "PUT" => Ok(HttpRequestMethod::PUT),
             _ => Err(HttpRequestError {
                 status_code: 501,
                 status_text: String::from("Not Implemented"),
@@ -309,6 +316,7 @@ impl<'a> HttpHeaders<'a> {
         self.headers.insert(key, value);
     }
 
+    /// I hate this, should be typed
     pub fn detect_mime_type(&self) -> &str {
         match self.headers.get("Content-Type") {
             Some(content_type) => return content_type,
@@ -394,6 +402,7 @@ impl<'a> HttpHeaders<'a> {
     pub fn get_request_line(&self) -> Option<&HttpRequestRequestLine> {
         self.request_line.as_ref()
     }
+
     pub fn get_method(&self) -> Option<&HttpRequestMethod> {
         self.get_request_line()
             .expect("Request line not found")

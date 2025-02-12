@@ -1,5 +1,9 @@
 {
   "index_path": "pages/index.html",
+  "database": {
+    "root": "database",
+    "wal": "database/command-log.txt"
+  },
   "protocol": "HTTP",
   "redirect": {
     "domains": [

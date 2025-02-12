@@ -1,29 +1,28 @@
+mod database;
 mod http;
 mod http_request;
 mod http_response;
 pub mod logger;
+pub mod prelude;
 
 use std::error::Error;
 
-pub mod database {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Serialize, Deserialize, Debug)]
-    pub struct DatabaseEntry {
-        pub value: String,
-        pub id: u32,
-    }
-}
+use crate::prelude::*;
 
 pub mod config {
     use std::collections::HashMap;
     use std::error::Error;
     use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
     use std::path::PathBuf;
+    use std::sync::Arc;
 
+    use tokio::sync::Mutex;
+
+    use crate::database::DatabaseWAL;
     use crate::logger::Logger;
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug)]
+    /// `NOTE`: It would be good idea to document that
     pub struct Config {
         pub server_root: PathBuf,
         pub socket_address: SocketAddrV4,
@@ -32,24 +31,23 @@ pub mod config {
         // NOTE: It's not optional because in the near future we will create the file with default when the server starts
         pub config_file: config_file::ServerConfigFile,
         pub logger: Logger,
+        pub wal: Option<DatabaseWAL>,
     }
 
     // TODO: Config file should be generate when server is first started with some crap that is default and required
     // for server to work, like `protocol` field.
     pub mod config_file {
-        use serde::Deserialize;
-
         use super::Config;
         use std::{fs, path::PathBuf};
 
-        #[derive(serde::Serialize, Debug, Clone)]
+        #[derive(Debug, Clone)]
         pub enum ConfigHttpProtocol {
             HTTP,
             HTTPS,
         }
 
-        // impl for deserialization to lowercase of the protocol field
-        impl<'de> Deserialize<'de> for ConfigHttpProtocol {
+        // case insensitive deserialization of the protocol field
+        impl<'de> serde::Deserialize<'de> for ConfigHttpProtocol {
             fn deserialize<D>(deserializer: D) -> Result<ConfigHttpProtocol, D::Error>
             where
                 D: serde::Deserializer<'de>,
@@ -72,39 +70,67 @@ pub mod config {
             }
         }
 
-        #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+        #[derive(serde::Deserialize, Debug, Clone)]
         pub struct RedirectPathsEntry {
             pub from: url::Url,
             pub to: url::Url,
         }
 
         // Alias for RedirectPathsEntry, basically the same structure
-        #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+        #[derive(serde::Deserialize, Debug, Clone)]
         pub struct RedirectDomainsEntry {
             pub from: String,
             pub to: String,
         }
 
-        #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+        #[derive(serde::Deserialize, Debug, Clone)]
         pub struct RedirectEntry {
             pub domains: Option<Vec<RedirectDomainsEntry>>,
             pub paths: Option<Vec<RedirectPathsEntry>>,
         }
 
-        #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
         // `index_path` and `protocol` are not optional because they are required for server to work
         // and they will be set to defaults if not supplied
+        #[derive(serde::Deserialize, Debug, Clone)]
+        pub struct DatabaseConfigEntry {
+            /// `root` directory where paths are defined, relative to the server `/public`
+            pub root: PathBuf,
+            /// `wal` file path of write-ahead log, relative to the server `/public`
+            pub wal: PathBuf,
+        }
+
+        #[derive(serde::Deserialize, Debug, Clone)]
         pub struct ServerConfigFile {
             pub index_path: PathBuf,
+            // This probably should not be public and maybe the database should not even be in the /public dir
+            pub database: Option<DatabaseConfigEntry>,
             pub redirect: Option<RedirectEntry>,
             pub protocol: ConfigHttpProtocol,
         }
 
         impl ServerConfigFile {
             pub fn get_config() -> Result<ServerConfigFile, Box<dyn std::error::Error>> {
+                // suffix paths relative to the root
                 let config_path = Config::get_server_root().join("config/config.json");
+
+                // Deserialize the config file
                 let mut config =
                     serde_json::from_str::<ServerConfigFile>(&fs::read_to_string(config_path)?)?;
+
+                // NOTE: We will opt out of implementing deserialization for this minor transformation
+                // on the data, and even if we would implement it, it would look like a
+                // prefixing with server root, which is a PathBuf, converting that to String,
+                // and then deserializing it back to PathBuf, which is inefficient
+                // that actually applies to every transformation that we are now doing on the data
+
+                if let Some(database) = &mut config.database {
+                    database.root = Config::get_server_public().join(&database.root);
+                    database.wal = Config::get_server_public().join(&database.wal);
+                }
+
+                // NOTE: This should be done by implementing the Iterator trait on the field
+                // but I do not care about this field as it also should be rewritten and this suffix_domain_with_port
+                // should never happen, separate field should be created for that
 
                 // Map the domains with port number if specified
                 if let Some(redirect) = config.redirect.as_mut() {
@@ -135,6 +161,9 @@ pub mod config {
                     format!("{}:{}", domain, Config::get_server_port())
                 }
             }
+
+            // NOTE: Work around, make domains practically invalids domain just to fit the requirement for the application
+            // new field specific for that functionality should be created
             pub fn domain_to_url(&self, domain: &str) -> Result<url::Url, url::ParseError> {
                 Ok(url::Url::parse(&format!("{}://{}", self.protocol, domain))?)
             }
@@ -142,26 +171,8 @@ pub mod config {
     }
 
     impl Config {
-        pub fn new(
-            socket_address: SocketAddrV4,
-            options: Option<HashMap<String, String>>,
-            server_root: PathBuf,
-            http_host: url::Url,
-            config_file: config_file::ServerConfigFile,
-            logger: Logger,
-        ) -> Self {
-            Config {
-                socket_address,
-                options,
-                server_root,
-                http_host,
-                config_file,
-                logger,
-            }
-        }
-
         /// Parses user defined args while executing the program
-        pub fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn Error>> {
+        pub async fn new(args: Vec<String>) -> Result<Arc<Mutex<Config>>, Box<dyn Error>> {
             if args.len() < 2 {
                 return Err(format!("Usage: {} <address:port> [server_root_path]", args[0]).into());
             }
@@ -190,10 +201,6 @@ pub mod config {
                     })?,
             };
 
-            // Initialize the log file, open for appending
-            // let logger = Logger::new()?;
-            let logger = Logger {};
-
             // In all the above did not throw and error, we will set the environment variables
             // Set the SERVER_ROOT, SERVER_PUBLIC, SERVER_PORT environment variables
             // refer as std::env::var("SERVER_ROOT") to get the value
@@ -201,15 +208,26 @@ pub mod config {
             std::env::set_var("SERVER_PUBLIC", &server_root.join("public"));
             std::env::set_var("SERVER_PORT", socket_address.port().to_string());
 
-            Ok(Config::new(
+            // This has to be done AFTER env's are set, as it may rely on them
+            let config_file = config_file::ServerConfigFile::get_config()?;
+
+            let wal = if let Some(database) = &config_file.database {
+                Some(DatabaseWAL::new(&database).await?)
+            } else {
+                None
+            };
+
+            Ok(Arc::new(Mutex::new(Config {
                 socket_address,
                 options,
                 server_root,
+                config_file,
+                // database_wal,
                 // This will normalize localhost and 127.0.0.1 in URL
-                url::Url::parse(&format!("http://{}", socket_address))?,
-                config_file::ServerConfigFile::get_config()?,
-                logger,
-            ))
+                http_host: url::Url::parse(&format!("http://{}", socket_address))?,
+                logger: Logger {},
+                wal,
+            })))
         }
 
         pub fn parse_options(options: Option<&String>) -> Option<HashMap<String, String>> {
@@ -258,17 +276,15 @@ pub mod tcp_handlers {
     use super::http::{HttpHeaders, HttpProtocol, HttpRequestMethod};
     use super::http_request::HttpRequest;
     use crate::config::Config::{self};
-    use crate::database::DatabaseEntry;
+    use crate::database::{Database, DatabaseCommand, DatabaseTask, DatabaseType};
     use crate::*;
     use http::{HttpRequestError, HttpResponseStartLine};
     use http_response::HttpResponse;
     use std::borrow::Cow;
-    use std::fs::OpenOptions;
-    use std::io::{Read, Seek, Write};
     use std::path::Path;
-    use std::time::Duration;
+    use std::sync::Arc;
     use tokio::net::{TcpListener, TcpStream};
-    use tokio::time::timeout;
+    use tokio::sync::Mutex;
 
     // QUESTION: Why there server you are about to make is asynchronous, not multithreaded?
     // => FOLLOW UP QUESTION:
@@ -280,7 +296,7 @@ pub mod tcp_handlers {
     // can come at different intervals of time. Thread approach would be great if you would like to parallelize bunch of requests
     // that are independent of each other and this some sort of order of execution is not needed.
 
-    pub async fn connect(config: &mut Config) -> Result<TcpListener, Box<dyn Error>> {
+    pub async fn connect(config: MutexGuard<'_, Config>) -> Result<TcpListener, Box<dyn Error>> {
         return TcpListener::bind(config.socket_address)
             .await
             .map_err(|e| e.into());
@@ -296,11 +312,13 @@ pub mod tcp_handlers {
     /// If stream is None,
     /// If err is None, send default 500 Internal Server Error response
     async fn send_error_response(
-        config: &mut Config,
+        config: Arc<Mutex<Config>>,
         stream: &mut TcpStream,
         // http_err: Option<&HttpRequestError>,
         mut err: Option<Box<dyn Error>>,
     ) -> Result<(), Box<dyn Error>> {
+        let config = config.lock().await;
+
         let pages_path = std::path::Path::new("public/pages/");
 
         // If err is None, send default 500 Internal Server Error response
@@ -348,7 +366,7 @@ pub mod tcp_handlers {
                 );
 
                 let mut response = HttpResponse::new(response_headers, Some(body))?;
-                return response.write(config, stream).await;
+                return response.write(&config, stream).await;
             } else {
                 // Sending text/plain as the error message if the error is not of the HttpRequestError type
 
@@ -373,7 +391,7 @@ pub mod tcp_handlers {
 
                 let mut response = HttpResponse::new(headers, Some(body))?;
 
-                return response.write(config, stream).await;
+                return response.write(&config, stream).await;
             }
             // NOTE: This is how you can handle different errors by downcasting to the specific error type
             // else if let Some(io_err) = err.downcast_ref::<std::io::Error>() {}
@@ -384,9 +402,9 @@ pub mod tcp_handlers {
     }
 
     /// Starts TCP server with provided `Config`, continuously listens for incoming request and propagates them further.
-    pub async fn run_tcp_server(config: &mut Config) -> Result<(), Box<dyn Error>> {
-        let listener = self::connect(config).await?;
-        // listener.set_nonblocking(true)?;
+    pub async fn run_tcp_server(config: Arc<Mutex<Config>>) -> Result<(), Box<dyn Error>> {
+        // This extra lock will only affect first load time of the server and it is also negligible
+        let listener = self::connect(config.lock().await).await?;
 
         println!(
             "TCP Connection Established at {:?}\nListening...",
@@ -399,14 +417,26 @@ pub mod tcp_handlers {
                 Ok((mut stream, socket)) => {
                     println!("Connection established with: {:?}", socket);
 
-                    let mut config_clone = config.clone();
+                    // NOTE: This is very bad, if we would design it to hold database because of the inefficiencies
+                    // while writing to it a new entry, that also copy the whole database to the memory
+                    // let mut config_clone = config.clone();
+
+                    // Mem inspect config
+                    // println!("Size the Config struct that is being copied in every single request because it spawns it's separate async task {:#?}",
+                    // std::mem::size_of_val(&config_clone));
+
+                    let config = Arc::clone(&config);
 
                     if let Err(res) = tokio::time::timeout(
                         tokio::time::Duration::from_secs(5),
                         tokio::spawn(async move {
-                            if let Err(err) =
-                                self::handle_client(&mut stream, &mut config_clone).await
-                            {
+                            // let config = config.lock().await;
+                            // let mut config = Arc::new(Mutex::new(config));
+                            // let mut config = config.lock().await;
+
+                            let config = config.lock().await;
+
+                            if let Err(err) = self::handle_client(&mut stream, config).await {
                                 eprintln!("Error handling request: {}", err);
                                 // send_error_response(&mut config_clone, &mut stream, Some(err)).await?;
                             } else {
@@ -428,13 +458,16 @@ pub mod tcp_handlers {
     /// Handles incoming request from the client.
     async fn handle_client(
         stream: &mut TcpStream,
-        config: &mut Config,
+        config: MutexGuard<'_, Config>,
     ) -> Result<(), Box<dyn Error>> {
-        let request: HttpRequest<'_> = HttpRequest::new(config, stream).await?;
+        let request: HttpRequest<'_> = HttpRequest::new(&config, stream).await?;
 
         let mut response_headers: HttpHeaders<'_> = HttpResponse::new_headers(None);
 
-        let (method, path) = (request.get_method(), request.get_path_segment(config)?);
+        let (method, path) = (
+            request.get_method(),
+            request.get_path_segment(&config).await?,
+        );
 
         println!("Requesting: {:?} {}", method, path.display());
 
@@ -443,74 +476,45 @@ pub mod tcp_handlers {
         // paths are defined in the config file under 'domain' field, for domains and path redirect in the "paths" field
 
         // Give back the reference supplied to the function
-        if request.redirect_request(stream, config).await? {
+        if request.redirect_request(stream, &config).await? {
             return Ok(());
         };
 
         let response_body = match method {
+            // This throws an error because the app is making a GET request to the path
+            // that does not exists, which is correct by definition
+            // NOTE: We should initialize the database only once, or at least at the top,
+            // but that tomorrow...
             HttpRequestMethod::GET => Some(request.read_requested_resource(&mut response_headers)?),
             HttpRequestMethod::POST => {
                 // This would return Path not found if the path does not exists
                 // If we would want to make custom endpoints without actual path existence
                 // then it should be rewritten
 
-                let resource = request.get_absolute_resource_path()?;
+                // let resource = request.get_absolute_resource_path()?;
 
+                // NOTE: Paths under /database should validate the existence of wal and database_config only once
+                // not to avoid checking the same thing multiple times
                 match path {
-                    p if p == Path::new("database/data.json") => {
-                        // Default already created, we are not changing anything else besides status code
-                        // response_headers.start_line.as_mut().unwrap().status_code = 201;
+                    p if p == Path::new("database/tasks.json") => {
+                        // if let Some(database_config) = config.config_file.database.as_ref() {
+                        match request.get_body() {
+                            Some(body) => {
+                                let instance =
+                                    Database::<DatabaseTask>::new(&config, DatabaseType::Tasks)
+                                        .await;
 
-                        // NOTE: Maybe we should make this writing to database async
-                        let mut database =
-                            OpenOptions::new().write(true).read(true).open(resource)?;
-
-                        let mut buffer = Vec::<u8>::new();
-
-                        database.read_to_end(&mut buffer).map_err(|e| {
-                            eprintln!("Error reading database: {:#?}", e);
-                            HttpRequestError {
-                                status_code: 500,
-                                status_text: String::from("Internal Server Error"),
-                                ..Default::default()
+                                instance.insert(body).await;
                             }
-                        })?;
+                            None => {}
+                        }
+                        // }
+                        unimplemented!()
 
-                        let mut error = HttpRequestError {
-                            content_type: Some(String::from("application/json")),
-                            message: Some(String::from("Internal Server Error")),
-                            ..Default::default()
-                        };
-
-                        let body = request.get_body().ok_or_else(|| {
-                            eprintln!("Request body is empty");
-
-                            error.message = Some(String::from("Request body is empty"));
-                            error.clone()
-                        })?;
-                        // .trim();
-
-                        let entry = serde_json::from_slice::<DatabaseEntry>(body).map_err(|e| {
-                            eprintln!("Error deserializing database entry: {:#?}", e);
-                            error.clone()
-                        })?;
-
-                        // Also there
-                        let mut serialized = serde_json::from_slice::<Vec<DatabaseEntry>>(&buffer)
-                            .map_err(|e| {
-                                eprintln!("Error deserializing database: {:#?}", e);
-                                error.clone()
-                            })?;
-
-                        serialized.push(entry);
-
-                        database.seek(std::io::SeekFrom::Start(0))?;
-                        database.set_len(0)?;
-
-                        database.write_all(serde_json::to_vec(&serialized)?.as_slice())?;
-                        database.flush()?;
-
-                        Some(String::from("Ok"))
+                        // unimplemented!()
+                        // } else {
+                        // panic!("DROP DATABASE \"\\ROOT\" EXECUTED SUCCESSFUL");
+                        // }
                     }
                     _ => {
                         eprintln!("Path does not exists on the server or the method used is unsupported for that path: {:?}", path);
@@ -533,7 +537,7 @@ pub mod tcp_handlers {
 
         let mut response: HttpResponse<'_> = HttpResponse::new(response_headers, response_body)?;
 
-        response.write(config, stream).await?;
+        response.write(&config, stream).await?;
         Ok(())
     }
 }

@@ -1,17 +1,14 @@
+use crate::config::Config;
+
 use std::borrow::Cow;
 use std::error::Error;
-use std::f32::consts::E;
-use std::io::{BufRead, BufReader, Read};
-use std::path::{PathBuf, PrefixComponent};
-use std::sync::{Arc, Mutex};
-use std::task::Context;
-use std::time::Duration;
-use std::{fs, thread};
-
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::fs;
+use std::io::BufRead;
+use std::path::PathBuf;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-use crate::config::Config;
+use crate::prelude::*;
 
 use crate::{
     http::{
@@ -40,9 +37,12 @@ impl<'a> std::fmt::Display for HttpRequest<'a> {
 }
 impl<'a> HttpRequest<'a> {
     // Creates new HttpRequest instance from TcpStream, reads the stream to UTF-8 String and parses the headers
-    pub async fn new(config: &mut Config, stream: &mut TcpStream) -> Result<Self, Box<dyn Error>> {
+    pub async fn new(
+        config: &MutexGuard<'_, Config>,
+        stream: &mut TcpStream,
+    ) -> Result<Self, Box<dyn Error>> {
         // Parse the TCP stream
-        let (parsed_headers, body) = Self::parse_request(config, stream).await?;
+        let (parsed_headers, body) = Self::parse_request(&config, stream).await?;
 
         Ok(Self {
             // headers,
@@ -51,8 +51,9 @@ impl<'a> HttpRequest<'a> {
         })
     }
 
+    /// Parses http request from the TcpStream
     async fn parse_request(
-        config: &mut Config,
+        config: &MutexGuard<'_, Config>,
         stream: &mut TcpStream,
     ) -> Result<(HttpHeaders<'a>, Option<Vec<u8>>), Box<dyn Error>> {
         let mut buffer = Vec::<u8>::new();
@@ -61,10 +62,10 @@ impl<'a> HttpRequest<'a> {
         // 1. We will look for Content-Length header, we should get it in one read
         // thought it does not really matter. Content-Length header is the size of the message in bytes
         // incomplete message is an indication of a bad request and should be terminated.
-        // 2.
 
         // TODO: Maybe it could greater idea to encapsulate that data as something like HttpRequestParser or other name
         // because it feels kind of static or unstructured
+
         let mut expected_size: Option<usize> = None;
         let mut headers: Option<HttpHeaders> = None;
         let mut transferred: usize = 0;
@@ -139,7 +140,8 @@ impl<'a> HttpRequest<'a> {
                                     // First line is request line
                                     if headers.is_none() {
                                         headers = Some(Self::new_headers(
-                                            HttpRequestRequestLine::new(config, &line)
+                                            HttpRequestRequestLine::new(&config, &line)
+                                                .await
                                                 .expect("Request line is invalid"),
                                         ));
                                     } else {
@@ -172,8 +174,8 @@ impl<'a> HttpRequest<'a> {
         if let Some(headers) = headers {
             Ok((headers, Some(buffer)))
         } else {
-            // NOTE: This probably useless, the shutdown
             stream.shutdown().await?;
+
             return Err("Invalid request".into());
         }
     }
@@ -183,7 +185,6 @@ impl<'a> HttpRequest<'a> {
     }
 
     fn new_headers(request_line: HttpRequestRequestLine) -> HttpHeaders<'a> {
-        // NOTE: I guess this is bad design, because we are creating the fields of the struct positionally
         HttpHeaders::new(None, request_line.into())
     }
 
@@ -212,12 +213,16 @@ impl<'a> HttpRequest<'a> {
     /// Returns relative path to the requested resource
     ///
     /// Checks for existence of the path, return 404 if path does not exists
-    pub fn get_path_segment(&self, config: &mut Config) -> Result<PathBuf, HttpRequestError> {
+    pub async fn get_path_segment(
+        &self,
+        config: &MutexGuard<'_, Config>,
+    ) -> Result<PathBuf, HttpRequestError> {
         // I do not like that idea because printing requesting: <path> would be misleading, showing "/" instead of actual path resource
         // which on the server is consistency is important
         // you could mitigate that by creating a structure that implements Display with alternate behavior
         // TODO: Normalize the `dir`/index.html to '/' root
 
+        // let config = config.lock().await;
         let absolute_path = self.get_absolute_resource_path()?;
 
         absolute_path
@@ -276,7 +281,7 @@ impl<'a> HttpRequest<'a> {
     pub async fn redirect_request(
         &self,
         stream: &mut TcpStream,
-        config: &mut Config,
+        config: &MutexGuard<'_, Config>,
     ) -> Result<bool, Box<dyn Error>> {
         for (key, value) in self.parsed_headers.get_headers() {
             match key.as_ref() {
@@ -304,7 +309,7 @@ impl<'a> HttpRequest<'a> {
 
                                     // Redirecting to Location we should remember that
                                     // when we do POST request to some URL with a path
-                                    // like database/data.json we should set the location header
+                                    // like database/tasks.json we should set the location header
                                     // not only to the domain but also suffix it with the incoming path
                                     // for request to be valid and correctly redirected
 
@@ -315,8 +320,9 @@ impl<'a> HttpRequest<'a> {
                                     let mut location =
                                         config.config_file.domain_to_url(&domain.to)?;
 
-                                    location
-                                        .set_path(self.get_path_segment(config)?.to_str().unwrap());
+                                    location.set_path(
+                                        self.get_path_segment(&config).await?.to_str().unwrap(),
+                                    );
 
                                     // NOTE: This as it happens can be relative, so we could try to make it relative someday
                                     response_headers

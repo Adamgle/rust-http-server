@@ -5,7 +5,7 @@ use std::{env, error::Error};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = env::args().collect::<Vec<String>>();
-    let mut config: Config = Config::parse_args(args)?;
+    let config = Config::new(args).await?;
 
     // ctrlc::set_handler(move || {
     //     // Ok(file) => {
@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     //     std::process::exit(0);
     // })?;
 
-    if let Err(e) = run_tcp_server(&mut config).await {
+    if let Err(e) = run_tcp_server(config).await {
         eprintln!("Server error: {}", e);
         return Err(e);
     }
