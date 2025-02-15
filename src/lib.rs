@@ -27,7 +27,7 @@ pub mod config {
         pub server_root: PathBuf,
         pub socket_address: SocketAddrV4,
         pub options: Option<HashMap<String, String>>,
-        pub http_host: url::Url,
+        pub http_url: url::Url,
         // NOTE: It's not optional because in the near future we will create the file with default when the server starts
         pub config_file: config_file::ServerConfigFile,
         pub logger: Logger,
@@ -106,6 +106,7 @@ pub mod config {
             pub database: Option<DatabaseConfigEntry>,
             pub redirect: Option<RedirectEntry>,
             pub protocol: ConfigHttpProtocol,
+            pub domain: String,
         }
 
         impl ServerConfigFile {
@@ -116,6 +117,12 @@ pub mod config {
                 // Deserialize the config file
                 let mut config =
                     serde_json::from_str::<ServerConfigFile>(&fs::read_to_string(config_path)?)?;
+
+                if config.domain.contains(":") {
+                    panic!(
+                        "Invalid domain cause of the \":\" presence, port number should not be supplied in the domain field"
+                    );
+                }
 
                 // NOTE: We will opt out of implementing deserialization for this minor transformation
                 // on the data, and even if we would implement it, it would look like a
@@ -179,6 +186,7 @@ pub mod config {
 
             // Required instead of parsing to SocketAddrV4 because we could not supply `localhost` as a socket
             // because parsing would fail
+            // Resolves localhost to 127.0.0.1
             let socket_address = match args[1].to_socket_addrs()?.find(|addr| addr.is_ipv4()) {
                 Some(SocketAddr::V4(addr)) => addr,
                 _ => return Err("Invalid IPv4 socket address".into()),
@@ -217,15 +225,23 @@ pub mod config {
                 None
             };
 
+            let domain = config_file.domain.clone();
+
+            // Bat-shit crazy
+            let http_url = url::Url::parse(&format!(
+                "{}://{}:{}",
+                config_file.protocol,
+                domain,
+                socket_address.port().to_string()
+            ))?;
+
             Ok(Arc::new(Mutex::new(Config {
                 socket_address,
                 options,
                 server_root,
                 config_file,
-                // database_wal,
-                // This will normalize localhost and 127.0.0.1 in URL
-                http_host: url::Url::parse(&format!("http://{}", socket_address))?,
                 logger: Logger {},
+                http_url,
                 wal,
             })))
         }
@@ -266,6 +282,8 @@ pub mod config {
             std::env::var("SERVER_PORT").expect("server_port not set in the SERVER_PORT env")
         }
 
+        /// NOTE: Should be generated explicitly or used the filed set in the config file,
+        ///
         pub fn get_index_path(&self) -> PathBuf {
             self.config_file.index_path.clone()
         }
@@ -276,12 +294,11 @@ pub mod tcp_handlers {
     use super::http::{HttpHeaders, HttpProtocol, HttpRequestMethod};
     use super::http_request::HttpRequest;
     use crate::config::Config::{self};
-    use crate::database::{Database, DatabaseCommand, DatabaseTask, DatabaseType};
+    use crate::database::{Database, DatabaseTask, DatabaseType};
     use crate::*;
     use http::{HttpRequestError, HttpResponseStartLine};
     use http_response::HttpResponse;
     use std::borrow::Cow;
-    use std::path::Path;
     use std::sync::Arc;
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Mutex;
@@ -312,13 +329,11 @@ pub mod tcp_handlers {
     /// If stream is None,
     /// If err is None, send default 500 Internal Server Error response
     async fn send_error_response(
-        config: Arc<Mutex<Config>>,
+        config: &MutexGuard<'_, Config>,
         stream: &mut TcpStream,
         // http_err: Option<&HttpRequestError>,
         mut err: Option<Box<dyn Error>>,
     ) -> Result<(), Box<dyn Error>> {
-        let config = config.lock().await;
-
         let pages_path = std::path::Path::new("public/pages/");
 
         // If err is None, send default 500 Internal Server Error response
@@ -422,7 +437,7 @@ pub mod tcp_handlers {
                     // let mut config_clone = config.clone();
 
                     // Mem inspect config
-                    // println!("Size the Config struct that is being copied in every single request because it spawns it's separate async task {:#?}",
+                    // println!("Size of the Config struct that is being copied in every single request because it spawns it's separate async task {:#?}",
                     // std::mem::size_of_val(&config_clone));
 
                     let config = Arc::clone(&config);
@@ -430,15 +445,13 @@ pub mod tcp_handlers {
                     if let Err(res) = tokio::time::timeout(
                         tokio::time::Duration::from_secs(5),
                         tokio::spawn(async move {
-                            // let config = config.lock().await;
-                            // let mut config = Arc::new(Mutex::new(config));
-                            // let mut config = config.lock().await;
-
                             let config = config.lock().await;
 
                             if let Err(err) = self::handle_client(&mut stream, config).await {
                                 eprintln!("Error handling request: {}", err);
-                                // send_error_response(&mut config_clone, &mut stream, Some(err)).await?;
+                                // send_error_response(&config, &mut stream, Some(err))
+                                // .await
+                                // .unwrap();
                             } else {
                                 // Request termination
                                 // println!("Request handled successfully")
@@ -461,31 +474,45 @@ pub mod tcp_handlers {
         config: MutexGuard<'_, Config>,
     ) -> Result<(), Box<dyn Error>> {
         let request: HttpRequest<'_> = HttpRequest::new(&config, stream).await?;
-
         let mut response_headers: HttpHeaders<'_> = HttpResponse::new_headers(None);
 
-        let (method, path) = (
-            request.get_method(),
-            request.get_path_segment(&config).await?,
-        );
+        // If path is invalid and cannot be encoded, that should end the request
+        let path = request.get_request_target_path()?;
 
-        println!("Requesting: {:?} {}", method, path.display());
+        let (method, path) = (request.get_method(), path);
+
+        println!("Requesting: {:?} {}", method, path);
 
         // This will be executed for every request and try to match paths that should be redirected
         // although the only redirection that we are doing is from http://127.0.0.1:<port> to http://localhost:<port>
         // paths are defined in the config file under 'domain' field, for domains and path redirect in the "paths" field
 
         // Give back the reference supplied to the function
-        if request.redirect_request(stream, &config).await? {
+        if request.redirect_request(&config, stream, &path).await? {
             return Ok(());
         };
+
+        // Run middleware if it exists for the paths
+        // path = /database/
+        // middleware(request)
+
+        // Very basic middleware to trigger some functionality on certain paths and match the pattern
+        // match path {
+        //     p if true => {
+        //         println!("Middleware executed for path: {:?}", p.components());
+        //     }
+        //     _ => {}
+        // }
 
         let response_body = match method {
             // This throws an error because the app is making a GET request to the path
             // that does not exists, which is correct by definition
             // NOTE: We should initialize the database only once, or at least at the top,
             // but that tomorrow...
-            HttpRequestMethod::GET => Some(request.read_requested_resource(&mut response_headers)?),
+            // GET /database/tasks.json => Database::init() => Give back the control flow to the request initialized \end_middleware
+            HttpRequestMethod::GET => {
+                Some(request.read_requested_resource(&config, &mut response_headers)?)
+            }
             HttpRequestMethod::POST => {
                 // This would return Path not found if the path does not exists
                 // If we would want to make custom endpoints without actual path existence
@@ -495,8 +522,9 @@ pub mod tcp_handlers {
 
                 // NOTE: Paths under /database should validate the existence of wal and database_config only once
                 // not to avoid checking the same thing multiple times
+
                 match path {
-                    p if p == Path::new("database/tasks.json") => {
+                    p if p == "database/tasks.json" => {
                         // if let Some(database_config) = config.config_file.database.as_ref() {
                         match request.get_body() {
                             Some(body) => {

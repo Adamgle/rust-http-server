@@ -2,9 +2,10 @@ use crate::config::Config;
 
 use std::borrow::Cow;
 use std::error::Error;
-use std::fs;
 use std::io::BufRead;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::str::Utf8Error;
+use std::{fs, vec};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -27,12 +28,7 @@ pub struct HttpRequest<'a> {
 
 impl<'a> std::fmt::Display for HttpRequest<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{:#?}\n{:#?}",
-            self.parsed_headers,
-            "" // self.body.clone().map(|v| String::from_utf8(v))
-        )
+        write!(f, "{:#?}\n{:#?}", self.parsed_headers, "")
     }
 }
 impl<'a> HttpRequest<'a> {
@@ -42,7 +38,26 @@ impl<'a> HttpRequest<'a> {
         stream: &mut TcpStream,
     ) -> Result<Self, Box<dyn Error>> {
         // Parse the TCP stream
-        let (parsed_headers, body) = Self::parse_request(&config, stream).await?;
+        let (mut parsed_headers, body) = Self::parse_request(&config, stream).await?;
+
+        // NOTE: I thing the discrepancy between the domain used here should be resolved thought should be investigated first
+        // requested_target => http://localhost:5000/ It uses config to build the url as the default from the domain and port
+        //  -> thought if the request is made from different domain, first off all it is not possible,
+        //  -> Host: 127.0.0.1:5000 => request_target => localhost:5000 
+        // NOTE: Something like this should be done
+        
+        if let Some(request_line) = parsed_headers.get_request_target_mut() {
+            // if let Some(domain) = request_line.domain() {
+            //     *request_line.set_host()
+            // }   
+            // println!("request_line: {:?}", request_line.as_str());
+
+            // let domain = &config.config_file.domain.clone();
+
+            // request_line.set_host(Some(domain)).unwrap();
+
+            // println!("After setting host: {:?}", request_line.as_str());
+        }
 
         Ok(Self {
             // headers,
@@ -56,6 +71,8 @@ impl<'a> HttpRequest<'a> {
         config: &MutexGuard<'_, Config>,
         stream: &mut TcpStream,
     ) -> Result<(HttpHeaders<'a>, Option<Vec<u8>>), Box<dyn Error>> {
+        // TODO: Verify the presence of the Host header, 400 if not present
+
         let mut buffer = Vec::<u8>::new();
 
         // Stable solution
@@ -78,6 +95,10 @@ impl<'a> HttpRequest<'a> {
             }
 
             stream.readable().await?;
+
+            // NOTE: There could be an issue if the headers are larger than 1024 bytes
+            // that could omit some bytes because they will appear as not CRLF terminated
+            // because full line was not read
 
             let mut chunk = [0u8; 1024];
 
@@ -194,67 +215,131 @@ impl<'a> HttpRequest<'a> {
 
     /// Returns absolute path to the requested resource on the server
     ///
-    /// Checks for existence of the path, return 404 if path does not exists
-    pub fn get_absolute_resource_path(&self) -> Result<PathBuf, HttpRequestError> {
-        // request_line is guaranteed to be Some
-        let target = self.parsed_headers.get_request_target().unwrap();
-
-        target.canonicalize().map_err(|e| {
-            eprintln!("Path not found: {:?}\nWith error message {}", target, e);
-
-            HttpRequestError {
-                status_code: 404,
-                status_text: String::from("Not Found"),
-                ..Default::default()
-            }
-        })
-    }
-
-    /// Returns relative path to the requested resource
+    /// Resolves '/' to '/index.html'
     ///
     /// Checks for existence of the path, return 404 if path does not exists
-    pub async fn get_path_segment(
+    ///
+    /// `NOTE`: WE will not support matching paths without extensions for now
+    /// last segment without extension will be treated as a directory and we will try to find index.html in that directory
+    pub fn get_absolute_resource_path(
         &self,
         config: &MutexGuard<'_, Config>,
     ) -> Result<PathBuf, HttpRequestError> {
-        // I do not like that idea because printing requesting: <path> would be misleading, showing "/" instead of actual path resource
-        // which on the server is consistency is important
-        // you could mitigate that by creating a structure that implements Display with alternate behavior
-        // TODO: Normalize the `dir`/index.html to '/' root
+        match self
+            .get_request_target_path()
+            // NOTE: We could mutate the segments directly
+        {
+            Ok(path) => {
+                // TODO: In order to match the files on the server you need to look up specialized directories
+                // in the /public, in order to do that you could do as follows:
 
-        // let config = config.lock().await;
-        let absolute_path = self.get_absolute_resource_path()?;
+                // 1. We know that the file in 99% cases does not exists at given path, thought it could be in the specialized directories 
+                // we could simply traverse the /public directory in order to find a file, so given path:
+                // .../public/index.html => We would look at every directory in order to find out that it was under pages directory
+                // this solution is not optimal, but would fulfill every case, thought this does not utilize the fact of the existence of specialized directories
+                
+                // 2. We will map specialized directories to the extension of the file requested, so if the file is requested with .html extension
+                // we will look in the /public/pages directory, if the file is requested with .css extension we will look in the /public/styles directory
+                // thought that solution cannot predict the requested path if it does not end with an extension that would resolve to appropriate directory
+                // In that case, if the requested_path does not contain a file extension as the last segment, we would treat that as a directory,
+                // thought we have to check if it is not a file without an extension, and then we would try to find index.html in that directory.
 
-        absolute_path
-            .strip_prefix(Config::get_server_public())
-            .map(|p| match p {
-                // If path is root, return index.html
-                p if p == &config.get_index_path() => "/".into(),
-                p => p.into(),
-            })
-            // Should not happen ever because that would be equivalent to accessing a server files outside of the public directory
-            .map_err(|e| {
-                eprintln!(
-                    "Requested path is not a prefix of the server public path: {:?}",
-                    e
-                );
+                // If that would be absolute and would join with the public directory path, it would create a new absolute path
+                // effectively allowing to traverse the file system of the server
+                
+                let path = path.to_string();
+                
+                // NOTE: Error handling should be done here
+                let path = Path::new(&path).strip_prefix("/").expect("Invalid path");
 
-                HttpRequestError {
-                    status_code: 404,
-                    status_text: String::from("Not Found"),
-                    ..Default::default()
+                // I do not know if that is stable enough, as windows has weird absolute path handling
+                if path.is_absolute() || path.starts_with("/") {
+                    eprintln!("Path is absolute, not allowed: {:?}", path);
+                    return Err(HttpRequestError {
+                        status_code: 400,
+                        status_text: "Bad Request".into(),
+                        // NOTE: I do not understand why this is declared as an owned String
+                        content_type: String::from("application/json").into(),
+                        ..Default::default()
+                    });
+                };
+
+                let path = Config::get_server_public().join(path);
+                println!("Path with segments: {:?}", path);
+
+                // This checks file existence
+                let metadata = path.metadata().map_err(|err| {
+                    eprintln!("[ERROR MESSAGE]: {err}");
+                    HttpRequestError::default()
+                })?;
+
+                if metadata.is_dir() {
+                    // Check if index.html exists in the directory
+                    let index_path = path.join("index.html");
+
+                    if index_path.exists() {
+                        return Ok(index_path);
+                    }
+                } else {
+                    // It's a file
+                    // Check if the file has a extension, as those without are not supported, that would require some bytes-based checking
+                    if path.extension().is_some() {
+                        return Ok(path);
+                    }
                 }
-            })
+
+                Err(HttpRequestError::default())
+            }
+            Err(err) => {
+                eprintln!("Could not decode the path as UTF-8: {}", err);
+
+                return Err(HttpRequestError {
+                    status_code: 400,
+                    status_text: "Bad Request".into(),
+                    ..Default::default()
+                });
+            }
+        }
     }
+
+    /// Returns path of the requested resource without resolving "/" to "index.html"
+    /// Encoding the percent-encoded path to UTF-8
+    // NOTE: Consider making it eagerly unwrapped as this is critical for request to continue
+    pub fn get_request_target_path(&self) -> Result<Cow<'_, str>, Utf8Error> {
+        percent_encoding::percent_decode(
+            self.parsed_headers
+                .get_request_target()
+                .map(|s: &url::Url| s.path())
+                .unwrap()
+                .as_bytes(),
+        )
+        .decode_utf8()
+    }
+
+    /// Returns relative path to the requested resource on the server, without resolving "/" to "index.html".
+    /// Relies on self.get_path_segments() to get the path segments as a Vector<&str>
+    /// `Example`
+    ///
+    /// Given path segments ["/"] would evaluate to "/"
+    ///
+    /// Given path segments ["path", "to", "dir", ""] would evaluate to "/path/to/dir/"
+    ///
+    /// Given path segments ["path", "to", "dir"] would evaluate to "/path/to/dir" \\ NOTE: Dir should be treated a directory, and we will
+    ///                                                                            \\ try to find index.html in that directory
+    // NOTE: Consider making it eagerly unwrapped as this is critical for request to continue
+    // pub fn get_path_segment(&self) -> Option<String> {
+    //     self.get_path_segments().map(|segments| segments.join("/"))
+    // }
 
     /// Takes Response `HttpHeaders` and write `Content-Type` and `Content-Length` headers, returning the requested resource as a String
     /// Walks `/public` directory looking for path
     pub fn read_requested_resource(
         &'a self,
-        // request: &'a HttpHeaders<'a>,
+        config: &MutexGuard<'_, Config>,
         response_headers: &mut HttpHeaders<'a>,
     ) -> Result<String, Box<dyn Error>> {
-        let resource_path = self.get_absolute_resource_path()?;
+        let resource_path: PathBuf = self.get_absolute_resource_path(config)?;
+        println!("resource_path: {:?}", resource_path);
 
         // Read the file
         let requested_resource = fs::read_to_string(resource_path)?;
@@ -280,9 +365,11 @@ impl<'a> HttpRequest<'a> {
     /// Return bool indicating if the request was redirected
     pub async fn redirect_request(
         &self,
-        stream: &mut TcpStream,
         config: &MutexGuard<'_, Config>,
+        stream: &mut TcpStream,
+        path: &Cow<'_, str>,
     ) -> Result<bool, Box<dyn Error>> {
+        // NOTE: Indentation in this function are f'ed up, should be fixed
         for (key, value) in self.parsed_headers.get_headers() {
             match key.as_ref() {
                 "Host" => {
@@ -320,9 +407,13 @@ impl<'a> HttpRequest<'a> {
                                     let mut location =
                                         config.config_file.domain_to_url(&domain.to)?;
 
-                                    location.set_path(
-                                        self.get_path_segment(&config).await?.to_str().unwrap(),
-                                    );
+                                    // NOTE: Headers should be refactored to separate structs for Response and Request,
+                                    // as this ads the ambiguity of path segment to be None which is impossible
+                                    // and cannot be set as an normal Type because in the Response headers it would be None
+                                    // and in the given approach we always have to check for it to be Some
+                                    // UPDATE: Not really, see todo.txt
+
+                                    location.set_path(path);
 
                                     // NOTE: This as it happens can be relative, so we could try to make it relative someday
                                     response_headers

@@ -71,13 +71,25 @@ Steps:
     -> What tests are expected:
         - Sending malicious formatted HTTP message with headers injection, like CRLF's injection
 16. Investigate the idea of allocating static buffer in parse_http_message (which technically parses the Response only the whole message so naming is f'ed up)
+    \\ Not possible, look up the comment in the parse_http_message
 17. Rename the config.database.root and config.database.wal to something explicitly state that this a path 
-
+18. Refactor HttpHeaders to separate structs for HttpRequest and HttpResponse to avoid ambiguity
+    \\ Maybe we could avoid that, by providing some methods on each struct that eagerly unwrap's the field that are for sure there, 
+    \\ and the error would be thrown earlier if not supplied. 
+19. Think about implementing some kind of middleware or similar functionality, maybe not really middleware but something that runs 
+    -> some pre-defined code on certain paths, specifically in the context of Database initialization
+20. Investigate the possible issue with request_parsing with possible omit of certain header fields when headers are greater 1024 bytes, read the comment
+21. Investigate the necessity of existence of server_root field inside the Config struct  
+22. Provide a way to mutate the request line by reference in the HttpRequest::new() or parse_request
+23. While resolving absolute path to the requested resource we need some functionality to determine where the page/stylesheets/script lies in the public directory
+    -> as they have it's own directory, we would probably need to match a Content-Type onto that to alter the absolute path to point to that specialized directories
+    
 ISSUES
 1. Sometimes request is stuck when changing domains from localhost to 127.0.0.1, even thought request is redirected
     -> there is an pending state on the server of that request and after long enough time it throw "No bytes read from the stream" <RESOLVED>
     -> It could be caused by incorrect redirection handling from that domain, although when you first start the server
-    -> it works fine. \\ FEEDBACK: I think that was caused by incorrect request reading, this issue was cause by calling read function on a stream
+    -> it works fine. 
+            \\ FEEDBACK: I think that was caused by incorrect request reading, this issue was cause by calling read function on a stream
             \\ when there is no more data to be read
         => Update -> it seem to work fine in browser, but when using headless client which does not firstly initiate GET to the root, 
         => instead making POST request, it freezes

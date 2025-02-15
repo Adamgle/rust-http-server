@@ -1,10 +1,4 @@
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    fmt::Display,
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::{borrow::Cow, collections::HashMap, fmt::Display, path::Path, str::FromStr};
 
 pub use request_request_line::{HttpRequestMethod, HttpRequestRequestLine};
 pub use response_start_line::HttpResponseStartLine;
@@ -52,14 +46,13 @@ mod request_request_line {
     use super::{HttpProtocol, HttpRequestError};
     use crate::config::Config;
     use std::fmt::Display;
-    use std::path::PathBuf;
     use std::str::FromStr;
 
     #[derive(Debug)]
     pub struct HttpRequestRequestLine {
         method: HttpRequestMethod,
-        // NOTE: I think this should be absolute path to the resource on the server
-        request_target: PathBuf,
+        /// request_target is transformed to url::Url with  
+        pub request_target: url::Url,
         protocol: HttpProtocol,
     }
 
@@ -96,20 +89,39 @@ mod request_request_line {
                     }
                 })?;
 
-            let base_path = Config::get_server_public();
+            // let base_path = Config::get_server_public();
 
-            // This maps the request_target to the actual file on the server
-            // resolving "/" to the index.html file
-            let request_target: PathBuf = match request_target {
-                // "pages/index.html"
-                p if p == "/" => base_path.join(config.get_index_path()),
-                p => base_path.join(p.strip_prefix("/").unwrap()),
-            };
+            // // This maps the request_target to the actual file on the server
+            // // resolving "/" to the index.html file
+            // let request_target: PathBuf = match request_target {
+            //     // "pages/index.html"
+            //     p if p == "/" => base_path.join(config.get_index_path()),
+            //     p => base_path.join(p.strip_prefix("/").unwrap()),
+            // };
+
+            // 1. Postponed request line initialization
+            // 2. Mutable reference to request_line to mutate the request target, that would be an issue as config is borrowed immutably
+            // 3. Initialize request line as is, providing config http_host field as the scheme and port part of the URL (thought PORT may not
+            // exists, but we could take that from the env) in the HttpRequestRequestLine::new(),
+            // and then mutate the request target inside the Self::new() to the scheme and port number part of the URL
+            // as the Http Host, assuming Http Host contains the port number, which I think is the case.
+
+            let mut host = config.http_url.clone();
+
+            host.path_segments_mut()
+                .map_err(|_| {
+                    eprint!("Error getting mutable segments of request_target");
+                    HttpRequestError::default()
+                })
+                .map(|mut segments| {
+                    segments.clear();
+                    segments.push(request_target.strip_prefix("/").unwrap());
+                })?;
 
             Ok(Self {
                 method: HttpRequestMethod::from_str(method)?,
                 protocol: HttpProtocol::from_str(protocol)?,
-                request_target,
+                request_target: host,
             })
         }
 
@@ -121,8 +133,12 @@ mod request_request_line {
             &self.protocol
         }
 
-        pub(super) fn get_request_target(&self) -> &PathBuf {
+        pub(super) fn get_request_target(&self) -> &url::Url {
             &self.request_target
+        }
+
+        pub(super) fn get_request_target_mut(&mut self) -> &mut url::Url {
+            &mut self.request_target
         }
     }
 
@@ -331,12 +347,22 @@ impl<'a> HttpHeaders<'a> {
 
                 let requested_resource = self.get_request_target().unwrap();
 
+                // NOTE THIS IS SHIT
+
+                let actual_file =
+                    Path::new(requested_resource.path_segments().unwrap().last().unwrap());
+
+                // NOTE THIS IS SHIT
                 // If requested resource is root, return `text/html`
-                if requested_resource.as_path() == Path::new("/") {
+                if actual_file == Path::new("/") {
                     return "text/html";
                 }
 
-                match requested_resource.extension() {
+                // if actual_file.as_path() == Path::new("/") {
+                // return "text/html";
+                // }
+
+                match actual_file.extension() {
                     Some(extension) => {
                         // NOTE: That is controversial string conversion
                         return match extension.to_str().unwrap() {
@@ -403,6 +429,11 @@ impl<'a> HttpHeaders<'a> {
         self.request_line.as_ref()
     }
 
+    // This should not be exposed to the user, only for internal use
+    pub fn get_request_line_mut(&mut self) -> Option<&mut HttpRequestRequestLine> {
+        self.request_line.as_mut()
+    }
+
     pub fn get_method(&self) -> Option<&HttpRequestMethod> {
         self.get_request_line()
             .expect("Request line not found")
@@ -410,10 +441,18 @@ impl<'a> HttpHeaders<'a> {
             .into()
     }
 
-    pub fn get_request_target(&self) -> Option<&PathBuf> {
+    pub fn get_request_target(&self) -> Option<&url::Url> {
         self.get_request_line()
             .expect("Request line not found")
             .get_request_target()
+            .into()
+    }
+
+    // This should not be exposed to the user, only for internal use
+    pub fn get_request_target_mut(&mut self) -> Option<&mut url::Url> {
+        self.get_request_line_mut()
+            .expect("Request line not found")
+            .get_request_target_mut()
             .into()
     }
 

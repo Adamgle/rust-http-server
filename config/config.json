@@ -1,5 +1,6 @@
 {
   "index_path": "pages/index.html",
+  "domain": "localhost",
   "database": {
     "root": "database",
     "wal": "database/command-log.txt"

@@ -420,6 +420,7 @@ name = "rust-http-server"
 version = "0.1.0"
 dependencies = [
  "ctrlc",
+ "percent-encoding 2.3.1",
  "serde",
  "serde_json",
  "strum",
