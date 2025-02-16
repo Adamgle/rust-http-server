@@ -24,7 +24,6 @@ pub mod config {
     #[derive(Debug)]
     /// `NOTE`: It would be good idea to document that
     pub struct Config {
-        pub server_root: PathBuf,
         pub socket_address: SocketAddrV4,
         pub options: Option<HashMap<String, String>>,
         pub http_url: url::Url,
@@ -195,24 +194,30 @@ pub mod config {
             let options = Config::parse_options(args.get(2));
 
             // Check if SERVER_ROOT env specified, if not check command line argument, if not use default
-            // as `{working_dir}/public`
+            // as `{working_dir}`
             let server_root = match std::env::var("SERVER_ROOT") {
                 Ok(server_root) => PathBuf::from(server_root),
-                Err(_) => args
-                    .get(3)
-                    .map(|path| Ok::<PathBuf, Box<dyn Error>>(PathBuf::from(path)))
-                    .unwrap_or_else(|| {
-                        // Default path
-                        let default_path = std::env::current_dir()?;
-                        println!("Using: {:?} as server_root", default_path);
-                        Ok(default_path)
-                    })?,
+                Err(_) => {
+                    let root = args
+                        .get(3)
+                        .map(|path| Ok::<PathBuf, Box<dyn Error>>(PathBuf::from(path)))
+                        .unwrap_or_else(|| {
+                            let default_path = std::env::current_dir()?;
+                            println!("Using: {:?} as server_root", default_path);
+
+                            Ok(default_path)
+                        })?;
+
+                    std::env::set_var("SERVER_ROOT", &root);
+                    root
+                }
             };
 
             // In all the above did not throw and error, we will set the environment variables
             // Set the SERVER_ROOT, SERVER_PUBLIC, SERVER_PORT environment variables
             // refer as std::env::var("SERVER_ROOT") to get the value
-            std::env::set_var("SERVER_ROOT", &server_root);
+            // technically we could check if not they exists, thought that is unnecessary
+
             std::env::set_var("SERVER_PUBLIC", &server_root.join("public"));
             std::env::set_var("SERVER_PORT", socket_address.port().to_string());
 
@@ -227,6 +232,8 @@ pub mod config {
 
             let domain = config_file.domain.clone();
 
+            // As the url::Url does not allow relative url parsing, we are initializing one to default url, though only the path segment is the important part
+
             // Bat-shit crazy
             let http_url = url::Url::parse(&format!(
                 "{}://{}:{}",
@@ -238,7 +245,7 @@ pub mod config {
             Ok(Arc::new(Mutex::new(Config {
                 socket_address,
                 options,
-                server_root,
+                // server_root,
                 config_file,
                 logger: Logger {},
                 http_url,
@@ -477,7 +484,7 @@ pub mod tcp_handlers {
         let mut response_headers: HttpHeaders<'_> = HttpResponse::new_headers(None);
 
         // If path is invalid and cannot be encoded, that should end the request
-        let path = request.get_request_target_path()?;
+        let path = request.get_request_target()?;
 
         let (method, path) = (request.get_method(), path);
 
@@ -510,9 +517,7 @@ pub mod tcp_handlers {
             // NOTE: We should initialize the database only once, or at least at the top,
             // but that tomorrow...
             // GET /database/tasks.json => Database::init() => Give back the control flow to the request initialized \end_middleware
-            HttpRequestMethod::GET => {
-                Some(request.read_requested_resource(&config, &mut response_headers)?)
-            }
+            HttpRequestMethod::GET => Some(request.read_requested_resource(&mut response_headers)?),
             HttpRequestMethod::POST => {
                 // This would return Path not found if the path does not exists
                 // If we would want to make custom endpoints without actual path existence

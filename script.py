@@ -1,3 +1,5 @@
+# Code in this file is a shenanigan, foolishness. Take it with a grain of salt, don't ya.
+
 import collections
 import json
 import requests
@@ -37,7 +39,7 @@ def tests():
 
         return response.status_code
 
-    def send_custom(id: int, request: typing.Union["POST", "GET"]):
+    def send_custom(id: int, request: typing.Union["POST", "GET"], path: string):
         # Target server and port
         host = "localhost"
         port = 5000
@@ -48,24 +50,31 @@ def tests():
         POST_payload = build_payload(id, "A" * pow(10, 1))
 
         POST_request = (
-            "POST /database/tasks.json HTTP/1.1\r\n"
+            f"POST {path} HTTP/1.1\r\n"
             f"Content-Length: {len(POST_payload)}\r\n"
             "Content-Type: application/json\r\n"
             "User-Agent: Mozilla/5.0\r\n"
             f"Host: {host}:{42069}\r\n"
             "X-Custom-Header: valid-value\r\n"
-            "Injected-Header: malicious-value\r\n\r\n"
+            f"Injected-Header: malicious-value{"x" * 1024}\r\n\r\n"
             f"{POST_payload}"
         )
 
         GET_request = (
-            "GET /database/tasks.json HTTP/1.1\r\n"
+            f"GET {path} HTTP/1.1\r\n"
             "User-Agent: Mozilla/5.0\r\n"
             f"Host: {host}:{42069}\r\n"
             "X-Custom-Header: valid-value\r\n"
             "Injected-Header: malicious-value\r\n"
             "\r\n"
         )
+
+        size = (
+            len(GET_request.encode("utf-8"))
+            if request == "GET"
+            else len(POST_request.encode("utf-8"))
+        )
+        print("Sending request of size: ", size)
 
         def create_socket(request: string):  # Create a socket connection
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -81,25 +90,7 @@ def tests():
             else create_socket(GET_request)
         )
 
-    def run():
-        for i in range(100):
-            keys = ["POST", "GET", "CUSTOM"]
-            for key in keys:
-                for _ in range(1):
-                    tests[key].append(
-                        test_get("database/tasks.json")
-                        if key == "GET"
-                        else (
-                            test_post("database/tasks.json", payload)
-                            if key == "POST"
-                            else send_custom()
-                        )
-                    )
-
-                if all([x == 200 for x in tests[key]]):
-                    print(f"{key}: All requests were successful")
-
-    def run_multithreaded(callback, **kwargs):
+    def run_multithreaded(callback, threads_count=10, requests_per_thread=100, **kwargs):
         threads = []
         results = []
 
@@ -110,14 +101,14 @@ def tests():
 
             thread_results = []
 
-            for _ in range(100):
+            for _ in range(requests_per_thread):
                 id += 1
-                thread_results.append(callback(id, kwargs["request"]))
 
+                thread_results.append(callback(id, **kwargs))
             results.extend(thread_results)
             # print(f"Thread results: {thread_results}")
 
-        for _ in range(10):  # Create 10 threads
+        for _ in range(threads_count):  # Create 10 threads
             thread = threading.Thread(
                 target=worker,
                 kwargs={"callback": callback, **kwargs},
@@ -134,15 +125,59 @@ def tests():
 
         return results
 
-    start_time = time.time()
-    results = run_multithreaded(send_custom, request="POST")
-    end_time = time.time()
-    execution_time = end_time - start_time
-    print(f"Execution time: {execution_time:.2f} seconds")
-    print(f"Average time per request: {(execution_time / len(results)):.4f} seconds")
-    # send_custom(1, "POST")
+    def run_benchmark(callback, **kwargs):
+        import os
 
-    return tests
+        if "count" not in kwargs:
+            kwargs["count"] = 1
+
+        log_entry = [
+            f"Running {kwargs['count']} requests at {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}"
+        ]
+
+        if "request" not in kwargs or "path" not in kwargs:
+            raise ValueError("Request and path must be provided")
+
+        log_entry.append(f"Running: {kwargs['request']} {kwargs['path']}")
+
+        current_directory = os.getcwd()
+
+        full_path = os.path.join(
+            current_directory, "public", kwargs["path"].removeprefix("/")
+        )
+
+        log_entry.append(f"File size of: {os.path.getsize(full_path)} bytes")
+
+        with open("benchmark.log", "a+") as f:
+            total = 0
+
+            for count in range(kwargs["count"]):
+                start_time = time.time()
+
+                results = callback(request=kwargs["request"], path=kwargs["path"])
+                end_time = time.time()
+
+                execution_time = end_time - start_time
+
+                print(f"Execution time: {execution_time:.2f} seconds")
+                print(
+                    f"Average time per request: {(execution_time / len(results)):.4f} seconds"
+                )
+
+                total += execution_time
+
+            log_entry.append(
+                f"Average execution time: {total / kwargs['count']:.2f} seconds\n\n"
+            )
+
+            f.write("\n".join(log_entry))
+
+    run_benchmark(
+        functools.partial(run_multithreaded, callback=send_custom, threads_count=1, requests_per_thread=1),
+        request="POST",
+        path="/database/tasks.json",
+        count=1,
+    )
 
 
-pprint(tests())
+tests()

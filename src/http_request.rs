@@ -1,8 +1,9 @@
 use crate::config::Config;
 
+use std::any::Any;
 use std::borrow::Cow;
 use std::error::Error;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::str::Utf8Error;
 use std::{fs, vec};
@@ -40,23 +41,25 @@ impl<'a> HttpRequest<'a> {
         // Parse the TCP stream
         let (mut parsed_headers, body) = Self::parse_request(&config, stream).await?;
 
+        println!("Headers keys: {:#?}", parsed_headers.get_headers().keys());
+
         // NOTE: I thing the discrepancy between the domain used here should be resolved thought should be investigated first
         // requested_target => http://localhost:5000/ It uses config to build the url as the default from the domain and port
         //  -> thought if the request is made from different domain, first off all it is not possible,
-        //  -> Host: 127.0.0.1:5000 => request_target => localhost:5000 
+        //  -> thought could be possible if the request gets redirected.
+        //  -> Host: 127.0.0.1:5000 => request_target => localhost:5000
         // NOTE: Something like this should be done
-        
+
+        // To avoid ambiguity we could change the default domain to whatever comes with host header
+        let host = parsed_headers.get("Host").map(|host| host.to_string());
+
         if let Some(request_line) = parsed_headers.get_request_target_mut() {
-            // if let Some(domain) = request_line.domain() {
-            //     *request_line.set_host()
-            // }   
-            // println!("request_line: {:?}", request_line.as_str());
-
-            // let domain = &config.config_file.domain.clone();
-
-            // request_line.set_host(Some(domain)).unwrap();
-
-            // println!("After setting host: {:?}", request_line.as_str());
+            if let Some(host) = host {
+                // This will not show a distinction between 127.0.0.1 and localhost as this resolves 127.0.0.1 to localhost
+                request_line
+                    .set_host(Some(&host))
+                    .expect("Could not set host");
+            }
         }
 
         Ok(Self {
@@ -96,9 +99,9 @@ impl<'a> HttpRequest<'a> {
 
             stream.readable().await?;
 
-            // NOTE: There could be an issue if the headers are larger than 1024 bytes
+            // NOTE: There could be an issue if the headers that are larger than 1024 bytes
             // that could omit some bytes because they will appear as not CRLF terminated
-            // because full line was not read
+            // because full line was not read as it did not fit into the buffer.
 
             let mut chunk = [0u8; 1024];
 
@@ -115,6 +118,7 @@ impl<'a> HttpRequest<'a> {
                     let lines = chunk[..bytes_read].as_ref().lines();
 
                     'inner: for (idx, line) in lines.enumerate() {
+                        println!("line {}: {:?}", idx, line);
                         match line {
                             Ok(line) => {
                                 // If line is empty, we have reached the end of the headers
@@ -140,6 +144,10 @@ impl<'a> HttpRequest<'a> {
                                             .into();
 
                                         // That could be unstable, off by one possible
+                                        // transferred -> bytes transferred up to this point
+                                        // (idx + 1) -> to shift the idx to line number that we are reading
+                                        // (idx + 1) * 2 -> * 2 to account for CRLF as they get removed by lines Iterator and they
+                                        // account to Content-Length
                                         let body_pos = transferred + (idx + 1) * 2;
 
                                         // Flush the rest the buffer regardless if there is a content or not
@@ -161,9 +169,7 @@ impl<'a> HttpRequest<'a> {
                                     // First line is request line
                                     if headers.is_none() {
                                         headers = Some(Self::new_headers(
-                                            HttpRequestRequestLine::new(&config, &line)
-                                                .await
-                                                .expect("Request line is invalid"),
+                                            HttpRequestRequestLine::new(&config, &line).await?,
                                         ));
                                     } else {
                                         headers
@@ -217,43 +223,52 @@ impl<'a> HttpRequest<'a> {
     ///
     /// Resolves '/' to '/index.html'
     ///
-    /// Checks for existence of the path, return 404 if path does not exists
+    /// Checks for existence of the path, return error if the path does not exists
     ///
-    /// `NOTE`: WE will not support matching paths without extensions for now
+    /// `NOTE`: We will not support matching paths without extensions for now
     /// last segment without extension will be treated as a directory and we will try to find index.html in that directory
+    ///
+    /// NOTE: Paths `/pages/index.html` and `/index.html` and "/" are valid paths that point to `/pages` directory on `index.html` file.
     pub fn get_absolute_resource_path(
         &self,
-        config: &MutexGuard<'_, Config>,
+        // config: &MutexGuard<'_, Config>,
     ) -> Result<PathBuf, HttpRequestError> {
-        match self
-            .get_request_target_path()
-            // NOTE: We could mutate the segments directly
-        {
+        match self.get_request_target() {
             Ok(path) => {
-                // TODO: In order to match the files on the server you need to look up specialized directories
-                // in the /public, in order to do that you could do as follows:
-
-                // 1. We know that the file in 99% cases does not exists at given path, thought it could be in the specialized directories 
-                // we could simply traverse the /public directory in order to find a file, so given path:
-                // .../public/index.html => We would look at every directory in order to find out that it was under pages directory
-                // this solution is not optimal, but would fulfill every case, thought this does not utilize the fact of the existence of specialized directories
-                
                 // 2. We will map specialized directories to the extension of the file requested, so if the file is requested with .html extension
                 // we will look in the /public/pages directory, if the file is requested with .css extension we will look in the /public/styles directory
                 // thought that solution cannot predict the requested path if it does not end with an extension that would resolve to appropriate directory
                 // In that case, if the requested_path does not contain a file extension as the last segment, we would treat that as a directory,
                 // thought we have to check if it is not a file without an extension, and then we would try to find index.html in that directory.
 
-                // If that would be absolute and would join with the public directory path, it would create a new absolute path
-                // effectively allowing to traverse the file system of the server
-                
-                let path = path.to_string();
-                
+                // If file extension does not fall into the mapping, we would just traverse the directory, joining the path to the public directory
+                // and try to match an existing path. If the path does point to a file or has no extension, there is not way in current approach to detect
+                // it's type, we will throw an error in that case as we cannot know the type of the file and we cannot serve it. The same if the path points to a directory
+
+                // DESIGN NOTE: We will support default files of the directories in the path, only as index.html as the default. Other specialized directories will not
+                // try to resolve any paths when not given with full filename.
+
+                // /asd, data.json, data
+                // ../public, /asd/index.html => ../public/pages/asd/index.html
+                // ../public, /asd/asd/asd/asd/ => CHECK =====../public/pages/asd/asd/asd/asd/index.html ===== => EXISTS
+                // But what if there is no index.html in the path?
+                // ../public/asd/data.json
+                // ../public/pages/asd/data/pages/data.html
+
+                let public = Config::get_server_public();
+
+                let path: String = path.to_string();
+
                 // NOTE: Error handling should be done here
                 let path = Path::new(&path).strip_prefix("/").expect("Invalid path");
 
+                // If that would be absolute and would join with the public directory path, it would create a new absolute path
+                // effectively allowing to traverse the file system of the server
+
                 // I do not know if that is stable enough, as windows has weird absolute path handling
-                if path.is_absolute() || path.starts_with("/") {
+                // Technically, you can if path.is_relative() {}
+
+                if path.is_absolute() || path.starts_with("/") && path.is_relative() {
                     eprintln!("Path is absolute, not allowed: {:?}", path);
                     return Err(HttpRequestError {
                         status_code: 400,
@@ -264,31 +279,71 @@ impl<'a> HttpRequest<'a> {
                     });
                 };
 
-                let path = Config::get_server_public().join(path);
-                println!("Path with segments: {:?}", path);
+                // Whenever we use join we need to make sure the path is not absolute as that would construct a path from the root
+                // allowing to traverse the file system
 
-                // This checks file existence
-                let metadata = path.metadata().map_err(|err| {
-                    eprintln!("[ERROR MESSAGE]: {err}");
-                    HttpRequestError::default()
-                })?;
+                // Routing to /pages, /styles, /client is undefined behavior, as those paths are not accessible by the client directly
 
-                if metadata.is_dir() {
-                    // Check if index.html exists in the directory
-                    let index_path = path.join("index.html");
+                match path.extension() {
+                    Some(ext) => {
+                        // We need to check if the path is not of a pages.html or styles.css or client.js type
+                        // as that would not prefix the path with the directory
+                        // if we would do path.starts_with(dir)
 
-                    if index_path.exists() {
-                        return Ok(index_path);
+                        let dir = ext
+                            .to_str()
+                            .map(|ext| match ext {
+                                // pages styles, and client should not be String, enum for those should be declared
+                                "html" => Some("pages"),
+                                "css" => Some("styles"),
+                                "js" => Some("client"),
+                                // Actually if the extension does not fall into the mapping THEN you should iterate over public try to find the path
+                                // NOTE: I do not think that is the way to do it, bad by design, not how file system works.
+                                _ => None,
+                            })
+                            .flatten();
+
+                        let path = match dir {
+                            Some(dir) => {
+                                // Handle cases where the path is already prefixed with the directory
+                                // considering the filenames that are of the name of specialized directories
+                                // to not avoid avoiding the prefixing with specialized directory
+
+                                if (path.starts_with(dir)
+                                    && path.file_stem().unwrap().to_str().unwrap() == dir)
+                                    || path.starts_with(dir)
+                                {
+                                    // Do not prefix that
+                                    public.join(path)
+                                } else {
+                                    // Do prefix that
+                                    public.join(dir).join(path)
+                                }
+                            }
+                            // There is not specialized directory for the extension or parsing the extension to UTF-8 failed, do not care
+                            None => public.join(path),
+                        };
+
+                        if path.exists() {
+                            return Ok(path);
+                        }
                     }
-                } else {
-                    // It's a file
-                    // Check if the file has a extension, as those without are not supported, that would require some bytes-based checking
-                    if path.extension().is_some() {
-                        return Ok(path);
-                    }
-                }
+                    None => {
+                        // If file extension does not fall into the mapping, we would just traverse the directory, joining the path to the public directory
+                        // and try to match an existing path. If the path does point to a file or has no extension, there is not way in current approach to detect
+                        // it's format, we will throw an error in that case as we cannot know the format of the file and we cannot serve it. The same if the path points to a directory
 
-                Err(HttpRequestError::default())
+                        let path = public.join("pages").join(path.join("index.html"));
+
+                        if let Ok(exists) = path.try_exists() {
+                            if exists {
+                                return Ok(path);
+                            }
+                        }
+                    }
+                };
+
+                return Err(HttpRequestError::default());
             }
             Err(err) => {
                 eprintln!("Could not decode the path as UTF-8: {}", err);
@@ -303,43 +358,44 @@ impl<'a> HttpRequest<'a> {
     }
 
     /// Returns path of the requested resource without resolving "/" to "index.html"
-    /// Encoding the percent-encoded path to UTF-8
+    ///
+    /// Decoding the percent-encoded path to UTF-8
     // NOTE: Consider making it eagerly unwrapped as this is critical for request to continue
-    pub fn get_request_target_path(&self) -> Result<Cow<'_, str>, Utf8Error> {
+    pub fn get_request_target(&self) -> Result<Cow<'_, str>, Utf8Error> {
         percent_encoding::percent_decode(
             self.parsed_headers
                 .get_request_target()
                 .map(|s: &url::Url| s.path())
-                .unwrap()
+                // TODO: Think about improving the error handling there
+                .expect("Invalid request target, does not follow a scheme of a path.")
                 .as_bytes(),
         )
         .decode_utf8()
     }
 
-    /// Returns relative path to the requested resource on the server, without resolving "/" to "index.html".
-    /// Relies on self.get_path_segments() to get the path segments as a Vector<&str>
-    /// `Example`
-    ///
-    /// Given path segments ["/"] would evaluate to "/"
-    ///
-    /// Given path segments ["path", "to", "dir", ""] would evaluate to "/path/to/dir/"
-    ///
-    /// Given path segments ["path", "to", "dir"] would evaluate to "/path/to/dir" \\ NOTE: Dir should be treated a directory, and we will
-    ///                                                                            \\ try to find index.html in that directory
-    // NOTE: Consider making it eagerly unwrapped as this is critical for request to continue
-    // pub fn get_path_segment(&self) -> Option<String> {
-    //     self.get_path_segments().map(|segments| segments.join("/"))
-    // }
-
     /// Takes Response `HttpHeaders` and write `Content-Type` and `Content-Length` headers, returning the requested resource as a String
     /// Walks `/public` directory looking for path
     pub fn read_requested_resource(
         &'a self,
-        config: &MutexGuard<'_, Config>,
         response_headers: &mut HttpHeaders<'a>,
     ) -> Result<String, Box<dyn Error>> {
-        let resource_path: PathBuf = self.get_absolute_resource_path(config)?;
-        println!("resource_path: {:?}", resource_path);
+        let resource_path: PathBuf = self.get_absolute_resource_path()?;
+
+        let relative_path = resource_path
+            .strip_prefix(Config::get_server_public())
+            .expect("Server public directory is not a prefix of the requested resource")
+            // clone there
+            .to_owned();
+
+        // target: /data/data.json
+        // json would not try to resolve to pages and styles
+        // target: /data/data.html
+        // take the extension, parse to OsStr to str, match the extension, we do not care about it being directory or file without extension in this case
+        // as it would resolve either way to error as the path does not exists, although we could sacrifice some computation time.
+        // pages => []
+        // asd => []
+        // styles => []
+        // boobies => []
 
         // Read the file
         let requested_resource = fs::read_to_string(resource_path)?;
@@ -351,10 +407,87 @@ impl<'a> HttpRequest<'a> {
 
         response_headers.add(
             Cow::from("Content-Type"),
-            Cow::from(self.parsed_headers.detect_mime_type()),
+            Cow::from(self.detect_mime_type(relative_path)),
         );
 
         return Ok(requested_resource);
+    }
+
+    /// I hate this, should be typed
+    pub fn detect_mime_type(&self, request_target: PathBuf) -> &str {
+        match self.parsed_headers.get("Content-Type") {
+            Some(content_type) => return content_type,
+            None => {
+                // At this point file name should always be supplied as this path resolves root directories to index.html and so on.
+                // Given that, expect would be appropriate as that would be just the server error1.
+
+                // NOTE: There could be problem with the casing.
+                let actual_file = Path::new(
+                    request_target
+                        .file_name()
+                        .expect("Request target does not point to a file."),
+                );
+
+                match actual_file.extension() {
+                    Some(extension) => {
+                        // NOTE: That is controversial string conversion
+                        return match extension
+                            .to_str()
+                            .expect("Extension is not UTF-8 compatible")
+                        {
+                            "html" => "text/html",
+                            "css" => "text/css",
+                            "js" => "text/javascript",
+                            "json" => "application/json",
+                            "xml" => "application/xml",
+                            "png" => "image/png",
+                            "jpg" | "jpeg" => "image/jpeg",
+                            "gif" => "image/gif",
+                            "svg" => "image/svg+xml",
+                            "ico" => "image/x-icon",
+                            "webp" => "image/webp",
+                            "mp4" => "video/mp4",
+                            "webm" => "video/webm",
+                            "ogg" => "audio/ogg",
+                            "mp3" => "audio/mpeg",
+                            "wav" => "audio/wav",
+                            "flac" => "audio/flac",
+                            "pdf" => "application/pdf",
+                            "zip" => "application/zip",
+                            "tar" => "application/x-tar",
+                            "gz" => "application/gzip",
+                            "bz2" => "application/x-bzip2",
+                            "7z" => "application/x-7z-compressed",
+                            "rar" => "application/vnd.rar",
+                            "exe" => "application/x-msdownload",
+                            "msi" => "application/x-msi",
+                            "deb" => "application/vnd.debian.binary-package",
+                            "rpm" => "application/x-rpm",
+                            "apk" => "application/vnd.android.package-archive",
+                            "jar" => "application/java-archive",
+                            "war" => "application/java-archive",
+                            "ear" => "application/java-archive",
+                            "class" => "application/java-vm",
+                            "py" => "text/x-python",
+                            "rb" => "text/x-ruby",
+                            "php" => "text/x-php",
+                            "c" => "text/x-c",
+                            "cpp" => "text/x-c++",
+                            "h" => "text/x-c-header",
+                            "hpp" => "text/x-c++-header",
+                            "cs" => "text/x-csharp",
+                            "java" => "text/x-java",
+                            "kt" => "text/x-kotlin",
+                            "rs" => "text/x-rust",
+                            "go" => "text/x-go",
+                            // Return default `text/plain` if all of the above fails
+                            _ => "text/plain",
+                        };
+                    }
+                    None => return "text/plain",
+                }
+            }
+        }
     }
 
     /// This function is not meant to work as a redirection to specified URL

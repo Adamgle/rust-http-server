@@ -1,4 +1,10 @@
-use std::{borrow::Cow, collections::HashMap, fmt::Display, path::Path, str::FromStr};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    fmt::Display,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 pub use request_request_line::{HttpRequestMethod, HttpRequestRequestLine};
 pub use response_start_line::HttpResponseStartLine;
@@ -11,6 +17,16 @@ pub enum HttpProtocol {
     HTTP1,
     HTTP1_1,
     // HTTP2, NOTE: HTTP2 uses frames not request lines so unsupported here.
+}
+
+impl HttpProtocol {
+    /// That is bad.
+    pub fn simplify(&self) -> &str {
+        match self {
+            HttpProtocol::HTTP1 | HttpProtocol::HTTP1_1 => "http",
+            // Lack of support for HTTP2
+        }
+    }
 }
 
 impl FromStr for HttpProtocol {
@@ -51,16 +67,14 @@ mod request_request_line {
     #[derive(Debug)]
     pub struct HttpRequestRequestLine {
         method: HttpRequestMethod,
-        /// request_target is transformed to url::Url with  
-        pub request_target: url::Url,
+        /// This is a work around to store the Url as the request_target, as the library `url::Url` does not allow relative urls parsing.
+        /// It is build with the domain, protocol in the config file and port under env.
+        ///
+        /// `NOTE`: No information is read from `request_target` other than it's path, changes to protocol and host part are only made to
+        /// avoid ambiguity in requests. `request_target` is only read with a getter, that performs proper parsing.
+        request_target: url::Url,
         protocol: HttpProtocol,
     }
-
-    // trait RequestLine {
-    //     fn get_method(&self) -> &HttpRequestMethod;
-    //     fn get_protocol(&self) -> &HttpProtocol;
-    //     fn get_request_target(&self) -> &PathBuf;
-    // }
 
     impl<'a> HttpRequestRequestLine {
         pub async fn new(
@@ -89,16 +103,7 @@ mod request_request_line {
                     }
                 })?;
 
-            // let base_path = Config::get_server_public();
-
-            // // This maps the request_target to the actual file on the server
-            // // resolving "/" to the index.html file
-            // let request_target: PathBuf = match request_target {
-            //     // "pages/index.html"
-            //     p if p == "/" => base_path.join(config.get_index_path()),
-            //     p => base_path.join(p.strip_prefix("/").unwrap()),
-            // };
-
+            // How to handle request_target compatibility with URLs?.
             // 1. Postponed request line initialization
             // 2. Mutable reference to request_line to mutate the request target, that would be an issue as config is borrowed immutably
             // 3. Initialize request line as is, providing config http_host field as the scheme and port part of the URL (thought PORT may not
@@ -108,6 +113,13 @@ mod request_request_line {
 
             let mut host = config.http_url.clone();
 
+            // Remove leading root identifier from the request_target as that would end up redundant and invalid
+            // The reason is doing parsing with url::Url you will end up with a double root after clearing the segments
+            // and setting the new path segments. NOTE: The segments actually does not exists in the url that does come with the config.http_url
+            // that is just for being overly cautious (look at this man, what you taking about, you and cautions...).
+
+            let request_target = request_target.strip_prefix("/").unwrap_or(&request_target);
+
             host.path_segments_mut()
                 .map_err(|_| {
                     eprint!("Error getting mutable segments of request_target");
@@ -115,13 +127,28 @@ mod request_request_line {
                 })
                 .map(|mut segments| {
                     segments.clear();
-                    segments.push(request_target.strip_prefix("/").unwrap());
+                    // Strip the leading "/" from the request_target as it already in the host, so that would be redundant and invalid also
+                    segments.push(request_target);
                 })?;
+
+            let protocol: HttpProtocol = HttpProtocol::from_str(protocol)?;
+
+            // Change the host header default protocol (scheme) used to the actual protocol used in the request
+            // NOTE: This change is not critical, but we will not allow something that could be malicious.
+            // It could be malicious if someone would for example set scheme to file://, thought that is handled by the library
+            // thought the conversion of protocol would also fail earlier so not really an issue.
+            // We want to have a stateful field in this struct and not throwing there would be "stateless".
+            // Also in the current state of the app there is not HTTPS this is just useless.
+
+            host.set_scheme(protocol.simplify()).map_err(|_| {
+                eprint!("Error setting scheme to the request_target");
+                HttpRequestError::default()
+            })?;
 
             Ok(Self {
                 method: HttpRequestMethod::from_str(method)?,
-                protocol: HttpProtocol::from_str(protocol)?,
                 request_target: host,
+                protocol,
             })
         }
 
@@ -330,95 +357,6 @@ impl<'a> HttpHeaders<'a> {
     /// Suck on this <Writes on a rock, SASSY office reference>
     pub fn add(&mut self, key: Cow<'a, str>, value: Cow<'a, str>) {
         self.headers.insert(key, value);
-    }
-
-    /// I hate this, should be typed
-    pub fn detect_mime_type(&self) -> &str {
-        match self.headers.get("Content-Type") {
-            Some(content_type) => return content_type,
-            None => {
-                // If not found, look up for extension
-                // and return MIME type based on that
-                // We will use <request_target> field from HttpRequestRequestLine,
-                // if there is no extension, we will assume `text/plain`
-                // NOTE: It will fail if request_target does not have a extension,
-                // but we will leave that be for now. We could try to recognize the extension
-                // based on the bytes of the file, or just use the appropriate library.
-
-                let requested_resource = self.get_request_target().unwrap();
-
-                // NOTE THIS IS SHIT
-
-                let actual_file =
-                    Path::new(requested_resource.path_segments().unwrap().last().unwrap());
-
-                // NOTE THIS IS SHIT
-                // If requested resource is root, return `text/html`
-                if actual_file == Path::new("/") {
-                    return "text/html";
-                }
-
-                // if actual_file.as_path() == Path::new("/") {
-                // return "text/html";
-                // }
-
-                match actual_file.extension() {
-                    Some(extension) => {
-                        // NOTE: That is controversial string conversion
-                        return match extension.to_str().unwrap() {
-                            "html" => "text/html",
-                            "css" => "text/css",
-                            "js" => "text/javascript",
-                            "json" => "application/json",
-                            "xml" => "application/xml",
-                            "png" => "image/png",
-                            "jpg" | "jpeg" => "image/jpeg",
-                            "gif" => "image/gif",
-                            "svg" => "image/svg+xml",
-                            "ico" => "image/x-icon",
-                            "webp" => "image/webp",
-                            "mp4" => "video/mp4",
-                            "webm" => "video/webm",
-                            "ogg" => "audio/ogg",
-                            "mp3" => "audio/mpeg",
-                            "wav" => "audio/wav",
-                            "flac" => "audio/flac",
-                            "pdf" => "application/pdf",
-                            "zip" => "application/zip",
-                            "tar" => "application/x-tar",
-                            "gz" => "application/gzip",
-                            "bz2" => "application/x-bzip2",
-                            "7z" => "application/x-7z-compressed",
-                            "rar" => "application/vnd.rar",
-                            "exe" => "application/x-msdownload",
-                            "msi" => "application/x-msi",
-                            "deb" => "application/vnd.debian.binary-package",
-                            "rpm" => "application/x-rpm",
-                            "apk" => "application/vnd.android.package-archive",
-                            "jar" => "application/java-archive",
-                            "war" => "application/java-archive",
-                            "ear" => "application/java-archive",
-                            "class" => "application/java-vm",
-                            "py" => "text/x-python",
-                            "rb" => "text/x-ruby",
-                            "php" => "text/x-php",
-                            "c" => "text/x-c",
-                            "cpp" => "text/x-c++",
-                            "h" => "text/x-c-header",
-                            "hpp" => "text/x-c++-header",
-                            "cs" => "text/x-csharp",
-                            "java" => "text/x-java",
-                            "kt" => "text/x-kotlin",
-                            "rs" => "text/x-rust",
-                            "go" => "text/x-go",
-                            // Return default `text/plain` if all of the above fails
-                            _ => "text/plain",
-                        };
-                    }
-                    None => return "text/plain",
-                }
-            }
-        }
     }
 
     // Those getters are basically re-exporting functionality on the embedded structs
