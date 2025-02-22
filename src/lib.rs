@@ -25,11 +25,16 @@ pub mod config {
     /// `NOTE`: It would be good idea to document that
     pub struct Config {
         pub socket_address: SocketAddrV4,
+        /// `unimplemented!()`
         pub options: Option<HashMap<String, String>>,
+        /// URL of the server, composed of the parts in the config file, under `protocol` and `domain`, with `port` number
+        /// set on the `SERVER_PORT` env
         pub http_url: url::Url,
-        // NOTE: It's not optional because in the near future we will create the file with default when the server starts
+        /// `NOTE`: It's not optional because in the near future we will create the file with default when the server starts
         pub config_file: config_file::ServerConfigFile,
+        /// `unimplemented!()`
         pub logger: Logger,
+        /// Under development
         pub wal: Option<DatabaseWAL>,
     }
 
@@ -37,7 +42,7 @@ pub mod config {
     // for server to work, like `protocol` field.
     pub mod config_file {
         use super::Config;
-        use std::{fs, path::PathBuf};
+        use std::{error::Error, fs, path::PathBuf};
 
         #[derive(Debug, Clone)]
         pub enum ConfigHttpProtocol {
@@ -109,7 +114,7 @@ pub mod config {
         }
 
         impl ServerConfigFile {
-            pub fn get_config() -> Result<ServerConfigFile, Box<dyn std::error::Error>> {
+            pub fn get_config() -> Result<ServerConfigFile, Box<dyn Error + Send + Sync>> {
                 // suffix paths relative to the root
                 let config_path = Config::get_server_root().join("config/config.json");
 
@@ -178,7 +183,9 @@ pub mod config {
 
     impl Config {
         /// Parses user defined args while executing the program
-        pub async fn new(args: Vec<String>) -> Result<Arc<Mutex<Config>>, Box<dyn Error>> {
+        pub async fn new(
+            args: Vec<String>,
+        ) -> Result<Arc<Mutex<Config>>, Box<dyn Error + Send + Sync>> {
             if args.len() < 2 {
                 return Err(format!("Usage: {} <address:port> [server_root_path]", args[0]).into());
             }
@@ -200,7 +207,9 @@ pub mod config {
                 Err(_) => {
                     let root = args
                         .get(3)
-                        .map(|path| Ok::<PathBuf, Box<dyn Error>>(PathBuf::from(path)))
+                        .map(|path| {
+                            Ok::<PathBuf, Box<dyn Error + Send + Sync>>(PathBuf::from(path))
+                        })
                         .unwrap_or_else(|| {
                             let default_path = std::env::current_dir()?;
                             println!("Using: {:?} as server_root", default_path);
@@ -232,7 +241,8 @@ pub mod config {
 
             let domain = config_file.domain.clone();
 
-            // As the url::Url does not allow relative url parsing, we are initializing one to default url, though only the path segment is the important part
+            // As the url::Url does not allow relative url parsing, we are initializing one to default url,
+            // though only the path segment is the important part
 
             // Bat-shit crazy
             let http_url = url::Url::parse(&format!(
@@ -320,7 +330,9 @@ pub mod tcp_handlers {
     // can come at different intervals of time. Thread approach would be great if you would like to parallelize bunch of requests
     // that are independent of each other and this some sort of order of execution is not needed.
 
-    pub async fn connect(config: MutexGuard<'_, Config>) -> Result<TcpListener, Box<dyn Error>> {
+    pub async fn connect(
+        config: MutexGuard<'_, Config>,
+    ) -> Result<TcpListener, Box<dyn Error + Send + Sync>> {
         return TcpListener::bind(config.socket_address)
             .await
             .map_err(|e| e.into());
@@ -331,7 +343,7 @@ pub mod tcp_handlers {
     /// Logs request or response that come from the client or response from the server to ./log.txt
 
     /// Sends error response to the client, based on the error that occurred during request handling
-    /// downcasting to the specific error type from `Box<dyn Error>` and handling it accordingly
+    /// downcasting to the specific error type from `Box<dyn Error + Send + Sync` and handling it accordingly
     ///
     /// If stream is None,
     /// If err is None, send default 500 Internal Server Error response
@@ -339,8 +351,8 @@ pub mod tcp_handlers {
         config: &MutexGuard<'_, Config>,
         stream: &mut TcpStream,
         // http_err: Option<&HttpRequestError>,
-        mut err: Option<Box<dyn Error>>,
-    ) -> Result<(), Box<dyn Error>> {
+        mut err: Option<Box<dyn Error + Send + Sync>>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let pages_path = std::path::Path::new("public/pages/");
 
         // If err is None, send default 500 Internal Server Error response
@@ -424,7 +436,9 @@ pub mod tcp_handlers {
     }
 
     /// Starts TCP server with provided `Config`, continuously listens for incoming request and propagates them further.
-    pub async fn run_tcp_server(config: Arc<Mutex<Config>>) -> Result<(), Box<dyn Error>> {
+    pub async fn run_tcp_server(
+        config: Arc<Mutex<Config>>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // This extra lock will only affect first load time of the server and it is also negligible
         let listener = self::connect(config.lock().await).await?;
 
@@ -434,7 +448,6 @@ pub mod tcp_handlers {
         );
 
         loop {
-            // for stream in listener.incoming() {
             match listener.accept().await {
                 Ok((mut stream, socket)) => {
                     println!("Connection established with: {:?}", socket);
@@ -454,14 +467,14 @@ pub mod tcp_handlers {
                         tokio::spawn(async move {
                             let config = config.lock().await;
 
-                            if let Err(err) = self::handle_client(&mut stream, config).await {
+                            if let Err(err) = self::handle_client(&mut stream, &config).await {
                                 eprintln!("Error handling request: {}", err);
                                 // send_error_response(&config, &mut stream, Some(err))
-                                // .await
-                                // .unwrap();
+                                //     .await
+                                //     .unwrap();
                             } else {
                                 // Request termination
-                                // println!("Request handled successfully")
+                                println!("Request handled successfully")
                             }
                         }),
                     )
@@ -478,8 +491,8 @@ pub mod tcp_handlers {
     /// Handles incoming request from the client.
     async fn handle_client(
         stream: &mut TcpStream,
-        config: MutexGuard<'_, Config>,
-    ) -> Result<(), Box<dyn Error>> {
+        config: &MutexGuard<'_, Config>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let request: HttpRequest<'_> = HttpRequest::new(&config, stream).await?;
         let mut response_headers: HttpHeaders<'_> = HttpResponse::new_headers(None);
 
@@ -529,25 +542,27 @@ pub mod tcp_handlers {
                 // not to avoid checking the same thing multiple times
 
                 match path {
-                    p if p == "database/tasks.json" => {
-                        // if let Some(database_config) = config.config_file.database.as_ref() {
-                        match request.get_body() {
-                            Some(body) => {
-                                let instance =
-                                    Database::<DatabaseTask>::new(&config, DatabaseType::Tasks)
-                                        .await;
+                    p if p == "/database/tasks.json" => {
+                        if let Some(database_config) = config.config_file.database.as_ref() {
+                            // WARNING: This code times out
 
-                                instance.insert(body).await;
-                            }
-                            None => {}
+                            // match request.get_body() {
+                            //     Some(body) => {
+                            //         let instance =
+                            //             Database::<DatabaseTask>::new(&config, DatabaseType::Tasks)
+                            //                 .await;
+
+                            //         instance.insert(body).await;
+                            //     }
+                            //     None => {}
+                            // }
+                        } else {
+                            panic!("DROP DATABASE \"\\ROOT\" EXECUTED SUCCESSFUL");
                         }
-                        // }
-                        unimplemented!()
 
-                        // unimplemented!()
-                        // } else {
-                        // panic!("DROP DATABASE \"\\ROOT\" EXECUTED SUCCESSFUL");
-                        // }
+                        return Err(
+                            "Database insertions are not implemented yet, as the whole database",
+                        )?;
                     }
                     _ => {
                         eprintln!("Path does not exists on the server or the method used is unsupported for that path: {:?}", path);

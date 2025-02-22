@@ -61,7 +61,7 @@ pub struct Logger {}
 //     pub fn log_tcp_stream<T: std::fmt::Display>(
 //         &mut self,
 //         stream: T,
-//     ) -> Result<(), Box<dyn Error>> {
+//     ) -> Result<(), Box<dyn Error + Send + Sync> {
 //         let mut data = stream.to_string();
 //         data.push_str("\r\n\r\n");
 

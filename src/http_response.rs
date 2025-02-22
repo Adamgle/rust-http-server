@@ -19,7 +19,7 @@ impl<'a> HttpResponse<'a> {
     pub fn new(
         response_headers: HttpHeaders<'a>,
         body: Option<String>,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         Ok(Self {
             body,
             headers: response_headers,
@@ -45,7 +45,7 @@ impl<'a> HttpResponse<'a> {
 
     /// Parses headers field  from HashMap<String, String> and body to Vec<u8> bytes vector and saves it in parsed_headers field
     /// This could return an error when data is semantically incorrect then parsing would fail
-    fn parse_http_message(&mut self) -> Result<Vec<u8>, Box<dyn Error>> {
+    fn parse_http_message(&mut self) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
         // QUESTION: Can we allocate statically sized buffer for that
         // ANSWER: No, because we cannot predict the size of the response at compile time
         // thought we could look onto Vec::with_capacity method to optimize the allocation
@@ -94,7 +94,7 @@ impl<'a> HttpResponse<'a> {
         &mut self,
         config: &MutexGuard<'_, Config>,
         stream: &mut TcpStream,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // let mut logger = Logger::new()?;
         // config
         //     .logger

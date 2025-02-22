@@ -1,11 +1,12 @@
 /*
-    NOTE: That was does purely for educational purposes, I would not recommend using this in production as it's file based database
+    NOTE: That was does purely for educational purposes, I would not recommend using this in production as it's file system based database and reinvented wheel ,.
 */
 
 use crate::config::{config_file::DatabaseConfigEntry, Config};
 use crate::prelude::*;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
 use std::marker::PhantomData;
 use tokio::sync::MutexGuard;
 
@@ -75,12 +76,12 @@ where
     async fn init(
         config: &MutexGuard<'_, Config>,
         d_type: &DatabaseType,
-    ) -> Result<Arc<Mutex<File>>, Box<dyn std::error::Error>> {
+    ) -> Result<Arc<Mutex<File>>, Box<dyn Error + Send + Sync>> {
         // NOTE: If custom name functionality  would be implement, then we would need some source that maps the names with enums
         // and for now on we do not have it, NOTE: Config file does not have that information, if we would have added something like
         // names field that keeps the names in array, we would still need some functionality to MAP the filenames in the config
         // to enums of certain type, and that would be something that is done in the runtime
-                                                                                                                                
+
         let path = Self::create_path(config, d_type).await;
 
         return match OpenOptions::new()
@@ -198,7 +199,7 @@ impl DatabaseTask {
     // Expects a parsable JSON String
     //
     // Could fail if not valid JSON
-    // pub fn new(entry: Option<&Vec<u8>>) -> Result<Self, Box<dyn std::error::Error>> {
+    // pub fn new(entry: Option<&Vec<u8>>) -> Result<Self, Box<dyn Error + Send + Sync>> {
     //     let mut error = HttpRequestError {
     //         content_type: Some(String::from("application/json")),
     //         message: Some(String::from("Internal Server Error")),
@@ -224,7 +225,7 @@ impl DatabaseWAL {
     pub async fn exec<T: Serialize + DeserializeOwned + std::fmt::Debug>(
         &self,
         command: DatabaseCommand<T>,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    ) -> Result<String, Box<dyn Error + Send + Sync>> {
         match &command {
             DatabaseCommand::Insert(_, _) => {
                 let file = self.get_wal();
@@ -290,7 +291,7 @@ impl DatabaseWAL {
     /// NOTE: This function should be invoked only
     pub async fn new(
         config: &DatabaseConfigEntry,
-    ) -> Result<DatabaseWAL, Box<dyn std::error::Error>> {
+    ) -> Result<DatabaseWAL, Box<dyn Error + Send + Sync>> {
         // This initializes the actual database file as well as the WAL file
         // maybe we will abstract it away to separate struct later on.
 

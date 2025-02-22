@@ -1,13 +1,15 @@
 use crate::config::Config;
 
-use std::any::Any;
 use std::borrow::Cow;
+use std::char::UNICODE_VERSION;
 use std::error::Error;
-use std::io::{BufRead, Read};
+use std::fs;
+use std::io::Bytes;
+use std::ops::Index;
 use std::path::{Path, PathBuf};
 use std::str::Utf8Error;
-use std::{fs, vec};
-use tokio::io::AsyncWriteExt;
+use std::task::Context;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 use crate::prelude::*;
@@ -37,11 +39,21 @@ impl<'a> HttpRequest<'a> {
     pub async fn new(
         config: &MutexGuard<'_, Config>,
         stream: &mut TcpStream,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         // Parse the TCP stream
-        let (mut parsed_headers, body) = Self::parse_request(&config, stream).await?;
+        let (mut parsed_headers, body) = match Self::parse_request(&config, stream).await {
+            Ok(it) => it,
+            Err(err) => {
+                eprintln!("Could not parse request: {}", err);
 
-        println!("Headers keys: {:#?}", parsed_headers.get_headers().keys());
+                // Shutdown the stream for writing if any error occurs
+                stream.shutdown().await?;
+
+                return Err(err);
+            }
+        };
+
+        // println!("Headers keys: {:#?}", parsed_headers.get_headers().keys());
 
         // NOTE: I thing the discrepancy between the domain used here should be resolved thought should be investigated first
         // requested_target => http://localhost:5000/ It uses config to build the url as the default from the domain and port
@@ -63,7 +75,6 @@ impl<'a> HttpRequest<'a> {
         }
 
         Ok(Self {
-            // headers,
             parsed_headers,
             body,
         })
@@ -73,136 +84,120 @@ impl<'a> HttpRequest<'a> {
     async fn parse_request(
         config: &MutexGuard<'_, Config>,
         stream: &mut TcpStream,
-    ) -> Result<(HttpHeaders<'a>, Option<Vec<u8>>), Box<dyn Error>> {
+    ) -> Result<(HttpHeaders<'a>, Option<Vec<u8>>), Box<dyn Error + Send + Sync>> {
+        // ONGOING FIXES
+
         // TODO: Verify the presence of the Host header, 400 if not present
+        // Also make the headers validation as there is none at the moment, not only the Host header.
 
-        let mut buffer = Vec::<u8>::new();
-
-        // Stable solution
-        // 1. We will look for Content-Length header, we should get it in one read
-        // thought it does not really matter. Content-Length header is the size of the message in bytes
-        // incomplete message is an indication of a bad request and should be terminated.
-
-        // TODO: Maybe it could greater idea to encapsulate that data as something like HttpRequestParser or other name
-        // because it feels kind of static or unstructured
-
-        let mut expected_size: Option<usize> = None;
+        // Could be None if TcpStream is not valid HTTP message.
         let mut headers: Option<HttpHeaders> = None;
-        let mut transferred: usize = 0;
 
-        'outer: loop {
-            if let Some(expected_size) = expected_size {
-                if transferred == expected_size {
-                    break;
-                }
-            }
+        stream.readable().await.inspect_err(|e| {
+            eprintln!("Stream is currently unreadable, but it will be!: {}", e);
+        })?;
 
-            stream.readable().await?;
+        let reader = BufReader::new(&mut *stream);
+        let mut lines = reader.lines();
 
-            // NOTE: There could be an issue if the headers that are larger than 1024 bytes
-            // that could omit some bytes because they will appear as not CRLF terminated
-            // because full line was not read as it did not fit into the buffer.
+        while let Some(line) = lines.next_line().await.inspect_err(|e| {
+            eprintln!("Error reading line from the stream: {}", e);
+        })? {
+            if line.is_empty() {
+                break;
+            } else {
+                // First line is request line
+                if headers.is_none() {
+                    headers = Some(Self::new_headers(
+                        HttpRequestRequestLine::new(&config, &line).await?,
+                    ));
+                } else {
+                    // Error should not happen if the http message is semantically correct
 
-            let mut chunk = [0u8; 1024];
-
-            match stream.try_read(&mut chunk) {
-                Ok(0) => break,
-                Ok(bytes_read) => {
-                    // expected_size is set only if we have encountered the end of the headers, meaning empty line or CRLF
-                    if expected_size.is_some() {
-                        buffer.extend_from_slice(&chunk[..bytes_read]);
-                        transferred += bytes_read;
-                        continue;
-                    }
-
-                    let lines = chunk[..bytes_read].as_ref().lines();
-
-                    'inner: for (idx, line) in lines.enumerate() {
-                        println!("line {}: {:?}", idx, line);
-                        match line {
-                            Ok(line) => {
-                                // If line is empty, we have reached the end of the headers
-                                // At this point Content-length should arrive, if in the headers we have the content-length
-                                // header, then we should expect the body after empty line, based on that we will make a decision,
-                                // even if there is content-length. the message transmitted up to that line could be completed
-                                // if the content-length is equal to the size of the buffer, meaning body sent is empty
-
-                                if line.is_empty() {
-                                    // This should be evaluated only on POST, PUT, UPDATE/PATCH
-                                    if let Some(content_length) =
-                                        headers.as_ref().unwrap().get("Content-Length")
-                                    {
-                                        // If content-length is 0, we should not expect any body
-                                        if content_length == "0" {
-                                            break 'outer;
-                                        }
-
-                                        expected_size = (content_length
-                                            .parse::<usize>()
-                                            .expect("Could not parse size")
-                                            + transferred as usize)
-                                            .into();
-
-                                        // That could be unstable, off by one possible
-                                        // transferred -> bytes transferred up to this point
-                                        // (idx + 1) -> to shift the idx to line number that we are reading
-                                        // (idx + 1) * 2 -> * 2 to account for CRLF as they get removed by lines Iterator and they
-                                        // account to Content-Length
-                                        let body_pos = transferred + (idx + 1) * 2;
-
-                                        // Flush the rest the buffer regardless if there is a content or not
-
-                                        buffer.extend_from_slice(&chunk[body_pos..bytes_read]);
-
-                                        // NOTE: Could be off by one, not sure
-                                        transferred += bytes_read - body_pos;
-
-                                        break 'inner;
-                                    } else {
-                                        // If there is no content-length header, we should not expect any body
-                                        // request parsed
-                                        break 'outer;
-                                    }
-                                } else {
-                                    transferred += line.len();
-
-                                    // First line is request line
-                                    if headers.is_none() {
-                                        headers = Some(Self::new_headers(
-                                            HttpRequestRequestLine::new(&config, &line).await?,
-                                        ));
-                                    } else {
-                                        headers
-                                            .as_mut()
-                                            .expect("Headers are not initialized")
-                                            .add_header_line(line);
-                                    }
-                                }
-                            }
-                            Err(e) => panic!("Error reading line from stream: {}", e),
-                        }
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    continue;
-                }
-                Err(err) => {
-                    eprintln!("Error reading from stream: {}", err);
-
-                    return Err(Box::new(HttpRequestError {
-                        status_code: 400,
-                        status_text: String::from("Bad Request"),
-                        ..Default::default()
-                    }));
+                    headers
+                        .as_mut()
+                        .ok_or("Invalid request")
+                        .map_err(|e| {
+                            eprintln!(
+                                "Headers are not initialized while parsing header from line."
+                            );
+                            e
+                        })?
+                        .add_header_line(line);
                 }
             }
         }
 
-        if let Some(headers) = headers {
-            Ok((headers, Some(buffer)))
-        } else {
-            stream.shutdown().await?;
+        // TESTING
+        // TESTING
 
+        // if let Some(injected_header) = headers.as_ref().and_then(|h| h.get("Injected-Header")) {
+        //     println!(
+        //         "\x1b[93mInjected Header size: {:#?}\x1b[0m",
+        //         injected_header.len()
+        //     );
+
+        //     drop(lines);
+
+        //     let keys = headers.as_ref().unwrap().get_headers().keys().len();
+        //     stream
+        //         .write(format!("{};{}", injected_header.len(), keys).as_bytes())
+        //         .await?;
+
+        //     stream.shutdown().await?;
+
+        //     return Ok((HttpHeaders::new(None, None), None));
+        // } else {
+        //     println!("Injected Header not found");
+        // }
+
+        // TESTING
+        // TESTING
+
+        // Read the rest of the stream, if any
+        // Body of the request will only be present if the request method is POST, PUT, UPDATE/PATCH
+        // and when the Content-Length header is present in the headers
+
+        if let Some(headers) = headers {
+            let mut body_buffer: Option<Vec<u8>> = None;
+
+            if let Some(content_length) = headers.get("Content-Length") {
+                let content_length = content_length.parse::<usize>().inspect_err(|e| {
+                    eprintln!("Could not parse the Content-Length header as a valid integer: {e}")
+                })?;
+
+                if content_length != 0 {
+                    // Initialize the buffer only when there will be data to read
+                    body_buffer = Some(Vec::with_capacity(content_length));
+
+                    let mut transferred: usize = 0;
+
+                    let mut reader = lines.into_inner();
+
+                    // No data loss is acceptable
+                    while transferred != content_length {
+                        let chunk = reader.fill_buf().await?;
+
+                        // What if there is no data on the wire while reading, but it will be?
+                        if chunk.is_empty() {
+                            println!("Called");
+                            break;
+                        }
+
+                        body_buffer.as_mut().unwrap().extend_from_slice(chunk);
+
+                        let bytes_read = chunk.len();
+                        reader.consume(bytes_read);
+                        transferred += bytes_read;
+                        // println!("Transferred: {}/{}", transferred, content_length);
+                    }
+                }
+            }
+
+            // stream.shutdown()
+            Ok((headers, body_buffer))
+        } else {
+            eprintln!("Headers are not initialized");
             return Err("Invalid request".into());
         }
     }
@@ -378,7 +373,7 @@ impl<'a> HttpRequest<'a> {
     pub fn read_requested_resource(
         &'a self,
         response_headers: &mut HttpHeaders<'a>,
-    ) -> Result<String, Box<dyn Error>> {
+    ) -> Result<String, Box<dyn Error + Send + Sync>> {
         let resource_path: PathBuf = self.get_absolute_resource_path()?;
 
         let relative_path = resource_path
@@ -501,7 +496,7 @@ impl<'a> HttpRequest<'a> {
         config: &MutexGuard<'_, Config>,
         stream: &mut TcpStream,
         path: &Cow<'_, str>,
-    ) -> Result<bool, Box<dyn Error>> {
+    ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         // NOTE: Indentation in this function are f'ed up, should be fixed
         for (key, value) in self.parsed_headers.get_headers() {
             match key.as_ref() {
@@ -546,6 +541,7 @@ impl<'a> HttpRequest<'a> {
                                     // and in the given approach we always have to check for it to be Some
                                     // UPDATE: Not really, see todo.txt
 
+                                    println!("Redirect Path: {:#?}", path);
                                     location.set_path(path);
 
                                     // NOTE: This as it happens can be relative, so we could try to make it relative someday

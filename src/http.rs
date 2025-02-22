@@ -95,7 +95,7 @@ mod request_request_line {
                 })?
                 .try_into()
                 .map_err(|e| {
-                    eprint!("Error converting slice to array: {}", e);
+                    eprintln!("Error converting slice to array: {}", e);
                     HttpRequestError {
                         status_code: 400,
                         status_text: String::from("Bad Request"),
@@ -122,7 +122,7 @@ mod request_request_line {
 
             host.path_segments_mut()
                 .map_err(|_| {
-                    eprint!("Error getting mutable segments of request_target");
+                    eprintln!("Error getting mutable segments of request_target");
                     HttpRequestError::default()
                 })
                 .map(|mut segments| {
@@ -141,7 +141,7 @@ mod request_request_line {
             // Also in the current state of the app there is not HTTPS this is just useless.
 
             host.set_scheme(protocol.simplify()).map_err(|_| {
-                eprint!("Error setting scheme to the request_target");
+                eprintln!("Error setting scheme to the request_target");
                 HttpRequestError::default()
             })?;
 
@@ -339,7 +339,7 @@ impl<'a> HttpHeaders<'a> {
     // This should validate the correctness of the header line
     pub fn add_header_line(&mut self, line: String) -> () {
         // Header should not contain more than one delimiter of ": " also there should be not
-        // CRLF's thought that would be handled by the Lines Iterator, thought we also need to check,
+        // CRLF's though that would be handled by the Lines Iterator, though we also need to check,
         // also the key is not empty, and if the value is not empty
 
         // Assuming all CRLF's are removed by the Lines iterator
