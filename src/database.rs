@@ -1,5 +1,6 @@
+#![allow(warnings)]
 /*
-    NOTE: That was does purely for educational purposes, I would not recommend using this in production as it's file system based database and reinvented wheel ,.
+    NOTE: That was does purely for educational purposes, I would not recommend using this in production as it's file system based database and reinvented wheel.
 */
 
 use crate::config::{config_file::DatabaseConfigEntry, Config};

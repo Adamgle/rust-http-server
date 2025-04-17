@@ -58,6 +58,8 @@ const addTask = async (formData) => {
   tasks.appendChild(task);
   taskObject.value = taskValue;
 
+  const errorContainer = document.getElementById("error-div");
+
   // Add task to database
   const res = await fetch(`${SERVER_ROOT}${DATABASE_ROOT}`, {
     method: "POST",
@@ -67,6 +69,14 @@ const addTask = async (formData) => {
     },
     body: JSON.stringify(taskObject),
   });
+
+  const text = await res.text();
+  if (res.status !== 200) {
+    errorContainer.innerText = text;
+    return null;
+  } else {
+    errorContainer.style.display = "none";
+  }
 
   return taskObject;
 };

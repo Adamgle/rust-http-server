@@ -7,5 +7,7 @@
     "nonblocking",
     "shoutout",
     "uninit"
-  ]
+  ],
+  "files.autoSave": "afterDelay",
+  "files.autoSaveDelay": 1
 }

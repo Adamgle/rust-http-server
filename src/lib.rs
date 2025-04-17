@@ -1,9 +1,10 @@
 mod database;
-mod http;
-mod http_request;
-mod http_response;
+pub mod http;
 pub mod logger;
 pub mod prelude;
+
+pub use http::http_request;
+pub use http::http_response;
 
 use std::error::Error;
 
@@ -308,19 +309,21 @@ pub mod config {
 }
 
 pub mod tcp_handlers {
-    use super::http::{HttpHeaders, HttpProtocol, HttpRequestMethod};
+    use super::http::HttpRequestMethod;
     use super::http_request::HttpRequest;
     use crate::config::Config::{self};
-    use crate::database::{Database, DatabaseTask, DatabaseType};
+    use crate::http::{HttpHeaders, HttpResponseHeaders, HttpResponseStartLine};
     use crate::*;
-    use http::{HttpRequestError, HttpResponseStartLine};
+    use http::HttpRequestError;
     use http_response::HttpResponse;
     use std::borrow::Cow;
     use std::sync::Arc;
-    use tokio::net::{TcpListener, TcpStream};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+    use tokio::net::TcpListener;
     use tokio::sync::Mutex;
 
-    // QUESTION: Why there server you are about to make is asynchronous, not multithreaded?
+    // QUESTION: Why is the server you are about to make is asynchronous, not multithreaded?
     // => FOLLOW UP QUESTION:
     //  -> Can certain tasks be handled in async manner and the other in threading manner. If any, which one should be handled in which way.
     // ANSWER: Handling multiple connection, which spawn it's separate thread is computationally heavy, may include a system call to spawn a thread,
@@ -338,103 +341,6 @@ pub mod tcp_handlers {
             .map_err(|e| e.into());
     }
 
-    /// NOTE: Can log anything that implements `std::fmt::Display`
-    ///
-    /// Logs request or response that come from the client or response from the server to ./log.txt
-
-    /// Sends error response to the client, based on the error that occurred during request handling
-    /// downcasting to the specific error type from `Box<dyn Error + Send + Sync` and handling it accordingly
-    ///
-    /// If stream is None,
-    /// If err is None, send default 500 Internal Server Error response
-    async fn send_error_response(
-        config: &MutexGuard<'_, Config>,
-        stream: &mut TcpStream,
-        // http_err: Option<&HttpRequestError>,
-        mut err: Option<Box<dyn Error + Send + Sync>>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let pages_path = std::path::Path::new("public/pages/");
-
-        // If err is None, send default 500 Internal Server Error response
-        if err.is_none() {
-            err = Some(HttpRequestError::default().into())
-        }
-
-        if let Some(err) = err {
-            if let Some(http_err) = err.downcast_ref::<HttpRequestError>() {
-                let start_line = HttpResponseStartLine::new(
-                    HttpProtocol::HTTP1_1,
-                    http_err.status_code,
-                    &http_err.status_text,
-                )
-                .into();
-
-                let mut response_headers = HttpResponse::new_headers(start_line);
-
-                // Setting default content-type as text/html
-                response_headers.add(
-                    Cow::from("Content-Type"),
-                    Cow::from(
-                        http_err
-                            .content_type
-                            .clone()
-                            .unwrap_or(String::from("text/html")),
-                    ),
-                );
-
-                let body = match &http_err.content_type {
-                    Some(content_type) if content_type == "application/json" => {
-                        serde_json::to_string(http_err)?
-                    }
-                    Some(content_type) if content_type == "text/plain" => {
-                        format!("{:#?}", http_err)
-                    }
-                    // NOTE: matching different content-types
-                    // Some(content_type) if content_type == "application/x-www-form-urlencoded"
-                    _ => std::fs::read_to_string(pages_path.join("error.html"))?,
-                };
-
-                response_headers.add(
-                    Cow::from("Content-Length"),
-                    Cow::from(body.len().to_string()),
-                );
-
-                let mut response = HttpResponse::new(response_headers, Some(body))?;
-                return response.write(&config, stream).await;
-            } else {
-                // Sending text/plain as the error message if the error is not of the HttpRequestError type
-
-                let mut headers = HttpResponse::new_headers(
-                    HttpResponseStartLine::new(HttpProtocol::HTTP1_1, 500, "Internal Server Error")
-                        .into(),
-                );
-
-                headers.add(Cow::from("Content-Type"), Cow::from("text/plain"));
-
-                // NOTE: This should not happen, error could contain internal server error messages
-                // thereby exposing sensitive information to the client
-                let body = format!(
-                    "An error occurred while processing a request:\nWith error: {:#?}",
-                    err
-                );
-
-                headers.add(
-                    Cow::from("Content-Length"),
-                    Cow::from(body.len().to_string()),
-                );
-
-                let mut response = HttpResponse::new(headers, Some(body))?;
-
-                return response.write(&config, stream).await;
-            }
-            // NOTE: This is how you can handle different errors by downcasting to the specific error type
-            // else if let Some(io_err) = err.downcast_ref::<std::io::Error>() {}
-        } // You could propagate anything to the client there, for example for dev purposes:
-          // NOTE: It propagates full error message to the client
-
-        Ok(())
-    }
-
     /// Starts TCP server with provided `Config`, continuously listens for incoming request and propagates them further.
     pub async fn run_tcp_server(
         config: Arc<Mutex<Config>>,
@@ -442,46 +348,70 @@ pub mod tcp_handlers {
         // This extra lock will only affect first load time of the server and it is also negligible
         let listener = self::connect(config.lock().await).await?;
 
-        println!(
-            "TCP Connection Established at {:?}\nListening...",
-            listener.local_addr().unwrap()
-        );
+        // println!(
+        //     "TCP Connection Established at {:?}\nListening...",
+        //     listener.local_addr().unwrap()
+        // );
 
         loop {
             match listener.accept().await {
-                Ok((mut stream, socket)) => {
-                    println!("Connection established with: {:?}", socket);
+                Ok((stream, _)) => {
+                    // println!("Connection established with: {:?}", socket);
 
-                    // NOTE: This is very bad, if we would design it to hold database because of the inefficiencies
-                    // while writing to it a new entry, that also copy the whole database to the memory
-                    // let mut config_clone = config.clone();
+                    let (mut reader, writer) = stream.into_split();
 
-                    // Mem inspect config
-                    // println!("Size of the Config struct that is being copied in every single request because it spawns it's separate async task {:#?}",
-                    // std::mem::size_of_val(&config_clone));
-
+                    let writer = Arc::new(Mutex::new(writer));
                     let config = Arc::clone(&config);
 
-                    if let Err(res) = tokio::time::timeout(
-                        tokio::time::Duration::from_secs(5),
-                        tokio::spawn(async move {
-                            let config = config.lock().await;
+                    let task_error_writer = Arc::clone(&writer);
 
-                            if let Err(err) = self::handle_client(&mut stream, &config).await {
-                                eprintln!("Error handling request: {}", err);
-                                // send_error_response(&config, &mut stream, Some(err))
-                                //     .await
-                                //     .unwrap();
-                            } else {
-                                // Request termination
-                                println!("Request handled successfully")
+                    if let Err(err) = tokio::spawn(async move {
+                        let config = config.lock().await;
+                        let mut writer = writer.lock().await;
+
+                        if let Err(err) =
+                            self::handle_client(&mut reader, &mut writer, &config).await
+                        {
+                            if let Err(err) =
+                                HttpRequestError::send_error_response(&config, &mut writer, err)
+                                    .await
+                            {
+                                eprintln!("Error sending error response: {}", err);
+                            };
+
+                            // Shutdown for writing
+                            if let Err(err) = writer.shutdown().await {
+                                eprintln!("Error shutting down the stream: {}", err);
                             }
-                        }),
-                    )
+                        } else {
+                            // Request termination, handled successfully
+                        }
+                    })
                     .await
                     {
-                        eprintln!("Request timed out: {}", res);
-                    }
+                        eprintln!("Error spawning task: {}", err);
+
+                        let mut writer = task_error_writer.lock().await;
+
+                        // Shut downs the writing portion of the stream if error occurs
+
+                        if let Err(err) = writer.shutdown().await {
+                            eprintln!("Error shutting down the stream: {}", err);
+                        };
+                    };
+
+                    // Timeout for the request should be dependent on the method used or maybe even per path
+                    // specifically for request with large payloads.
+                    // if let Err(res) =
+                    // tokio::time::timeout(tokio::time::Duration::from_secs(5), request_task)
+                    // .await
+                    // {
+                    //     if let Err(err) = writer.shutdown().await {
+                    //         eprintln!("Error shutting down the stream: {}", err);
+                    //     }
+
+                    // eprintln!("Request timed out: {}", res);
+                    // }
                 }
                 Err(err) => eprintln!("Invalid TCP stream: {}", err),
             }
@@ -490,25 +420,27 @@ pub mod tcp_handlers {
 
     /// Handles incoming request from the client.
     async fn handle_client(
-        stream: &mut TcpStream,
+        reader: &mut OwnedReadHalf,
+        writer: &mut MutexGuard<'_, OwnedWriteHalf>,
         config: &MutexGuard<'_, Config>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let request: HttpRequest<'_> = HttpRequest::new(&config, stream).await?;
-        let mut response_headers: HttpHeaders<'_> = HttpResponse::new_headers(None);
+        let request: HttpRequest<'_> = HttpRequest::new(&config, reader).await?;
+        let mut headers: HttpResponseHeaders<'_> =
+            HttpResponseHeaders::new(HttpResponseStartLine::default());
 
         // If path is invalid and cannot be encoded, that should end the request
         let path = request.get_request_target()?;
 
-        let (method, path) = (request.get_method(), path);
+        let (method, path) = (request.get_headers().get_method(), path);
 
-        println!("Requesting: {:?} {}", method, path);
+        // println!("Requesting: {:?} {}", method, path);
 
         // This will be executed for every request and try to match paths that should be redirected
         // although the only redirection that we are doing is from http://127.0.0.1:<port> to http://localhost:<port>
         // paths are defined in the config file under 'domain' field, for domains and path redirect in the "paths" field
 
         // Give back the reference supplied to the function
-        if request.redirect_request(&config, stream, &path).await? {
+        if request.redirect_request(&config, writer, &path).await? {
             return Ok(());
         };
 
@@ -524,26 +456,24 @@ pub mod tcp_handlers {
         //     _ => {}
         // }
 
-        let response_body = match method {
+        let body = match method {
             // This throws an error because the app is making a GET request to the path
             // that does not exists, which is correct by definition
             // NOTE: We should initialize the database only once, or at least at the top,
             // but that tomorrow...
             // GET /database/tasks.json => Database::init() => Give back the control flow to the request initialized \end_middleware
-            HttpRequestMethod::GET => Some(request.read_requested_resource(&mut response_headers)?),
+            HttpRequestMethod::GET => Some(request.read_requested_resource(&mut headers)?),
             HttpRequestMethod::POST => {
                 // This would return Path not found if the path does not exists
                 // If we would want to make custom endpoints without actual path existence
                 // then it should be rewritten
 
-                // let resource = request.get_absolute_resource_path()?;
-
-                // NOTE: Paths under /database should validate the existence of wal and database_config only once
+                // NOTE: Paths under /database should validate the existence of WAL and database_config only once
                 // not to avoid checking the same thing multiple times
 
                 match path {
                     p if p == "/database/tasks.json" => {
-                        if let Some(database_config) = config.config_file.database.as_ref() {
+                        if let Some(_) = config.config_file.database.as_ref() {
                             // WARNING: This code times out
 
                             // match request.get_body() {
@@ -581,11 +511,11 @@ pub mod tcp_handlers {
             HttpRequestMethod::PUT => todo!(),
         };
 
-        response_headers.add(Cow::from("Connection"), Cow::from("close"));
+        headers.add(Cow::from("Connection"), Cow::from("close"));
 
-        let mut response: HttpResponse<'_> = HttpResponse::new(response_headers, response_body)?;
+        let mut response: HttpResponse<'_> = HttpResponse::new(headers, body);
 
-        response.write(&config, stream).await?;
+        response.write(&config, writer).await?;
         Ok(())
     }
 }

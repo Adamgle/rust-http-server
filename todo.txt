@@ -1,4 +1,4 @@
-CURRENT TREAT ON THE AGENDA: Parse the headers, make a coffee.
+"Now go finish it, captain"
 
 Buzzwords:
 - TCP Connection/TCP Protocol
@@ -20,20 +20,20 @@ Steps:
 4. Responding to requests
 
 !!! TODOS !!!
-1. Consider using making Config struct to accept options for running the server. <CHECK>
-2. Figure out why this is so unstable, sometimes request is handled properly and web page is shown, sometimes it sends "This site can't be reached". <CHECK>
+1. <CHECK> Consider using making Config struct to accept options for running the server. 
+2. <CHECK> Figure out why this is so unstable, sometimes request is handled properly and web page is shown, sometimes it sends "This site can't be reached". 
     -> The problem laid in the issue with client requests reading to the dynamic data structure, It was something related to the EOF reaching by functions 
     -> that operate on dynamically allocated data structures like read_vectorized or read_to_string which was impossible to reach somehow, 
     -> maybe EOF is not even present in the stream, I don't know, but somehow It made it hang while receiving the request and made a response when request was dropped
     -> or after 4 minutes which is time in which TCP connection requests get aborted. not sure about this timeout because untests but I've read that on stackoverflow 
     -> https://stackoverflow.com/questions/30552187/reading-from-a-tcpstream-with-readread-to-string-hangs-until-the-connection-is 
-3. Figure out how to send different responses, not just statically hard coded responses. <CHECK>
+3. <CHECK> Figure out how to send different responses, not just statically hard coded responses. 
     -> This is kinda silly because sending different responses is just what http does on different request, you just have to implement the 
     -> functionality of sending variate amounts of data based on user input.
     -> It always will be "hard coded" because what we are doing is using native HTTP protocol and sending the resources over TCP to HTTP protocol to interpret
     -> the data that we are sending. ACTUALLY the information about how to send the resource lays in the headers, 
     -> you need to parse the headers and do stuff that specific headers is bound to do.
-4. Routing can be done by reading the path from Referer field: Referer: http://192.168.0.140:5000/<route>, this is from stream that come with an http request. <CHECK>
+4. <CHECK> Routing can be done by reading the path from Referer field: Referer: http://192.168.0.140:5000/<route>, this is from stream that come with an http request. 
     --- Regarding that
         - Parse the path from the Referer header to travel the directory with the pages to read the actual pages and send them over TCP
         - writing appropriate response headers while sending the page which is tricky
@@ -43,34 +43,37 @@ Steps:
             - ANSWER: 
                 - MIME type that comes with request should be used, alternatively extension of file that is requested but we will try to avoid using extension as 
                 - the identifier of the resource, also I've heard that some browsers identify resource type based of bytes of that resource, 
-                - they look up on the header encoded in the bytes of a resource. <CHECK>
+                - they look up on the header encoded in the bytes of a resource. 
         - definitely we will need some functionality to parse the headers because writing them plain is a pain in the ass.
     --- GOALS
     1. Parse the path from Referer field or first line of the request header "GET /data HTTP/1.1", this contains the relative path that was requested
     2. Send routed web page
     \\ This was implemented differently, strictly based on resource path in request line relative to the server root where data that can be accessed by the client it stored. 
-5. Think about making struct TcpConnection -> <CHECK>
+5. <CHECK> Think about making struct TcpConnection -> 
     --- Regarding that
     - You could hold connection dependencies in one data container, pass it through functions and handlers if necessary.
         Know it is not necessary so leave that be, but this is a good way of holding things Like Config and connection itself.
     - You could hold information about protocol for example because it stays unchanged across connections, 
     \\ This will stay unimplemented because there is no need for that at the moment
-6. Implement a function that returns a response with error message, It could be done mostly statically and using the information in HttpRequestError <CHECK>
-7. Think about how to propagate full error messages to the client JUST FOR FUN <CHECK>
-8. Think about validating headers that comes with a request
-9. Errors yield by client are not handled on the server, like `PUT http://127.0.0.1:5000/ 501 (Not Implemented)` <CHECK>
-10. Rewrite request to http://localhost:<port> if http://127.0.0.1/:<port> is requested <CHECK>
+    => UPDATE: It actually is stored in the config file.
+6. <CHECK> Implement a function that returns a response with error message, It could be done mostly statically and using the information in HttpRequestError 
+7. <CHECK> Think about how to propagate full error messages to the client JUST FOR FUN 
+8. <CHECK> Think about validating headers that comes with a request
+    \\ There is actually no validation right know as of 15.04.2025, we surely need to validate the Host header in request.
+9. <CHECK> Errors yielded by client are not handled on the server, like `PUT http://127.0.0.1:5000/ 501 (Not Implemented)` 
+10. <CHECK>  Rewrite request to http://localhost:<port> if http://127.0.0.1/:<port> is requested 
     \\ Redirected not rewritten
 11. Write macro for header creation
 12. Default config file while starting the server
-13. For the 4th time, refactor parse_request to async programming, as doing it without it is kind of a waste of time, maybe multithreading <CHECK>
+13. <CHECK>  For the 4th time, refactor parse_request to async programming, as doing it without it is kind of a waste of time, maybe multithreading <CHECK>
     \\ At this point fully async, separate async task for each request
 14. Refactor errors to Anyhow::Result<T>
-15. HttpHeaders::new() should not be exposed, we are providing specialized functions for constructing HttpRequestHeaders and HttpResponseHeaders
+15. <CHECK> HttpHeaders::new() should not be exposed, we are providing specialized functions for constructing HttpRequestHeaders and HttpResponseHeaders
+    \\ Done, but with different naming.
 15. Tests should be written
     -> What tests are expected:
         - Sending malicious formatted HTTP message with headers injection, like CRLF's injection
-16. Investigate the idea of allocating static buffer in parse_http_message (which technically parses the Response only the whole message so naming is f'ed up)
+16. <CHECK> Investigate the idea of allocating static buffer in parse_http_message (which technically parses the Response only the whole message so naming is f'ed up)
     \\ Not possible, look up the comment in the parse_http_message
 17. Rename the config.database.root and config.database.wal to something explicitly state that this a path 
 18. Refactor HttpHeaders to separate structs for HttpRequest and HttpResponse to avoid ambiguity
@@ -87,19 +90,19 @@ Steps:
 
     
 ISSUES
-1. Sometimes request is stuck when changing domains from localhost to 127.0.0.1, even thought request is redirected
-    -> there is an pending state on the server of that request and after long enough time it throw "No bytes read from the stream" <RESOLVED>
+1. <RESOLVED> Sometimes request is stuck when changing domains from localhost to 127.0.0.1, even thought request is redirected
+    -> there is an pending state on the server of that request and after long enough time it throw "No bytes read from the stream" 
     -> It could be caused by incorrect redirection handling from that domain, although when you first start the server
     -> it works fine. 
             \\ FEEDBACK: I think that was caused by incorrect request reading, this issue was cause by calling read function on a stream
             \\ when there is no more data to be read
         => Update -> it seem to work fine in browser, but when using headless client which does not firstly initiate GET to the root, 
         => instead making POST request, it freezes
-2. Redirection seem not to work as expected, if request is originated from the browser it works fine, but if you make a request for example 
-    -> from python then redirection is just not happening and responds with 200, meaning you can reach the website with invalid domain <RESOLVED>
+2. <RESOLVED> Redirection seem not to work as expected, if request is originated from the browser it works fine, but if you make a request for example 
+    -> from python then redirection is just not happening and responds with 200, meaning you can reach the website with invalid domain 
         \\ Not sure I remember correctly, but it could have been caused not redirecting certain HTTP methods.
-3. There is a critical unexplained error, when you make a request to the 127.0.0.1 domain it gets correctly redirected, but the second time it throws
-    -> 500 Internal Server Error. It seem like the body of the request is not being sent properly but I am not sure about that. <RESOLVED>
+3. <RESOLVED> There is a critical unexplained error, when you make a request to the 127.0.0.1 domain it gets correctly redirected, but the second time it throws
+    -> 500 Internal Server Error. It seem like the body of the request is not being sent properly but I am not sure about that. 
     PROCESS:
         -> We will improve error handling to investigate the issue 
         -> There is an issue while checking the existence of the path on the server or more precisely existence of the HTTP path,
@@ -107,47 +110,51 @@ ISSUES
         -> that could be valid in terms of our future API implementation but not in terms of the methods that are used to retrieve, normalize,
         -> return absolute or relative path to that resource
         \\ That was resolved by refactoring the reading of TCPStream function, parsing HTTP request
-4. There is a buffer overflow if big enough payload is send in read_tcp_stream
+4. <RESOLVED> There is a buffer overflow if big enough payload is send in read_tcp_stream
     -> This is partially solved by implementing BufReader and I guess it is more performant as it avoids multiple sys calls to read the stream
     -> but even thought buffer seem still to does not fit all of the payload, 8192 bytes is size seem to be maximum that I can send.
         \\ 8192 bytes being maximum was caused by initial buffer set on BufReader, besides that we fix by reading data in chunks
         \\ checking for Content-Length, if provided, running until full payload is reach and so on.
-5. HttpResponse::write is f'ed up, http://localhost:5000 throws panic! <RESOLVED>
+5. <RESOLVED> HttpResponse::write is f'ed up, http://localhost:5000 throws panic! 
     \\ It is not f'ed up no longer, but there is still an area of improvement
-6. Redirection does not work as expected, it redirect from http://127.0.0.1:5000 to http::/localhost:5000/pages/index.html but should redirect to the root 
-    -> The location should change relatively <RESOLVED>
+6. <RESOLVED> Redirection does not work as expected, it redirect from http://127.0.0.1:5000 to http::/localhost:5000/pages/index.html but should redirect to the root 
+    -> The location should change relatively 
     \\ Caused by incorrect index path handling, changing `/` to `pages/index.html` which is valid, but we want to display `/`
-7. Requesting alternated domains, despite the redirection, freezes next request that uses the other domain <PARTIALLY RESOLVED>
+7. <RESOLVED> Requesting alternated domains, despite the redirection, freezes next request that uses the other domain 
     -> Race conditions should be investigated for all above issues, specifically how TCPStream is handled 
     \\ Request is no longer freezing, not sure about the race conditions, they could be present.
-    \\ UPDATE => Not sure if that caused by the domains interchange, there an issue that was cause by `Connection: keep-alive` header
+    \\ UPDATE => Not sure if that is caused by the domains interchange, there's an issue that was caused by `Connection: keep-alive` header
     \\  -> sent in request that was not handled by the server. Now we are just responding with `Connection: close` which resolves the issue
     \\  -> of a stuck request without response that could panic! on the server, but connection still freezes when bunch of requests
     \\  -> interchange. The process could be described as:
     \\  -> - We are initializing 1000 connections on the separate threads (10 threads) to overload the server with bunch of connection (though server does not throttle)
     \\  -> - While requests are still `streamed` and responded, when you initialize new connection to the server, it will block the `stream` of requests until the page gets refreshed 
-    \\  -> - Refreshing unlocks the `stream` of the requests and locks them once again while the full response the new initialized connection is received 
+    \\  -> - Refreshing unlocks the `stream` of the requests and locks them once again while the full response, the new initialized connection, is received 
     \\  -> Possible explanation of why this happens is just we need to spawn the async tasks for each TcpStream (request)
-8. Request parsing pose a numerous security issues, like CRLF injection, header injection <RESOLVED>
+    \\ UPDATE => The described process no longer freezes the stream of requests. Thought there is still an issue with server freeze on alternating domains
+    \\ -> That I think is caused by keep-alive header that I cannot respond to appropriately. 
+8. <RESOLVED> Request parsing pose a numerous security issues, like CRLF injection, header injection 
     \\ We have changed the mechanism of parsing the http message to more stable and maintainable way, probably more efficient to, effectively fixing the issue.
-9. There could be split delimiter of \n\r in the chunks, wrongly interpreting the presence of the body in the request <RESOLVED>
+9. <RESOLVED> There could be split delimiter of \n\r in the chunks, wrongly interpreting the presence of the body in the request 
     \\ It actually is divided across chunks, handling remaining_lfcrlf_shift, not well tested thought.
-    \\ UPDATE: We have changed the mechanism of parsing the http message to more stable and maintainable way, probably more efficient to, effectively fixing the issue.
-10. parse_request does not really check for the \r\n\r\n presence at the end of requests, we could technically take a slice of that 
-    -> chunk to check for the rest of the data being \n, (as it checks for \n\r, so rest of the data is \n) but that
+    \\ UPDATE: We have changed the mechanism of parsing the http message to more stable and maintainable way, probably more efficient to, 
+10. <RESOLVED> parse_request does not really check for the \r\n\r\n presence at the end of requests, we could technically take a slice of that 
+    -> effectively fixing the issue. Chunk to check for the rest of the data being \n, (as it checks for \n\r, so rest of the data is \n) but that
     -> is not a strict comparison as malicious request could be sent. Also there is a possibility for delimiter to be split
     -> across chunk reads, so we would have to synchronize them
     \\ UPDATE: We have changed the mechanism of parsing the http message to more stable and maintainable way, probably more efficient to, effectively fixing the issue.
-11. Server still sometimes gets stuck in request, it does not even go to parse_request function and timeout for TcpStream 
+11. <RESOLVED> Server still sometimes gets stuck in request, it does not even go to parse_request function and timeout for TcpStream 
     -> does not solve the problem
-    \\ I think it is solved, we are now using tokio async runtime to handle request allowing current handling of request that not block each other
+    \\ I think it is solved, we are now using tokio async runtime to handle request allowing current handling of request that don't block each other
     \\ But I think the issue with additional message being sent could still happen, reading request incorrectly, although that no longer panic!'s
-12. The Logger is the worst and does not even work at all, the buffer is not flushed probably, though flushed technically
+    UPDATE => Currently it is not freezing but keep-alive still hangs in the stream, but currently it does not create any issue, it's aborted on new request.
+12. <RESOLVED> The Logger is the worst and does not even work at all, the buffer is not flushed probably, though flushed technically 
     -> UPDATE: gave up onto that Logger, we'll write a new one, presumably multithreaded, surely one that will work in asynchronous environment
-13. There is a defined race condition when writing to database in multithreaded way, like 1000 requests on 10 threads, probably like one write to database
+13. <N/A> There is a defined race condition when writing to database in multithreaded way, like 1000 requests on 10 threads, probably like one write to database
     -> causes partial write or something because the other is interrupting resulting each with malformed database format or with lost data being written to database
-14. There is still a hanging request after you just start the server and wait a bit, it is handled so server does not panic! thought you can see it throw
-    -> Request timed out: deadline has elapsed and after you make consequent request it eprintln!'s 
+    => N/A because we are rewriting database to async environment one. 
+14. <RESOLVED> There is still a hanging request after you just start the server and wait a bit, it is handled so server does not panic! thought you can see it throw
+    -> Request timed out: deadline has elapsed, and after you make consequent request it eprintln!'s 
     -> `thread 'tokio-runtime-worker' panicked at ~\http_request.rs:172:21:
     -> called `Option::unwrap()` on a `None` value
     -> note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace`
@@ -155,7 +162,7 @@ ISSUES
     -> with `Connection: close` thought it is worth to look closely onto that while debugging. 
     -> NOTE: It happens every single request after a sufficient period, Wireshark shows [TCP keep-alive] AND [TCP Dup ACK]
     -> which I think should imply something about the issue
-15. Dev tools shows slow initial connection, could be do to slow TCP handshake
+    \\ UPDATE => That's keep-alive packet, currently it does not create an issue in any way, shape or form.
 
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,

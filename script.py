@@ -1,27 +1,44 @@
-# Code in this file is a shenanigan, foolishness. Take it with a grain of salt, don't ya.
+# Code in this file is shenanigans, foolishness.
 
-import collections
 import functools
 import json
-import requests
-from pprint import pprint
+import os
+import pprint
 import socket
 import threading
-import typing
 import time
-import os
+from typing import Callable, List, Optional, TypedDict, Any
+from enum import Enum
+import typing
+import matplotlib.pyplot as plt
+import numpy as np
+import requests
+from numpy.typing import NDArray
 
 URL_BASE = "http://localhost:5000/"
-URL_REDIRECT = "http://127.0.0.1:5000/"
+DEFAULT_PORT = 5000
+NOTE_FILE_PATH = "./public/note.txt"
 
 
-def write_note(payload: str):
-    with open("./public/note.txt", mode="w+") as f:
+class SendResult(TypedDict):
+    payload_size: int
+    status: bool
+
+
+class HttpMethod(str, Enum):
+    GET = "GET"
+    POST = "POST"
+    PUT = "PUT"
+    DELETE = "DELETE"
+
+
+def write_note(payload: str) -> None:
+    with open(NOTE_FILE_PATH, "w+", encoding="utf-8") as f:
         f.write(payload)
 
 
-def build_payload(id: int, payload: str) -> str:
-    return json.dumps({"id": id, "value": payload})
+def build_payload(id: int, value: str) -> str:
+    return json.dumps({"id": id, "value": value})
 
 
 def test_post(path: str, payload: str) -> int:
@@ -34,229 +51,255 @@ def test_get(path: str) -> int:
     return response.status_code
 
 
-inject_size = 1
+SendCustomCallable = Callable[[str, str, Optional[str], Optional[str]], SendResult]
 
 
-def send_custom(id: int, request: str, path: str) -> bool:
-    host = "localhost"
-    port = 5000
+def send_custom(
+    request: HttpMethod = HttpMethod.GET,
+    path: str = "/",
+    payload: Optional[str] = None,
+    host: str = "localhost",
+    inject_size: int = 1,
+    **kwargs,
+) -> SendResult:
+    injected_header = f"malicious-value{'x' * inject_size}"
 
-    POST_payload = build_payload(id, "A" * 1024)
+    response_timestamps: Optional[List[float]] = kwargs.get("response_timestamps", None)
 
-    # We do not need that, it was made for testing of a buffered data that could not be fit into the buffer
-    # as that would overflow the inner buffer of the BufReader, but it seems to work fine.
-    injected = f"malicious-value{'x' * inject_size}"
+    match request:
+        case HttpMethod.POST:
+            headers = (
+                f"POST {path} HTTP/1.1\r\n"
+                f"Content-Length: {len(payload) if payload else 0}\r\n"
+                "Content-Type: application/json\r\n"
+                "User-Agent: Mozilla/5.0\r\n"
+                f"Host: {host}:{DEFAULT_PORT}\r\n"
+                "X-Custom-Header: valid-value\r\n"
+                f"Injected-Header: {injected_header}\r\n\r\n"
+                f"{payload if payload else ''}"
+            )
+        case HttpMethod.GET:
+            headers = (
+                f"GET {path} HTTP/1.1\r\n"
+                "User-Agent: Mozilla/5.0\r\n"
+                f"Host: {host}:{DEFAULT_PORT}\r\n"
+                "X-Custom-Header: valid-value\r\n"
+                f"Injected-Header: {injected_header}\r\n\r\n"
+            )
+        case _:
+            headers = (
+                f"{request.value} {path} HTTP/1.1\r\n"
+                "User-Agent: Mozilla/5.0\r\n"
+                f"Host: {host}:{DEFAULT_PORT}\r\n"
+                "X-Custom-Header: valid-value\r\n"
+                f"Injected-Header: {injected_header}\r\n\r\n"
+                f"{payload if payload else ''}"
+            )
 
-    POST_request = (
-        f"POST {path} HTTP/1.1\r\n"
-        f"Content-Length: {len(POST_payload)}\r\n"
-        "Content-Type: application/json\r\n"
-        "User-Agent: Mozilla/5.0\r\n"
-        f"Host: {host}:{port}\r\n"
-        "X-Custom-Header: valid-value\r\n"
-        f"Injected-Header: {injected}\r\n\r\n"
-        f"{POST_payload}"
-    )
-
-    # injected_header_size = len(injected.encode("utf-8"))
-    # keys_size = 0
-
-    # for line in POST_request.splitlines()[1:]:
-    #     if line == "":
-    #         break
-
-    #     keys_size += 1
-
-    # print(keys_size)
-    # print("\033[93mInjected header size: ", injected_header_size, "\033[0m")
-
-    GET_request = (
-        f"GET {path} HTTP/1.1\r\n"
-        "User-Agent: Mozilla/5.0\r\n"
-        f"Host: {host}:{port}\r\n"
-        "X-Custom-Header: valid-value\r\n"
-        "Injected-Header: malicious-value\r\n"
-        "\r\n"
-    )
-
-    size = (
-        len(GET_request.encode("utf-8"))
-        if request == "GET"
-        else len(POST_request.encode("utf-8"))
-    )
-    print("Sending request of size: ", size)
-
-    def create_socket(request: str) -> str:
+    def create_socket(message: str) -> str:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((host, port))
-            s.sendall(request.encode())
-            # If the response would be greater than 1024 bytes that would be flawed
-            data = s.recv(1024)
+            s.connect((host, DEFAULT_PORT))
+            s.sendall(message.encode())
 
-            return data.decode("utf-8")
+            response = s.recv(1024).decode()
+            s.close()
 
-    # That return a response, although be careful as this only returns the first 1024 bytes of the response
-    response = (
-        create_socket(POST_request) if request == "POST" else create_socket(GET_request)
-    )
+            return response
 
-    # response_injected_header_size, response_keys_size = response.split(";")
+    response = create_socket(headers)
 
-    # if (
-    #     int(response_injected_header_size) != injected_header_size
-    #     or int(response_keys_size) != keys_size
-    # ):
-    #     raise ValueError(
-    #         f"Response does not match the injected header size: {response_injected_header_size} != {injected_header_size} or {response_keys_size} != {keys_size}"
-    #     )
+    if response:
+        if response_timestamps is not None:
+            response_timestamps.append(time.time())
 
     return {
-        "payload_size": size,
+        "payload_size": len(headers.encode()),
         "status": "200" in response,
     }
 
 
-def run_multithreaded(callback, threads_count=10, requests_per_thread=100, **kwargs):
-    threads = []
+def run_multithreaded(
+    callback: SendCustomCallable,
+    threads_count: int = 10,
+    requests_count: int = 100,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """
+    Executes a callback function, presumably `send_custom` in current implementation, but could be anything that is making a request, in multiple threads.
+    Makes n requests distributes across m threads, meaning one thread makes n/m requests.
+    requests_count must be divisible by threads_count.
+    Args:
+        callback (SendCustomCallable): The function to be executed by each thread. Must accept keyword arguments and return a dict with "payload_size" and "status" keys.
+        threads_count (int, optional): Number of threads to spawn. Defaults to 10.
+        requests_count (int, optional): Number of requests distributes across thread to perform. Defaults to 100.
+        **kwargs (Any): Additional keyword arguments to pass to the callback function.
+    Returns:
+        dict[str, Any]: A dictionary containing:
+            - "results": List of boolean status results from all requests.
+            - "request_size": The payload size from the first callback result.
+    Notes:
+        - The function prints the number of failures after each thread completes.
+        - The "request_size" is determined from the first callback invocation.
+    """
+
+    if requests_count % threads_count != 0:
+        raise ValueError("requests_count must be divisible by threads_count.")
+
     results: list[bool] = []
-    request_size = 0
-    id = 0
+    request_size: int = 0
+    thread_list = []
 
-    def worker(callback, **kwargs):
-        nonlocal id
+    # response_timestamps: Optional[List[time.time]] = kwargs.get(
+    #     "response_timestamp", None
+    # )
+
+    def worker() -> None:
         nonlocal request_size
-        thread_results = []
+        thread_results: list[bool] = []
 
-        for _ in range(requests_per_thread):
-            id += 1
-            result = callback(id, **kwargs)
-            request_size = result["payload_size"] if request_size == 0 else request_size
-            thread_results.append(result["status"] if "status" in result else result)
+        for _ in range(requests_count // threads_count):
+            # Invokes send_custom presumably
+
+            result = callback(**kwargs)
+
+            if request_size == 0:
+                request_size = result["payload_size"]
+            thread_results.append(result["status"])
 
         results.extend(thread_results)
 
     for _ in range(threads_count):
-        thread = threading.Thread(
-            target=worker, kwargs={"callback": callback, **kwargs}
-        )
-        threads.append(thread)
+        thread = threading.Thread(target=worker)
+        thread_list.append(thread)
         thread.start()
 
-    for idx, thread in enumerate(threads):
+    for idx, thread in enumerate(thread_list):
         thread.join()
-        if all(results):
-            print(
-                f"All requests of {idx} thread were successful: request count: {len(results)}"
-            )
-        else:
-            print(
-                f"Thread {idx} had failed requests, failed requests: {results.count(False)}"
-            )
+        print(f"Thread {idx} done. Failures: {results.count(False)}")
 
     return {"results": results, "request_size": request_size}
 
 
-def run_benchmark(callback, **kwargs):
-    # 'count' is the number of benchmarks to run, and then it will take the average of all the runs.
-    if "count" not in kwargs:
-        kwargs["count"] = 1
+def run_benchmark(
+    callback: SendCustomCallable,
+    count: int = 1,
+    request: HttpMethod = HttpMethod.GET,
+    path: str = "/",
+    response_timestamps: List[float] = [],
+) -> None:
+    """Runs n benchmarks on a given path and request. Default's to one benchmark on "/" path with 'GET'.
 
-    callback_keywords = callback.keywords
+    Args:
+        callback (SendCustomCallable): Currently it runs on run_multithreaded function that runs send_custom, but ideally it could run on anything,
+        preferably on raw socket as benchmarking with requests library is a shenanigan.
+        count (int, optional): Count of benchmarks to run. Defaults to 1.
+        request (str, HttpMethod): Http method. Defaults to "GET".
+        path (str, optional): Path to run. Defaults to "/".
+    """
 
-    thread_count, request_per_thread = (
-        callback_keywords["threads_count"]
-        if "threads_count" in callback_keywords
-        else None
-    ), (
-        callback_keywords["requests_per_thread"]
-        if "requests_per_thread" in callback_keywords
-        else None
+    file_path = os.path.join("public", path.lstrip("/"))
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    # arguments of the run_multithreaded built with functools.partial
+    callback_args = callback.keywords
+
+    threads_count, requests_count = (
+        callback_args["threads_count"],
+        callback_args["requests_count"],
     )
 
-    log_entry = [
-        f"Running {kwargs['count']} benchmarks {f"on {thread_count} threads, making {request_per_thread} requests per thread, total of {kwargs['count'] * thread_count * request_per_thread} requests, at" if all(prop is not None for prop in [thread_count, request_per_thread]) else "at"} {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}"
+    print(
+        f"Threads count: {threads_count} Requests per thread: {requests_count // threads_count} "
+    )
+
+    log_entry: list[str] = [
+        f"Running {count} benchmarks on {threads_count} threads, making {requests_count // threads_count} requests per thread, at {timestamp}",
+        f"Running: {request} {path}",
     ]
 
-    if "request" not in kwargs or "path" not in kwargs:
-        raise ValueError("request and path must be provided")
+    try:
+        file_size = os.path.getsize(file_path)
+    except FileNotFoundError:
+        file_size = -1
+        raise FileNotFoundError("File not found. Please check the path.")
 
-    log_entry.append(f"Running: {kwargs['request']} {kwargs['path']}")
+    log_entry.append(f"File path: {file_path} (Size: {file_size} bytes)")
 
-    full_path = os.path.join(os.getcwd(), "public", kwargs["path"].removeprefix("/"))
-
-    log_entry.append(f"File size of: {os.path.getsize(full_path)} bytes")
-
-    # Payload size includes headers and body, if any, so technically it cannot be None,
-    # though anything is possible and that is peak production code.
+    total_time = 0.0
     payload_size = None
 
-    with open("benchmark.log", "a+") as f:
-        total = 0
-        for _ in range(kwargs["count"]):
-            start_time = time.time()
-            result = callback(request=kwargs["request"], path=kwargs["path"])
-            results = result["results"] if "results" in result else None
+    for i in range(count):
+        start = time.time()
 
-            payload_size = result["request_size"] if "request_size" in result else None
+        benchmark_response_timestamps: List[float] = [start]
 
-            end_time = time.time()
-            execution_time = end_time - start_time
-
-            total += execution_time
-
-        print(f"Execution time: {execution_time:.2f} seconds")
-
-        req_count = (
-            kwargs["count"] * thread_count * request_per_thread
-            if all(prop is not None for prop in [thread_count, request_per_thread])
-            else kwargs["count"]
+        result = callback(
+            request=request,
+            path=path,
+            response_timestamps=benchmark_response_timestamps,
         )
 
-        # if results:
-        #     raise ValueError("No results were returned")
+        response_timestamps.append([ts - start for ts in benchmark_response_timestamps])
 
-        print(f"Average time per request: {(execution_time / req_count):.4f} seconds")
+        end = time.time()
+        total_time += end - start
+        payload_size = result.get("request_size", 0)
 
-        log_entry.append(f"Payload size: {payload_size} bytes")
-        if payload_size and thread_count and request_per_thread:
-            log_entry.append(
-                "Payload transferred: {:.2f} MB".format(
-                    (payload_size * thread_count * request_per_thread * kwargs["count"])
-                    / 1024
-                    / 1024
-                )
-            )
-            log_entry.append(
-                f"Average time per request: {(total / (kwargs['count'] * thread_count * request_per_thread)):.4f} seconds"
-            )
+    average_time = total_time / count
+    log_entry.append(f"Payload size: {payload_size} bytes")
+    log_entry.append(f"Average execution time: {average_time:.4f} seconds\n")
 
-        log_entry.append(
-            f"Average execution time: {total / kwargs['count']:.2f} seconds\n\n"
-        )
+    plot_response_timestamps(response_timestamps)
 
-        f.write("\n".join(log_entry))
+    with open("benchmark.log", "a", encoding="utf-8") as f:
+        f.write("\n".join(log_entry) + "\n")
+
+    print("\n".join(log_entry))
 
 
-def tests():
-    global inject_size
+def plot_response_timestamps(timestamps: List[List[float]]) -> None:
+    timestamps = np.array(timestamps, dtype=np.float64)
 
-    # for i in range(100000):
-    # inject_size += 1
+    plt.figure(figsize=(10, 6))
+    plt.xlabel("Request Number")
+    plt.ylabel("Time since thread start (seconds)")
+    plt.title("Response Timestamps per Thread")
+    plt.grid()
 
-    # send_custom(1, "POST", "/database/tasks.json")
-    # send_custom(1, "GET", "/database/tasks.json")
+    for i, ts in enumerate(timestamps):
+        plt.plot(ts, marker=".", label=f"Benchmark {i + 1}")
 
+    timestamps_avg = np.mean(timestamps, axis=0)
+    xs = np.arange(len(timestamps_avg))
+    # slope, intercept = np.polyfit(xs, timestamps_avg, 1)
+
+    plt.plot(timestamps_avg, marker="x", linestyle="--", label="Average benchmark")
+
+    # count = 5, requests_count = 1000, threads_count = 10 
+    multi_slope = 0.0004328727698983177
+    # count = 5, requests_count = 1000, threads_count = 1
+    single_slope = 0.00069040234219954
+
+    plt.plot(xs, single_slope * xs, label="Single thread", linestyle="--")
+    plt.plot(xs, multi_slope * xs, label="Multi thread", linestyle="--")
+
+    plt.legend(title="Legend")
+    plt.show()
+
+
+def main():
     run_benchmark(
-        functools.partial(
+        callback=functools.partial(
             run_multithreaded,
             callback=send_custom,
-            threads_count=15,
-            requests_per_thread=100,
+            threads_count=10,
+            requests_count=1000,
         ),
-        request="POST",
+        request="GET",
         path="/database/tasks.json",
         count=5,
     )
 
 
-tests()
+if __name__ == "__main__":
+    main()
