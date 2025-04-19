@@ -57,7 +57,7 @@ impl<'a> HttpRequest<'a> {
         let mut headers: Option<HttpRequestHeaders> = None;
 
         // NOTE: Stream will not become readable for TCP-Keep-Alive packet.
-        timeout(Duration::from_secs(0), stream.readable())
+        timeout(Duration::from_secs(5), stream.readable())
             .await
             .inspect_err(|e| {
                 eprintln!("Error waiting for the stream to be readable: {:?}", e);
@@ -79,6 +79,7 @@ impl<'a> HttpRequest<'a> {
             } else {
                 // Error should not happen if the http message is semantically correct
                 // NOTE: ok_or_else will never happen because of the else if above
+
                 headers
                     .as_mut()
                     .ok_or_else(|| {
@@ -127,6 +128,7 @@ impl<'a> HttpRequest<'a> {
                     }
                 }
             };
+
             return Ok(Self {
                 body: body_buffer,
                 headers,

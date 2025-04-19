@@ -35,7 +35,9 @@ pub mod config {
         pub config_file: config_file::ServerConfigFile,
         /// `unimplemented!()`
         pub logger: Logger,
-        /// Under development
+        /// Under development,
+        ///
+        /// NOTE: I think that should be removed from there, kind of shenanigans.
         pub wal: Option<DatabaseWAL>,
     }
 
@@ -312,6 +314,7 @@ pub mod tcp_handlers {
     use super::http::HttpRequestMethod;
     use super::http_request::HttpRequest;
     use crate::config::Config::{self};
+    use crate::database::{Database, DatabaseTask, DatabaseType, DatabaseUser};
     use crate::http::{HttpHeaders, HttpResponseHeaders, HttpResponseStartLine};
     use crate::*;
     use http::HttpRequestError;
@@ -456,6 +459,10 @@ pub mod tcp_handlers {
         //     _ => {}
         // }
 
+        // TODO: Initialization of the Database should be done once, presumably in the middleware when necessary.
+        let instance = Database::<DatabaseTask>::new(&config, DatabaseType::Tasks).await;
+        // let instance = Database::<DatabaseUser>::new(&config, DatabaseType::Users).await;
+
         let body = match method {
             // This throws an error because the app is making a GET request to the path
             // that does not exists, which is correct by definition
@@ -473,26 +480,13 @@ pub mod tcp_handlers {
 
                 match path {
                     p if p == "/database/tasks.json" => {
-                        if let Some(_) = config.config_file.database.as_ref() {
-                            // WARNING: This code times out
-
-                            // match request.get_body() {
-                            //     Some(body) => {
-                            //         let instance =
-                            //             Database::<DatabaseTask>::new(&config, DatabaseType::Tasks)
-                            //                 .await;
-
-                            //         instance.insert(body).await;
-                            //     }
-                            //     None => {}
-                            // }
-                        } else {
-                            panic!("DROP DATABASE \"\\ROOT\" EXECUTED SUCCESSFUL");
-                        }
-
-                        return Err(
-                            "Database insertions are not implemented yet, as the whole database",
-                        )?;
+                        Some(match config.config_file.database.as_ref() {
+                            Some(_) => match request.get_body() {
+                                Some(body) => instance.insert(body).await?,
+                                None => Err("No body in the request")?,
+                            },
+                            None => Err("Database not configured in the config file.")?,
+                        })
                     }
                     _ => {
                         eprintln!("Path does not exists on the server or the method used is unsupported for that path: {:?}", path);

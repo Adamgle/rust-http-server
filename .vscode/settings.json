@@ -5,6 +5,7 @@
     "eviormentt",
     "lfcrlf",
     "nonblocking",
+    "serde",
     "shoutout",
     "uninit"
   ],

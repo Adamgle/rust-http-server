@@ -70,15 +70,16 @@ Steps:
 14. Refactor errors to Anyhow::Result<T>
 15. <CHECK> HttpHeaders::new() should not be exposed, we are providing specialized functions for constructing HttpRequestHeaders and HttpResponseHeaders
     \\ Done, but with different naming.
+    => UPDATE: That is done in different way by separating the structs of HttpHeaders.
 15. Tests should be written
     -> What tests are expected:
         - Sending malicious formatted HTTP message with headers injection, like CRLF's injection
-16. <CHECK> Investigate the idea of allocating static buffer in parse_http_message (which technically parses the Response only the whole message so naming is f'ed up)
-    \\ Not possible, look up the comment in the parse_http_message
+16. <CHECK> Investigate the idea of allocating static buffer in parse_http_message (which technically parses the Response only, not the whole message so naming is f'ed up)    \\ Not possible, look up the comment in the parse_http_message
 17. Rename the config.database.root and config.database.wal to something explicitly state that this a path 
-18. Refactor HttpHeaders to separate structs for HttpRequest and HttpResponse to avoid ambiguity
+18. <RESOLVED> Refactor HttpHeaders to separate structs for HttpRequest and HttpResponse to avoid ambiguity
     \\ Maybe we could avoid that, by providing some methods on each struct that eagerly unwrap's the field that are for sure there, 
     \\ and the error would be thrown earlier if not supplied. Given that we would avoid separating the structs by supplying reliable interface.
+    => Separated to HttpRequestHeaders and HttpResponseHeaders
 19. Think about implementing some kind of middleware or similar functionality, maybe not really middleware but something that runs 
     -> some pre-defined code on certain paths, specifically in the context of Database initialization
 20. Investigate the possible issue with request_parsing with possible omit of certain header fields when headers are greater 1024 bytes, read the NOTE comment
@@ -163,6 +164,27 @@ ISSUES
     -> NOTE: It happens every single request after a sufficient period, Wireshark shows [TCP keep-alive] AND [TCP Dup ACK]
     -> which I think should imply something about the issue
     \\ UPDATE => That's keep-alive packet, currently it does not create an issue in any way, shape or form.
+15. Paths like this "http://localhost:5000/////////////////////////////////////////////////" works and resolves to "http://localhost:5000/"
+16. Issues related to Database
+    -> Current design requires that `DatabaseWAL` have access to Database as it have to invoke Database methods of insert, delete, etc., which does not happen.
+    -> `DatabaseType` does not connect to a `Schema`, which is an issue, because we want to write to Database of specific type a specific entry
+        but we do not have it's `Schema` (in `DatabaseCommand`).
+    -> I think the `Database` fields, the storage, should be in JSON object that parses to HashMap as 
+        currently deletion, update, select are O(n) complexity.
+    -> Enums formatted to Strings cannot be parsed with serde_json as that is not JSON, duh...
+    -> There is an issue how Database is initialized, it gets initialized every call to `handle_client` making the WAL file 
+        unable to store the size as it gets reinitialized every time. DatabaseWAL cannot be declared in the Database struct.
+        Currently there is a storage of `DatabaseWAL` instance in the `Config`, and something similar resembling a context manager
+        should be constructed, although I am not reject that idea to store that in the `Config` struct.
+    -> I think there should be one instance of the Database, not one instance of the DatabaseWAL. Maybe we could abstract
+        `Database` to something like `Collection` and Database would store every `Collection` because currently `Database`
+        is designed to hold one `DatabaseType` stored in `d_type` field, that of course would not work as to instantiate a new `Database`
+        would require us to redeclare `DatabaseWAL`, `DatabaseWAL` MUST BE placed outside `Database` or we would revert the structure 
+        for `Database` and `DatabaseWAL` to be instantiate once, stored in a context, and add some additional abstraction for 
+        DatabaseType instantiation, of course that would require us to store that in the `Database` struct, presumably for the duration of the program.
+        That is not ideal, as there is no bidirectional communication between the two. The functionality implemented would not work
+        and if we would wanted to integrate it, all of the methods would have to be static, passing something like `DatabaseType` to associate with
+        a `Schema` and so on. 
 
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,
@@ -171,6 +193,7 @@ IDEAS
 
 ON THE AGENDA: 
 1. Multithreading is on the agenda which will enable us to handle multiple requests simultaneously but far away and we do not bother just know
+
 
 DREAMLAND
 Let's try to develop something...
@@ -186,7 +209,8 @@ We will make a stateful todo-app with a static file as a database.
         3. We could sent css spreadsheets via http request
         4. Database could be secured <PREMIUM IDEA>
 
+
 CURRENT STATE OF APP:
--> Completely fucked up, don't even know what next to do, what to fix, everything to fix, nothing can be fixed.
+-> Completely f'ed up, don't even know what next to do, what to fix, everything to fix, nothing can be fixed.
     -> We will try thought.
     -> UPDATE: Now that is partially true, probably will stay that way.

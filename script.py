@@ -1,4 +1,4 @@
-# Code in this file is shenanigans, foolishness.
+# Code in this file is a shenanigans, foolishness.
 
 import functools
 import json
@@ -13,7 +13,6 @@ import typing
 import matplotlib.pyplot as plt
 import numpy as np
 import requests
-from numpy.typing import NDArray
 
 URL_BASE = "http://localhost:5000/"
 DEFAULT_PORT = 5000
@@ -75,7 +74,7 @@ def send_custom(
                 "User-Agent: Mozilla/5.0\r\n"
                 f"Host: {host}:{DEFAULT_PORT}\r\n"
                 "X-Custom-Header: valid-value\r\n"
-                f"Injected-Header: {injected_header}\r\n\r\n"
+                f"Injected-Header{injected_header}: {injected_header}\r\n\r\n"
                 f"{payload if payload else ''}"
             )
         case HttpMethod.GET:
@@ -203,6 +202,8 @@ def run_benchmark(
     # arguments of the run_multithreaded built with functools.partial
     callback_args = callback.keywords
 
+    print(callback_args)
+
     threads_count, requests_count = (
         callback_args["threads_count"],
         callback_args["requests_count"],
@@ -249,7 +250,7 @@ def run_benchmark(
     log_entry.append(f"Payload size: {payload_size} bytes")
     log_entry.append(f"Average execution time: {average_time:.4f} seconds\n")
 
-    plot_response_timestamps(response_timestamps)
+    # plot_response_timestamps(response_timestamps)
 
     with open("benchmark.log", "a", encoding="utf-8") as f:
         f.write("\n".join(log_entry) + "\n")
@@ -275,7 +276,7 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
     plt.plot(timestamps_avg, marker="x", linestyle="--", label="Average benchmark")
 
-    # count = 5, requests_count = 1000, threads_count = 10 
+    # count = 5, requests_count = 1000, threads_count = 10
     multi_slope = 0.0004328727698983177
     # count = 5, requests_count = 1000, threads_count = 1
     single_slope = 0.00069040234219954
@@ -292,12 +293,13 @@ def main():
         callback=functools.partial(
             run_multithreaded,
             callback=send_custom,
-            threads_count=10,
-            requests_count=1000,
+            threads_count=2,
+            requests_count=10,
+            payload=build_payload(123, "test"),
         ),
-        request="GET",
+        request=HttpMethod.POST,
         path="/database/tasks.json",
-        count=5,
+        count=1,
     )
 
 
