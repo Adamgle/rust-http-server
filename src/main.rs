@@ -17,11 +17,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     // })?;
 
     if let Err(e) = run_tcp_server(config).await {
-        eprintln!("Server error: {}", e);
+        eprintln!("Server crash: {}", e);
         return Err(e);
     }
-
-    // Logger::truncate_file_log()?;
 
     Ok(())
 }

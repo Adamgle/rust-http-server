@@ -165,7 +165,8 @@ ISSUES
     -> which I think should imply something about the issue
     \\ UPDATE => That's keep-alive packet, currently it does not create an issue in any way, shape or form.
 15. Paths like this "http://localhost:5000/////////////////////////////////////////////////" works and resolves to "http://localhost:5000/"
-16. Issues related to Database
+16. Detect when `run_benchmark` did crash so to not write it to `benchmark.log`
+17. Issues related to Database
     -> Current design requires that `DatabaseWAL` have access to Database as it have to invoke Database methods of insert, delete, etc., which does not happen.
     -> `DatabaseType` does not connect to a `Schema`, which is an issue, because we want to write to Database of specific type a specific entry
         but we do not have it's `Schema` (in `DatabaseCommand`).
@@ -175,7 +176,7 @@ ISSUES
     -> There is an issue how Database is initialized, it gets initialized every call to `handle_client` making the WAL file 
         unable to store the size as it gets reinitialized every time. DatabaseWAL cannot be declared in the Database struct.
         Currently there is a storage of `DatabaseWAL` instance in the `Config`, and something similar resembling a context manager
-        should be constructed, although I am not reject that idea to store that in the `Config` struct.
+        should be constructed, although I am not rejecting that idea to store that in the `Config` struct as it is.
     -> I think there should be one instance of the Database, not one instance of the DatabaseWAL. Maybe we could abstract
         `Database` to something like `Collection` and Database would store every `Collection` because currently `Database`
         is designed to hold one `DatabaseType` stored in `d_type` field, that of course would not work as to instantiate a new `Database`
@@ -185,6 +186,14 @@ ISSUES
         That is not ideal, as there is no bidirectional communication between the two. The functionality implemented would not work
         and if we would wanted to integrate it, all of the methods would have to be static, passing something like `DatabaseType` to associate with
         a `Schema` and so on. 
+    -> We need to associated DatabaseType with generic argument that point to the actual type, eg. DatabaseTask, maybe that generic could 
+        be restrained by impl and we could downcast to the type that impl that generic.
+    -> WAL field in DatabaseCollection is possibly useless.
+    -> Deadlock occurs if you try to create a DatabaseCollection with a DatabaseType that already exists.
+    -> `DatabaseCommand::exec` should be moved to `Database` as it is not DatabaseCollection specific. Also the `Database` 
+        instance does keep track of the collections and stores them inside the field. We will create a function
+        on `DatabaseCollection` that parses each collection for a given struct and invoke appropriate one that one
+        that overlap with the `_collections` field on the `DatabaseWAL` instance.
 
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,

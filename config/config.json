@@ -3,7 +3,7 @@
   "domain": "localhost",
   "database": {
     "root": "database",
-    "wal": "database/command-log.txt"
+    "WAL": "database/command-log.txt"
   },
   "protocol": "HTTP",
   "redirect": {

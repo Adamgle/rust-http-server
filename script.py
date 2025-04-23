@@ -19,6 +19,49 @@ DEFAULT_PORT = 5000
 NOTE_FILE_PATH = "./public/note.txt"
 
 
+class HttpHeaders:
+    def __init__(self, headers: dict[str, str]):
+        self.headers = headers
+
+    def __getitem__(self, key: str) -> str:
+        return self.headers.get(key, "")
+
+    def __setitem__(self, key: str, value: str) -> None:
+        self.headers[key] = value
+
+    def get_headers(self) -> dict[str, str]:
+        return self.headers
+
+
+class HttpRequest(HttpHeaders):
+    def __init__(self, method: str, path: str, headers: dict[str, str]):
+        super().__init__(headers)
+        self.method = method
+        self.path = path
+
+    def __str__(self) -> str:
+        return f"{self.method} {self.path} HTTP/1.1\r\n" + "\r\n".join(
+            [f"{k}: {v}" for k, v in self.headers.items()]
+        )
+
+
+headers_dict = {
+    "User-Agent": "Mozilla/5.0",
+    "Host": f"localhost:{DEFAULT_PORT}",
+}
+
+headers = HttpHeaders(headers_dict)
+
+request = HttpRequest(
+    method="GET",
+    path="/",
+    headers=headers_dict,
+)
+
+
+print(request.get_headers())
+
+
 class SendResult(TypedDict):
     payload_size: int
     status: bool
@@ -272,15 +315,19 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
     timestamps_avg = np.mean(timestamps, axis=0)
     xs = np.arange(len(timestamps_avg))
-    # slope, intercept = np.polyfit(xs, timestamps_avg, 1)
+    slope, intercept = np.polyfit(xs, timestamps_avg, 1)
+    print("Current slope: ", slope)
 
     plt.plot(timestamps_avg, marker="x", linestyle="--", label="Average benchmark")
+
+    # Those are average slopes of the linear approximation using polyfit on GET 
+    # request wih small payload size.
 
     # count = 5, requests_count = 1000, threads_count = 10
     multi_slope = 0.0004328727698983177
     # count = 5, requests_count = 1000, threads_count = 1
-    single_slope = 0.00069040234219954
 
+    single_slope = 0.00069040234219954
     plt.plot(xs, single_slope * xs, label="Single thread", linestyle="--")
     plt.plot(xs, multi_slope * xs, label="Multi thread", linestyle="--")
 
@@ -293,8 +340,8 @@ def main():
         callback=functools.partial(
             run_multithreaded,
             callback=send_custom,
-            threads_count=2,
-            requests_count=10,
+            threads_count=1,
+            requests_count=100,
             payload=build_payload(123, "test"),
         ),
         request=HttpMethod.POST,
