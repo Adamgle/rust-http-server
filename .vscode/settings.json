@@ -7,8 +7,15 @@
     "nonblocking",
     "serde",
     "shoutout",
+    "typetag",
     "uninit"
   ],
   "files.autoSave": "afterDelay",
-  "files.autoSaveDelay": 1
+  "files.autoSaveDelay": 1,
+  "github.copilot.enable": {
+    "*": true,
+    "plaintext": false,
+    "markdown": false,
+    "scminput": false
+  }
 }

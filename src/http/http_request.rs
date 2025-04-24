@@ -111,7 +111,7 @@ impl<'a> HttpRequest<'a> {
 
                     // No data loss is acceptable
                     while transferred != content_length {
-                        let chunk = reader.fill_buf().await?;
+                        let chunk = reader.fill_buf().await?;   
 
                         // What if there is no data on the wire while reading, but it will be?
                         if chunk.is_empty() {

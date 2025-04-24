@@ -13,12 +13,13 @@ use crate::prelude::*;
 pub mod tcp_handlers {
     use super::http::HttpRequestMethod;
     use super::http_request::HttpRequest;
-    use crate::config::database::{DatabaseCollection, DatabaseType};
+    use crate::config::database::DatabaseType;
     use crate::config::Config::{self};
     use crate::http::{HttpHeaders, HttpResponseHeaders, HttpResponseStartLine};
     use crate::*;
     use http::HttpRequestError;
     use http_response::HttpResponse;
+    use std::any::type_name;
     use std::borrow::Cow;
     use std::sync::Arc;
     use tokio::io::AsyncWriteExt;
@@ -162,6 +163,8 @@ pub mod tcp_handlers {
         // TODO: Initialization of the Database should be done once, presumably in the middleware when necessary.
         // but it cannot be done once in this format as each DatabaseType requires different initialization
 
+        let database = config.get_database()?;
+
         let body = match method {
             // This throws an error because the app is making a GET request to the path
             // that does not exists, which is correct by definition
@@ -183,24 +186,10 @@ pub mod tcp_handlers {
                             Some(_) => match request.get_body() {
                                 // Some(body) => instance.insert(body).await?,
                                 Some(body) => {
-                                    let instance =
-                                        DatabaseCollection::new(config, DatabaseType::Tasks)
-                                            .await?;
-                                    let instance = instance.lock().await;
+                                    let mut database = database.lock().await;
+                                    // dbg!(&database);
 
-                                    // let users =
-                                    //     DatabaseCollection::new(config, DatabaseType::Users)
-                                    //         .await?;
-                                    // let users = users.lock().await;
-
-                                    // println!(
-                                    //     "Database users: {:#?} | Database tasks: {:#?} | database: {:#?}",
-                                    //     users, instance,
-                                    //     config.get_database()
-                                    // );
-
-                                    // users.insert(body).await?;
-                                    instance.insert(body).await?
+                                    database.insert(body, DatabaseType::Tasks).await?
                                 }
                                 None => Err("No body in the request")?,
                             },
