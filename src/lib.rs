@@ -19,7 +19,6 @@ pub mod tcp_handlers {
     use crate::*;
     use http::HttpRequestError;
     use http_response::HttpResponse;
-    use std::any::type_name;
     use std::borrow::Cow;
     use std::sync::Arc;
     use tokio::io::AsyncWriteExt;
@@ -187,9 +186,11 @@ pub mod tcp_handlers {
                                 // Some(body) => instance.insert(body).await?,
                                 Some(body) => {
                                     let mut database = database.lock().await;
-                                    // dbg!(&database);
+                                    dbg!(&database);
 
-                                    database.insert(body, DatabaseType::Tasks).await?
+                                    database.insert(body, DatabaseType::Tasks).await?;
+
+                                    String::from("Ok")
                                 }
                                 None => Err("No body in the request")?,
                             },

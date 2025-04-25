@@ -336,18 +336,27 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
 
 def main():
-    run_benchmark(
-        callback=functools.partial(
-            run_multithreaded,
-            callback=send_custom,
-            threads_count=1,
-            requests_count=100,
-            payload=build_payload(123, "test"),
-        ),
-        request=HttpMethod.POST,
-        path="/database/tasks.json",
-        count=1,
-    )
+    
+    for i in range(1, 103):
+        send_custom(
+            request=HttpMethod.POST,
+            path="/database/tasks.json",
+            payload=build_payload(i, "test"),
+            inject_size=i,
+        )
+    
+    # run_benchmark(
+    #     callback=functools.partial(
+    #         run_multithreaded,
+    #         callback=send_custom,
+    #         threads_count=1,
+    #         requests_count=102,
+    #         payload=build_payload(123, "test"),
+    #     ),
+    #     request=HttpMethod.POST,
+    #     path="/database/tasks.json",
+    #     count=1,
+    # )
 
 
 if __name__ == "__main__":

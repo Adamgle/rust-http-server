@@ -197,6 +197,11 @@ ISSUES
     -> Methods for actual `Database` manipulation should be moved to `Database` including the abstracted methods that 
         "cache" to `DatabaseWAL`.
         UPDATE => Impossible as the `Database` does not keep the `d_type` field so we would have to pass that as an argument, which we do not want.
+    -> We should cache the parsed storage, the actual data behind collections file inside the instance of the DatabaseCollection, keep it optional until first parsed,
+        maybe wrap with `parse_WAL_collections` to provide abstracted interface of parsing collections, either the one that already been parsed, stored in the storage of instance,
+        or parsed if not yet been parsed. But the one heavy implication of that idea is that we would store the potentially big chunk of memory in RAM making it resource consuming.
+        Doing parsing on go makes it still allocate that memory but freeing it quickly, although account for greater performance loss.
+        Of course the whole discussion is just delusional as real database does not parse the entire collection just to retrieve one entry. 
 
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,
