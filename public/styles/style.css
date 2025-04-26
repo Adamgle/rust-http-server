@@ -4,7 +4,7 @@ body {
     font-family: sans-serif;
     padding: 0;
     margin: 0;
-    overflow: hidden;
+    overflow-x: hidden;
 }
 
 .header-content {
@@ -38,6 +38,10 @@ body {
     background-color: whitesmoke;
     padding: .5rem;
     width: 100%;
+    max-width: 200px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
     text-align: center;
     color: #000
 }

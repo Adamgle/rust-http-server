@@ -186,9 +186,27 @@ pub mod tcp_handlers {
                                 // Some(body) => instance.insert(body).await?,
                                 Some(body) => {
                                     let mut database = database.lock().await;
-                                    dbg!(&database);
+                                    // dbg!(&database);
 
                                     database.insert(body, DatabaseType::Tasks).await?;
+
+                                    String::from("Ok")
+                                }
+                                None => Err("No body in the request")?,
+                            },
+                            None => Err("Database not configured in the config file.")?,
+                        })
+                    }
+                    p if p == "/database/test" => {
+                        Some(match config.config_file.database.as_ref() {
+                            Some(_) => match request.get_body() {
+                                // Some(body) => instance.insert(body).await?,
+                                Some(body) => {
+                                    let mut database = database.lock().await;
+                                    // dbg!(&database);
+
+                                    let entry = database.select_all(DatabaseType::Tasks).await?;
+                                    println!("Entry: {:?}", entry);
 
                                     String::from("Ok")
                                 }

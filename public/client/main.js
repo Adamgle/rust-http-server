@@ -1,32 +1,27 @@
-const SERVER_ROOT = "http://localhost:5000/";
-const DATABASE_ROOT = "database/tasks.json";
+const SERVER_ROOT = "http://localhost:5000";
+const DATABASE_ROOT = "database";
 
 const buildUrl = (root, path) => {
-  const url = new URL(root).href.replace("127.0.0.1", "localhost");
+  let base = root instanceof URL ? new URL(root.href) : new URL(root);
 
-  return new URL(path, url);
+  if (base.hostname === "127.0.0.1") {
+    base.hostname = "localhost";
+  }
+
+  return new URL(path, base);
 };
 
-const HOST_URL = buildUrl(SERVER_ROOT, DATABASE_ROOT);
+const DATABASE_URL = buildUrl(SERVER_ROOT, DATABASE_ROOT);
 
-const fetchLastTaskId = async () => {
-  const response = await fetch(HOST_URL, {
-    method: "GET",
-  });
+const DATABASE_TASKS_URL = buildUrl(DATABASE_URL, "database/tasks.json");
 
-  const data = await response.json();
+const buildTaskElement = (value, id) => {
+  const task = document.createElement("div");
+  task.classList.add("task");
+  task.appendChild(document.createTextNode(value));
+  task.setAttribute("id", id);
 
-  if (!Object.keys(data).length) {
-    return 0;
-  } else {
-    // This is garbage code.
-    // Generally speaking this is not correct, because if you have
-    // tasks like 1, 2, 3, and then you delete 2, you should return
-    // from this gap that you are missing, but deletion is not implemented
-    // so do not care, maybe later though.
-
-    return Math.max(...Object.entries(data).map(([idx, { id }]) => id)) + 1;
-  }
+  return task;
 };
 
 /**
@@ -36,32 +31,29 @@ const fetchLastTaskId = async () => {
  */
 
 const addTask = async (formData) => {
-  // Fetch last id from the server
-  const id = await fetchLastTaskId();
+  const taskValue = formData.get("task-value");
 
-  const taskObject = {
-    value: "",
-    id,
+  taskObject = {
+    // Most secure
+    id: Math.floor(Math.random() * (2 ** 31 - 1)),
+    value: taskValue,
   };
 
   const tasks = document.querySelector("#tasks");
-  const header = document.querySelector(".header-content");
+  // const header = document.querySelector(".header-content");
 
-  const taskValue = formData.get("task-value");
+  const task = buildTaskElement(taskValue, taskObject.id);
+  task.value = taskValue;
+  tasks.appendChild(task);
+
   if (!taskValue) {
     return null;
   }
 
-  const task = document.createElement("div");
-  task.classList.add("task");
-  task.appendChild(document.createTextNode(taskValue));
-  tasks.appendChild(task);
-  taskObject.value = taskValue;
-
   const errorContainer = document.getElementById("error-div");
 
   // Add task to database
-  const res = await fetch(`${SERVER_ROOT}${DATABASE_ROOT}`, {
+  const res = await fetch(DATABASE_TASKS_URL, {
     method: "POST",
     mode: "cors",
     headers: {
@@ -81,8 +73,39 @@ const addTask = async (formData) => {
   return taskObject;
 };
 
+async function getTasks() {
+  const tasks = document.querySelector("#tasks");
+
+  const res = await fetch(DATABASE_TASKS_URL, {
+    method: "GET",
+    mode: "cors",
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (res.status !== 200) {
+    console.error("Error fetching tasks:", res.statusText);
+    return null;
+  }
+
+  res
+    .json()
+    .then((data) => {
+      Object.values(data).forEach(({ value, id }) => {
+        const taskElement = buildTaskElement(value, id);
+        tasks.appendChild(taskElement);
+      });
+    })
+    .catch((err) => {
+      console.error(err);
+    });
+}
+
 async function main() {
   const taskForm = document.querySelector("#task-form");
+
+  await getTasks();
 
   taskForm.addEventListener("submit", async (e) => {
     e.preventDefault();

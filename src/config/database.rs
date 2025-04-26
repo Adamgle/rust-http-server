@@ -2,6 +2,7 @@
     ### What started as a joke, remained one ###
     NOTE: That was does purely for educational purposes, I would not recommend using this in production as it's file system based database and reinvented wheel (rectangular one).
 */
+#![allow(non_snake_case)]
 
 // The problem with database is that it has it's tradeoffs with the possible implementations of it that I am seeing;
 // The main issue is that it is just a file which posses a lot of tradeoffs:
@@ -31,7 +32,6 @@
 use crate::config::{config_file::DatabaseConfigEntry, Config};
 use crate::prelude::*;
 use erased_serde::Deserializer;
-use rand::prelude::*;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -41,55 +41,68 @@ use std::sync::atomic::AtomicUsize;
 use std::{path::PathBuf, sync::Arc};
 use strum_macros::EnumIter;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::sync::MutexGuard;
 use tokio::{
     fs::File,
     io::{AsyncSeekExt, AsyncWriteExt},
 };
 
-#[typetag::serde]
 pub trait DatabaseEntryTrait: Send + Sync + Debug + Any {
+    /// Converts the entry to the `Any` trait object, so it could be downcasted to the actual type.
     fn as_any(&self) -> &dyn Any;
+
+    /// Serializes the entry to the JSON format, so it could be written to the file.
+    fn serialize(&self) -> serde_json::Value;
+
+    /// Value that is used as the "primary key" for the entry. This information is could also be embedded
+    /// in the entry itself. Every entry should have a unique id define in it's struct definition.
+    fn get_id(&self) -> usize;
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct DatabaseTask {
     value: String,
-    id: u32,
+    id: usize,
 }
 
-#[typetag::serde]
 impl DatabaseEntryTrait for DatabaseTask {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn serialize(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+
+    fn get_id(&self) -> usize {
+        self.id.clone()
     }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct DatabaseUser {
     name: String,
-    id: u32,
+    id: usize,
 }
 
-#[typetag::serde]
+// #[typetag::serde]
 impl DatabaseEntryTrait for DatabaseUser {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn serialize(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+
+    fn get_id(&self) -> usize {
+        self.id.clone()
     }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 struct DatabaseEntry(Vec<u8>);
 
-#[typetag::serde]
-impl DatabaseEntryTrait for DatabaseEntry {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
 impl DatabaseEntry {
-    // NOTE: Maybe bytes: &[u8] would be better.
     fn new(bytes: &impl AsRef<[u8]>) -> Self {
         DatabaseEntry(bytes.as_ref().to_vec())
     }
@@ -130,20 +143,36 @@ impl Database {
     pub(in crate::config) async fn new(
         config: &DatabaseConfigEntry,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        Ok(Self {
+        if let Some(state) = DatabaseWAL::load_state(config).await? {
+            // Flush the unprocessed operations on the database that was cached on WAL file.
+            let mut instance = Self {
+                WAL: state,
+                collections: HashMap::new(),
+                _database_config_entry: config.clone(),
+            };
+
+            // Bad in that context as you can see the state is also in the instance, but it technically makes
+            // sens to pass the WAL instance to that method even if it is not clear at this moment, thought maybe I am wrong.
+
+            let WAL = instance.get_wal();
+            let WAL = WAL.lock().await;
+
+            instance.execute_commands(WAL).await?;
+        }
+
+        return Ok(Self {
+            WAL: DatabaseWAL::new(&config)
+                .await
+                .inspect_err(|_| eprintln!("DatabaseWAL could not be initialized."))?,
             collections: HashMap::new(),
-            WAL: Arc::new(Mutex::new(DatabaseWAL::new(&config).await.inspect_err(
-                |_| eprintln!("DatabaseWAL could not be initialized."),
-            )?)),
             // I do not mind cloning as those are just 2 PathBuf's.
             _database_config_entry: config.clone(),
-        })
+        });
     }
 
     /// Parses the collections occurring in the WAL file to the `HashMap<DatabaseType, DatabaseStorage<Box<dyn DatabaseEntryTrait>>>` type.
     async fn parse_WAL_collections(
         &mut self,
-        // collections: &HashSet<DatabaseType>,
     ) -> Result<
         HashMap<DatabaseType, DatabaseStorage<Box<dyn DatabaseEntryTrait>>>,
         Box<dyn Error + Send + Sync>,
@@ -153,37 +182,43 @@ impl Database {
         let WAL = self.get_wal();
         let WAL = WAL.lock().await;
 
-        let collections = WAL.get_collections();
+        let d_types = WAL.get_d_types();
+
         let config = self._database_config_entry.clone();
 
-        for collection_type in collections {
-            let collection = self
-                .get_create_collection(&config, collection_type.clone())
-                .await?;
+        for d_type in d_types {
+            // NOTE: DatabaseCollection is actually initialized right there, if it was not previous initialized,
+            // otherwise it would be just looked up.
+            let collection = self.get_create_collection(&config, d_type.clone()).await?;
+
             let collection = collection.lock().await;
             let collection = collection.parse_collection().await?;
 
-            storage.insert(collection_type.clone(), collection);
+            storage.insert(d_type.clone(), collection);
         }
 
         Ok(storage)
     }
 
-    /// Deserializes the WAL file to the `Vec` of raw commands, just as they were written.
+    /// Deserializes the WAL file to the `Vec` of raw commands, just as they were written. Takes file handler to WAL file and `size` of WAL file defined on instance.
     ///
-    /// `NOTE`: WAL has to be passed through the function as deadlock occurs without it.
-    async fn parse_wal(
-        &self,
-        WAL: MutexGuard<'_, DatabaseWAL>,
+    /// `NOTE`: Is defined as a static method to work both in `execute_commands` and `DatabaseWAL::load_state`
+    async fn parse_WAL(
+        handler: Arc<Mutex<File>>,
+        size: usize,
+        // WAL: MutexGuard<'_, DatabaseWAL>,
     ) -> Result<Vec<DatabaseCommand>, Box<dyn Error + Send + Sync>> {
-        let file = WAL.get_handler();
+        let mut handler = handler.lock().await;
 
-        let mut file = file.lock().await;
-        let mut buffer = Vec::<DatabaseCommand>::with_capacity(WAL.get_size());
+        // let file = WAL.get_handler();
+        // let mut file = file.lock().await;
 
-        file.seek(std::io::SeekFrom::Start(0)).await?;
+        // let mut file = handler.lock().await;
+        let mut buffer = Vec::<DatabaseCommand>::with_capacity(size);
 
-        let mut reader = BufReader::new(&mut *file).lines();
+        handler.seek(std::io::SeekFrom::Start(0)).await?;
+
+        let mut reader = BufReader::new(&mut *handler).lines();
 
         while let Some(line) = reader.next_line().await.inspect_err(|e| {
             eprintln!("Potentially corrupted DatabaseCommand in WAL file with: {e}.")
@@ -199,10 +234,10 @@ impl Database {
         let WAL = self.get_wal();
         let mut WAL = WAL.lock().await;
 
+        WAL.save_command(command).await?;
+
         if WAL.get_size() >= WAL_COMMAND_SIZE {
             self.execute_commands(WAL).await?;
-        } else {
-            WAL.save_command(command).await?;
         }
 
         Ok(())
@@ -213,13 +248,20 @@ impl Database {
     ///
     /// Scenario in which Database does not have a collection instance inside `collections` field
     /// but it exists inside DatabaseWAL SHOULD NOT happen, as the WAL file gets flushed on the server shutdown.
-    ///
-    /// `TODO`: Thought being honest it should support that use cases if it crashes abruptly.
     async fn execute_commands(
         &mut self,
         WAL: MutexGuard<'_, DatabaseWAL>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let WAL_commands = self.parse_wal(WAL).await?;
+        // let WAL = self.get_wal();
+        // let WAL = WAL.lock().await;
+
+        let handler = WAL.get_handler();
+        let size = WAL.get_size();
+
+        // Release the previous lock as the below code also locks that Mutex.
+        drop(WAL);
+
+        let WAL_commands = Database::parse_WAL(handler, size).await?;
 
         let mut storage: HashMap<DatabaseType, DatabaseStorage<Box<dyn DatabaseEntryTrait>>> =
             self.parse_WAL_collections().await?;
@@ -236,11 +278,6 @@ impl Database {
             }?;
         }
 
-        // NOTE: After the execution of the commands we should serialize the storage and write it to appropriate files.
-        // Based on the `DatabaseType` of the `storage` we will retrieve the collection via `get_collection` method
-        // Then we will serialize the value of `DatabaseStorage<Box<dyn DatabaseEntryTrait>>` to the file.
-        // That would be a little bit tricky as it is behind trait object. Consider using `typetag`
-
         self.save_commands_execution(&storage).await?;
 
         let WAL = self.get_wal();
@@ -255,8 +292,6 @@ impl Database {
         &self,
         storage: &HashMap<DatabaseType, DatabaseStorage<Box<dyn DatabaseEntryTrait>>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        println!("storage: {:#?}", storage);
-
         for (d_type, collection_storage) in storage.iter() {
             let collection = self.get_collection(d_type.clone()).unwrap();
             let collection = collection.lock().await;
@@ -264,6 +299,8 @@ impl Database {
                 .overwrite_database_file(collection_storage)
                 .await?;
         }
+
+        println!("Write-ahead log file has been flushed to the disk.");
 
         Ok(())
     }
@@ -335,10 +372,10 @@ impl Database {
         id: usize,
     ) -> Result<Box<dyn DatabaseEntryTrait>, Box<dyn Error + Send + Sync>> {
         let WAL = self.get_wal();
-        let mut WAL = WAL.lock().await;
+        let WAL = WAL.lock().await;
 
         // To avoid unnecessary parsing of the WAL file, we will check if it is empty.
-        if WAL.get_size() == 0 {
+        if WAL.get_size() != 0 {
             // Flush the commands to the database file to provide stateful output.
             self.execute_commands(WAL).await?;
         }
@@ -347,7 +384,9 @@ impl Database {
         let collection = collection.lock().await;
 
         let storage = collection.parse_collection().await?;
-        let entry = storage.get(&id).unwrap();
+        let entry = storage
+            .get(&id)
+            .ok_or(format!("Entry with the provided id: {id} does not exists."))?;
 
         // essentially javascript out there, how the mediocre have fallen.
         let entry = if let Some(entry) = entry.as_any().downcast_ref::<DatabaseTask>() {
@@ -366,10 +405,10 @@ impl Database {
         d_type: DatabaseType,
     ) -> Result<DatabaseStorage<Box<dyn DatabaseEntryTrait>>, Box<dyn Error + Send + Sync>> {
         let WAL = self.get_wal();
-        let mut WAL = WAL.lock().await;
+        let WAL = WAL.lock().await;
 
         // To avoid unnecessary parsing of the WAL file, we will check if it is empty.
-        if WAL.get_size() == 0 {
+        if WAL.get_size() != 0 {
             // Flush the commands to the database file to provide stateful output.
             self.execute_commands(WAL).await?;
         }
@@ -398,19 +437,14 @@ impl Database {
         // to allow the deserialization to the correct type.
         let entry = entry.parse(d_type)?;
 
-        // NOTE: That should not be random, but client defined, the id that is in the entry
-        // should be used there as the primary key, otherwise something like select would not work.
+        let id = entry.get_id();
 
-        let mut rng = rand::rng();
-        let nums: Vec<usize> = (1..100).collect();
-
-        // And take a random pick (yes, we didn't need to shuffle first!):
-
-        // NOTE: That should be somehow generated.
-        let id = nums.choose(&mut rng).expect("Failed to choose random id.");
+        if collection.contains_key(&id) {
+            return Err("Entry with the same id already exists.".into());
+        }
 
         // Save the parsed entry to the collection
-        collection.insert(*id, entry);
+        collection.insert(id, entry);
 
         Ok(())
     }
@@ -422,7 +456,23 @@ impl Database {
         entry: DatabaseEntry,
         d_type: DatabaseType,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self._insert(storage, entry, d_type)
+        // Retrieves the collection from the storage
+        let collection = storage.get_mut(&d_type).unwrap();
+
+        // Serializes the Vec<u8> to the Box<dyn DatabaseEntryTrait>, tagging the type of the entry
+        // to allow the deserialization to the correct type.
+        let entry = entry.parse(d_type)?;
+
+        let id = entry.get_id();
+
+        if !collection.contains_key(&id) {
+            return Err(format!("Entry with the provided id: {id} does not exists.").into());
+        }
+
+        // Save the parsed entry to the collection
+        collection.insert(id, entry);
+
+        Ok(())
     }
 
     fn _delete(
@@ -433,6 +483,10 @@ impl Database {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Retrieves the collection from the storage
         let collection = storage.get_mut(&d_type).unwrap();
+
+        if !collection.contains_key(&id) {
+            return Err(format!("Entry with the provided id: {id} does not exists.").into());
+        }
 
         // Deletes the entry from the collection
         collection.remove(&id);
@@ -511,16 +565,21 @@ impl DatabaseCollection {
 
     async fn overwrite_database_file(
         &self,
-        // NOTE: Should be Vec<Box<dyn DatabaseEntryTrait>>
         data: &HashMap<usize, Box<dyn DatabaseEntryTrait>>,
         // d_type: &DatabaseType,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // let serializer = &mut serde_json::Serializer::new(Vec::<u8>::new());
-        // let format = &mut Box::new(<dyn Serializer>::erase(serializer));
+        // Hold entries as raw data instead of deserialized instances of `dyn DatabaseEntryTrait`
+        let mut obfuscated_data = serde_json::Map::new();
 
-        // let data = data.erased_serialize(format).unwrap();
+        for (k, v) in data.iter() {
+            let v = serde_json::to_value(v.serialize()).inspect_err(|e| {
+                eprintln!("Failed to persists one the entry in the database as there was an issue with serialization: {e}");
+            })?;
 
-        let serialized = serde_json::to_vec(data)?;
+            obfuscated_data.insert(k.to_string(), v);
+        }
+
+        let serialized = serde_json::to_vec(&obfuscated_data)?;
 
         let handler = self.get_handler();
         let mut handler = handler.lock().await;
@@ -528,18 +587,6 @@ impl DatabaseCollection {
         handler.seek(std::io::SeekFrom::Start(0)).await?;
         handler.set_len(0).await?;
         handler.write_all(&serialized).await?;
-
-        // match self.d_type {
-        //     DatabaseType::Users => {
-        //         let mut handler = self.get_handler();
-        //         let mut handler = handler.lock().await;
-
-        //         handler.seek(std::io::SeekFrom::Start(0)).await?;
-        //         handler.set_len(0).await?;
-        //         handler.write_all(&serialized).await?;
-        //     }
-        //     DatabaseType::Tasks => todo!(),
-        // }
 
         Ok(())
     }
@@ -555,7 +602,7 @@ impl DatabaseCollection {
         handler.seek(std::io::SeekFrom::Start(0)).await?;
         let bytes_read = handler.read_to_end(buffer.as_mut()).await?;
 
-        // NOTE: This should never happens even empty file has "{}" in it.
+        // NOTE: This should never happens as even empty file has "{}" in it.
         if bytes_read == 0 {
             return Err("Empty file".into());
         }
@@ -593,7 +640,7 @@ impl DatabaseCollection {
 
 /// The `DatabaseType` describes which `DatabaseCollection` to initialize, it would stay unutilized until constructed.
 ///
-/// `NOTE`: Enum naming reflect the file name of the underlying database as lowercase, it will automatically
+/// Enum naming reflect the file name of the underlying database as lowercase, it will automatically
 /// create databases filenames with defined enum variants.
 ///
 /// `TODO`: Provide opting out of the behavior of automatically creating the database with provided enum names
@@ -614,48 +661,83 @@ pub enum DatabaseType {
     Tasks,
 }
 
-/// Stores the write-ahead log file for each `DatabaseType`, is `DatabaseType` agnostic.
+/// Stores the write-ahead log file for each `DatabaseType`, is `DatabaseCollection` agnostic.
 /// Currently initialization is done in the `Config` constructor, and stored there for the duration of the program.
 ///
-/// `NOTE`: Not really fully fledged write-ahead logging
+/// Not really fully fledged write-ahead logging
 /// log will be in a text format, thought entries will be written per line in the JSON format
 /// so to avoid parsing the whole file of database collection every time we want to write the entry
-///
-/// `NOTE`: That could not hold a schema because it is database agnostic, meaning it should holds multiple types of data and parses
 #[derive(Debug)]
-/// to the correct type when executing the command
 struct DatabaseWAL {
     handler: Arc<Mutex<File>>,
     size: Arc<AtomicUsize>,
-    /// Used to keep track of the collections is the WAL file for parsing to avoid later iteration.
-    ///
-    /// `TODO`: That actually stores DatabaseType and we should resolved that ambiguity.
-    _collections: HashSet<DatabaseType>,
+    /// Used to keep track of the `DatabaseType`s is the WAL file for parsing to avoid later iteration.
+    d_types: HashSet<DatabaseType>,
 }
 
 const WAL_COMMAND_SIZE: usize = 100;
 
 impl DatabaseWAL {
-    /// NOTE: This function should be invoked only
     async fn new(
         config: &DatabaseConfigEntry,
-    ) -> Result<DatabaseWAL, Box<dyn Error + Send + Sync>> {
-        // This initializes the actual database file as well as the WAL file
-        // maybe we will abstract it away to separate struct later on.
+    ) -> Result<Arc<Mutex<DatabaseWAL>>, Box<dyn Error + Send + Sync>> {
+        Ok(Arc::new(Mutex::new(DatabaseWAL {
+            handler: Self::open_file(&config).await?,
+            size: Arc::new(AtomicUsize::new(0)),
+            d_types: HashSet::new(),
+        })))
+    }
 
+    /// Loads the state of the WAL file and parses it to instance of `DatabaseWAL`.
+    /// Could happen when server closes abruptly and we need to restore the state of the `DatabaseWAL` instance.
+    async fn load_state(
+        config: &DatabaseConfigEntry,
+    ) -> Result<Option<Arc<Mutex<Self>>>, Box<dyn Error + Send + Sync>> {
+        let handler = DatabaseWAL::open_file(config).await?;
+        let c = Arc::clone(&handler);
+
+        if let Ok(result) = fs::try_exists(&config.WAL).await {
+            if result {
+                let metadata = fs::metadata(&config.WAL).await?;
+
+                if metadata.len() != 0 {
+                    let commands = Database::parse_WAL(c, 0).await?;
+                    let size = commands.len();
+                    let d_types =
+                        commands
+                            .iter()
+                            .fold(HashSet::<DatabaseType>::new(), |mut acc, ele| {
+                                acc.insert(ele.get_database_type().clone());
+                                acc
+                            });
+
+                    return Ok(Some(Arc::new(Mutex::new(DatabaseWAL {
+                        handler,
+                        size: Arc::new(AtomicUsize::new(size)),
+                        d_types,
+                    }))));
+                }
+            }
+        };
+
+        // We want a pattern of Result<Option<T>> for it to not trigger and error if there is no unprocessed commands in the WAL file.
+        // as it is not technically an error.
+        Ok(None)
+    }
+
+    /// Opens file handle to the underling write-ahead log or creates if not exists.
+    async fn open_file(
+        config: &DatabaseConfigEntry,
+    ) -> Result<Arc<Mutex<File>>, Box<dyn Error + Send + Sync>> {
         // Create the logging file for the commands
         let file = OpenOptions::new()
-            .append(true)
+            .write(true)
             .create(true)
             .read(true)
             .open(&config.WAL)
             .await?;
 
-        Ok(DatabaseWAL {
-            handler: Arc::new(Mutex::new(file)),
-            size: Arc::new(AtomicUsize::new(0)),
-            _collections: HashSet::new(),
-        })
+        Ok(Arc::new(Mutex::new(file)))
     }
 
     /// Executes the command on the WAL file,
@@ -676,7 +758,7 @@ impl DatabaseWAL {
         file.write_all(command_json).await?;
         file.flush().await?;
 
-        self.add_collection(command.get_database_type().clone());
+        self.add_d_type(command.get_database_type().clone());
         self.increment_size();
 
         Ok(String::new())
@@ -694,16 +776,16 @@ impl DatabaseWAL {
         self.size.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
-    fn decrement_size(&self) {
-        self.size.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-    }
-
     /// Resets the size of `size` field to 0 and the size of the WAL file to 0.
     async fn reset_size(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         let file = self.get_handler();
-        let file = file.lock().await;
+        let mut file = file.lock().await;
 
         file.set_len(0)
+            .await
+            .inspect_err(|_| eprintln!("Failed to reset the size of WAL file."))?;
+
+        file.seek(std::io::SeekFrom::Start(0))
             .await
             .inspect_err(|_| eprintln!("Failed to reset the size of WAL file."))?;
 
@@ -712,24 +794,17 @@ impl DatabaseWAL {
         Ok(())
     }
 
-    fn add_collection(&mut self, collection: DatabaseType) {
-        self._collections.insert(collection);
+    fn add_d_type(&mut self, collection: DatabaseType) {
+        self.d_types.insert(collection);
     }
 
-    fn get_collections(&self) -> &HashSet<DatabaseType> {
-        &self._collections
+    fn get_d_types(&self) -> &HashSet<DatabaseType> {
+        &self.d_types
     }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 /// IO buffered commands executed on the database, on system shutdown or 100 commands in the buffer (memory or WAL file I think).
-///
-/// `NOTE`: I think DatabaseType is useless as Database instance already has the `d_type` fields with that, we could use that to write to the WAL
-/// file for later parsing, but current implementation may be easier.
-///
-/// `TODO`: Commands like Select, SelectAll should trigger the `Database::exec` as that would could produce stale data if we wouldn't do that.
-///
-/// `NOTE`: Schema potentially useless as it's not getting written in the WAL file, so either way we do not how to parse it.
 enum DatabaseCommand {
     /// Insert one entry to given DatabaseType with a new entry
     Insert(DatabaseType, DatabaseEntry),
@@ -744,12 +819,6 @@ enum DatabaseCommand {
     Select(DatabaseType, usize),
     /// Select everything to given DatabaseType
     SelectAll(DatabaseType),
-    // NOTE: That would hold Schema of the database, as we don't want to parse the entry while writing
-    // the entry, as it comes as raw bytes, we will parse it later using that generic type
-    //
-    // `UPDATE`: There is not access to the Schema type as it is not getting written to the WAL file,
-    // we could make that explicit but we won't (actually not sure we can write a type to file).
-    // _marker(PhantomData<Schema>),
 }
 
 impl DatabaseCommand {

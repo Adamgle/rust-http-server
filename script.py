@@ -7,59 +7,58 @@ import pprint
 import socket
 import threading
 import time
-from typing import Callable, List, Optional, TypedDict, Any
+from typing import Callable, Dict, List, Optional, TypedDict, Any
 from enum import Enum
 import typing
 import matplotlib.pyplot as plt
 import numpy as np
 import requests
+import random
+import secrets
 
 URL_BASE = "http://localhost:5000/"
 DEFAULT_PORT = 5000
 NOTE_FILE_PATH = "./public/note.txt"
 
 
-class HttpHeaders:
-    def __init__(self, headers: dict[str, str]):
-        self.headers = headers
+# class HttpHeaders:
+#     def __init__(self, headers: dict[str, str]):
+#         self.headers = headers
 
-    def __getitem__(self, key: str) -> str:
-        return self.headers.get(key, "")
+#     def __getitem__(self, key: str) -> str:
+#         return self.headers.get(key, "")
 
-    def __setitem__(self, key: str, value: str) -> None:
-        self.headers[key] = value
+#     def __setitem__(self, key: str, value: str) -> None:
+#         self.headers[key] = value
 
-    def get_headers(self) -> dict[str, str]:
-        return self.headers
-
-
-class HttpRequest(HttpHeaders):
-    def __init__(self, method: str, path: str, headers: dict[str, str]):
-        super().__init__(headers)
-        self.method = method
-        self.path = path
-
-    def __str__(self) -> str:
-        return f"{self.method} {self.path} HTTP/1.1\r\n" + "\r\n".join(
-            [f"{k}: {v}" for k, v in self.headers.items()]
-        )
+#     def get_headers(self) -> dict[str, str]:
+#         return self.headers
 
 
-headers_dict = {
-    "User-Agent": "Mozilla/5.0",
-    "Host": f"localhost:{DEFAULT_PORT}",
-}
+# class HttpRequest(HttpHeaders):
+#     def __init__(self, method: str, path: str, headers: dict[str, str]):
+#         super().__init__(headers)
+#         self.method = method
+#         self.path = path
 
-headers = HttpHeaders(headers_dict)
-
-request = HttpRequest(
-    method="GET",
-    path="/",
-    headers=headers_dict,
-)
+#     def __str__(self) -> str:
+#         return f"{self.method} {self.path} HTTP/1.1\r\n" + "\r\n".join(
+#             [f"{k}: {v}" for k, v in self.headers.items()]
+#         )
 
 
-print(request.get_headers())
+# headers_dict = {
+#     "User-Agent": "Mozilla/5.0",
+#     "Host": f"localhost:{DEFAULT_PORT}",
+# }
+
+# headers = HttpHeaders(headers_dict)
+
+# request = HttpRequest(
+#     method="GET",
+#     path="/",
+#     headers=headers_dict,
+# )
 
 
 class SendResult(TypedDict):
@@ -79,8 +78,11 @@ def write_note(payload: str) -> None:
         f.write(payload)
 
 
-def build_payload(id: int, value: str) -> str:
-    return json.dumps({"id": id, "value": value})
+### adds id to the payload if id is not None
+# NOTE: To be invoked inside the send_custom function only.
+def idifiy_payload(value: str = "test", id: int = None) -> str:
+    if id is not None:
+        return json.dumps({"id": id, "value": value})
 
 
 def test_post(path: str, payload: str) -> int:
@@ -110,6 +112,13 @@ def send_custom(
 
     match request:
         case HttpMethod.POST:
+            print(kwargs.get("id"), payload)
+
+            if payload and kwargs.get("id") is None:
+                payload = idifiy_payload(payload, id=secrets.randbits(32))
+            elif payload:
+                payload = idifiy_payload(payload, id=kwargs.get("id"))
+
             headers = (
                 f"POST {path} HTTP/1.1\r\n"
                 f"Content-Length: {len(payload) if payload else 0}\r\n"
@@ -245,8 +254,6 @@ def run_benchmark(
     # arguments of the run_multithreaded built with functools.partial
     callback_args = callback.keywords
 
-    print(callback_args)
-
     threads_count, requests_count = (
         callback_args["threads_count"],
         callback_args["requests_count"],
@@ -293,12 +300,30 @@ def run_benchmark(
     log_entry.append(f"Payload size: {payload_size} bytes")
     log_entry.append(f"Average execution time: {average_time:.4f} seconds\n")
 
-    # plot_response_timestamps(response_timestamps)
+    plot_response_timestamps(response_timestamps)
 
     with open("benchmark.log", "a", encoding="utf-8") as f:
         f.write("\n".join(log_entry) + "\n")
 
     print("\n".join(log_entry))
+
+
+# TODO: This could happen on DatabaseWAL execution, or other side effects that will trigger substantial difference
+# between the adjacent requests in time.
+def determine_performance_loss(timestamps: List[List[float]]) -> Dict[int, List[float]]:
+    threshold = 0.01  # 10ms
+
+    benchmarks = dict()
+
+    for idx, ts in enumerate(timestamps):
+        # Results that outperform the threshold
+        benchmarks[idx + 1] = [
+            (i + 1, ts[i + 1] - ts[i])
+            for i in range(len(ts) - 1)
+            if ts[i + 1] - ts[i] > threshold
+        ]
+
+    return benchmarks
 
 
 def plot_response_timestamps(timestamps: List[List[float]]) -> None:
@@ -320,7 +345,7 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
     plt.plot(timestamps_avg, marker="x", linestyle="--", label="Average benchmark")
 
-    # Those are average slopes of the linear approximation using polyfit on GET 
+    # Those are average slopes of the linear approximation using polyfit on GET
     # request wih small payload size.
 
     # count = 5, requests_count = 1000, threads_count = 10
@@ -332,30 +357,31 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
     plt.plot(xs, multi_slope * xs, label="Multi thread", linestyle="--")
 
     plt.legend(title="Legend")
+
+    pprint.pprint(determine_performance_loss(timestamps))
     plt.show()
 
 
 def main():
-    
-    for i in range(1, 103):
-        send_custom(
-            request=HttpMethod.POST,
-            path="/database/tasks.json",
-            payload=build_payload(i, "test"),
-            inject_size=i,
-        )
-    
-    # run_benchmark(
-    #     callback=functools.partial(
-    #         run_multithreaded,
-    #         callback=send_custom,
-    #         threads_count=1,
-    #         requests_count=102,
-    #         payload=build_payload(123, "test"),
-    #     ),
+    # for i in range(102, 1102):
+    run_benchmark(
+        callback=functools.partial(
+            run_multithreaded,
+            callback=send_custom,
+            threads_count=10,
+            requests_count=50,
+            payload="test",
+        ),
+        request=HttpMethod.POST,
+        path="/database/tasks.json",
+        count=1,
+    )
+
+    # send_custom(
     #     request=HttpMethod.POST,
-    #     path="/database/tasks.json",
-    #     count=1,
+    #     path="/database/test",
+    #     payload="test",
+    #     # id=i,
     # )
 
 
