@@ -68,7 +68,7 @@ pub mod tcp_handlers {
 
                     let task_error_writer = Arc::clone(&writer);
 
-                    if let Err(err) = tokio::spawn(async move {
+                    let task = tokio::spawn(async move {
                         let config = config.lock().await;
                         let mut writer = writer.lock().await;
 
@@ -89,8 +89,10 @@ pub mod tcp_handlers {
                         } else {
                             // Request termination, handled successfully
                         }
-                    })
-                    .await
+                    });
+
+                    if let Err(err) =
+                        tokio::time::timeout(tokio::time::Duration::from_secs(5), task).await
                     {
                         eprintln!("Error spawning task: {}", err);
 
@@ -197,24 +199,24 @@ pub mod tcp_handlers {
                             None => Err("Database not configured in the config file.")?,
                         })
                     }
-                    p if p == "/database/test" => {
-                        Some(match config.config_file.database.as_ref() {
-                            Some(_) => match request.get_body() {
-                                // Some(body) => instance.insert(body).await?,
-                                Some(body) => {
-                                    let mut database = database.lock().await;
-                                    // dbg!(&database);
+                    // p if p == "/database/test" => {
+                    //     Some(match config.config_file.database.as_ref() {
+                    //         Some(_) => match request.get_body() {
+                    //             // Some(body) => instance.insert(body).await?,
+                    //             Some(body) => {
+                    //                 let mut database = database.lock().await;
+                    //                 // dbg!(&database);
 
-                                    let entry = database.select_all(DatabaseType::Tasks).await?;
-                                    println!("Entry: {:?}", entry);
+                    //                 let entry = database.select_all(DatabaseType::Tasks).await?;
+                    //                 println!("Entry: {:?}", entry);
 
-                                    String::from("Ok")
-                                }
-                                None => Err("No body in the request")?,
-                            },
-                            None => Err("Database not configured in the config file.")?,
-                        })
-                    }
+                    //                 String::from("Ok")
+                    //             }
+                    //             None => Err("No body in the request")?,
+                    //         },
+                    //         None => Err("Database not configured in the config file.")?,
+                    //     })
+                    // }
                     _ => {
                         eprintln!("Path does not exists on the server or the method used is unsupported for that path: {:?}", path);
 

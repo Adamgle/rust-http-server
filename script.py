@@ -153,7 +153,7 @@ def send_custom(
             s.sendall(message.encode())
 
             response = s.recv(1024).decode()
-            s.close()
+            # s.close()
 
             return response
 
@@ -340,8 +340,12 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
     timestamps_avg = np.mean(timestamps, axis=0)
     xs = np.arange(len(timestamps_avg))
-    slope, intercept = np.polyfit(xs, timestamps_avg, 1)
-    print("Current slope: ", slope)
+
+    # slope, intercept = np.polyfit(xs, timestamps_avg, deg=1)
+    a, b, c = np.polyfit(xs, timestamps_avg, deg=2)
+
+    # print("Current slope: ", slope)
+    print("Polynomial x^2 coefficients: ", a, b, c)
 
     plt.plot(timestamps_avg, marker="x", linestyle="--", label="Average benchmark")
 
@@ -350,11 +354,27 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
     # count = 5, requests_count = 1000, threads_count = 10
     multi_slope = 0.0004328727698983177
-    # count = 5, requests_count = 1000, threads_count = 1
 
+    # count = 5, requests_count = 1000, threads_count = 1
     single_slope = 0.00069040234219954
+
+    # count = 1, threads_count = 10, requests_count = 10000
+    quadratic_approx = (
+        7.064454015189068e-08 * xs**2
+        + 0.00035391819927912033 * xs
+        + 0.07135582499828524
+    )
+    # 2 * 7.064454015189068e-08 => slope of the polynomial approximation at some x
+
     plt.plot(xs, single_slope * xs, label="Single thread", linestyle="--")
     plt.plot(xs, multi_slope * xs, label="Multi thread", linestyle="--")
+    # plt.plot(xs, slope * xs, label="Current slope (linear fit)", linestyle="--")
+    plt.plot(
+        xs,
+        a * xs**2 + b * xs + c,
+        label="Current slope (quadratic fit x^2)",
+        linestyle="--",
+    )
 
     plt.legend(title="Legend")
 
@@ -363,13 +383,12 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
 
 def main():
-    # for i in range(102, 1102):
     run_benchmark(
         callback=functools.partial(
             run_multithreaded,
             callback=send_custom,
             threads_count=10,
-            requests_count=50,
+            requests_count=100_00,
             payload="test",
         ),
         request=HttpMethod.POST,

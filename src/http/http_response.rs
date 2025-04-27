@@ -114,11 +114,11 @@ impl<'a> HttpResponse<'a> {
             }
         };
 
-        // println!("Size of response payload: {}", data.len());
+        stream
+            .writable()
+            .await
+            .inspect_err(|_| eprintln!("Stream is not writable"))?;
 
-        stream.writable().await?;
-
-        // Refactor to Anyhow::Result
         stream
             .write_all(&data)
             .await
@@ -129,8 +129,10 @@ impl<'a> HttpResponse<'a> {
             .await
             .inspect_err(|_| println!("Could not flush the stream after writing to it"))?;
 
+        // Disregarded the error as it is not critical.
+
         stream.shutdown().await?;
-        
+
         Ok(())
     }
 }

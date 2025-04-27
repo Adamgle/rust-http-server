@@ -166,7 +166,7 @@ ISSUES
     \\ UPDATE => That's keep-alive packet, currently it does not create an issue in any way, shape or form.
 15. Paths like this "http://localhost:5000/////////////////////////////////////////////////" works and resolves to "http://localhost:5000/"
 16. Detect when `run_benchmark` did crash so to not write it to `benchmark.log`
-17. Issues related to Database
+17. <RESOLVED> Issues related to Database
     -> Current design requires that `DatabaseWAL` have access to Database as it have to invoke Database methods of insert, delete, etc., which does not happen.
     -> `DatabaseType` does not connect to a `Schema`, which is an issue, because we want to write to Database of specific type a specific entry
         but we do not have it's `Schema` (in `DatabaseCommand`).
@@ -202,6 +202,11 @@ ISSUES
         or parsed if not yet been parsed. But the one heavy implication of that idea is that we would store the potentially big chunk of memory in RAM making it resource consuming.
         Doing parsing on go makes it still allocate that memory but freeing it quickly, although account for greater performance loss.
         Of course the whole discussion is just delusional as real database does not parse the entire collection just to retrieve one entry. 
+18. There is an issue with a `shutdown` call on writer in `HttpResponse::write`, it closes faster than the request could be fulfilled.
+    -> Getting: Could not write to the stream
+    -> Error sending error response: A request to send or receive data was disallowed because the socket had already 
+    -> been shut down in that direction with a previous shutdown call. (os error 10058)
+    -> Error while responding: Os { code: 10054, kind: ConnectionReset, message: "An existing connection was forcibly closed by the remote host." }
 
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,
@@ -209,8 +214,8 @@ IDEAS
 
 
 ON THE AGENDA: 
-1. Multithreading is on the agenda which will enable us to handle multiple requests simultaneously but far away and we do not bother just know
-
+1. Multithreading is on the agenda which will enable us to handle multiple requests simultaneously but far away and we do not bother just know <DONE>
+2. Logger is next on the agenda, because we need to measure failed and successful requests that happen.
 
 DREAMLAND
 Let's try to develop something...
