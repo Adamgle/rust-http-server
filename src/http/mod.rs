@@ -3,7 +3,6 @@ pub mod http_response;
 
 use crate::prelude::*;
 use crate::{config::Config, http_response::HttpResponse};
-use http_request::HttpRequest;
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, collections::HashMap, error::Error, fmt::Display, str::FromStr};
 use tokio::{net::tcp::OwnedWriteHalf, sync::MutexGuard};

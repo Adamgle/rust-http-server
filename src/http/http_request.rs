@@ -5,7 +5,6 @@ use std::borrow::Cow;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::str::Utf8Error;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
