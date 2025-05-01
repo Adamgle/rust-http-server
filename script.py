@@ -15,6 +15,7 @@ import numpy as np
 import requests
 import random
 import secrets
+import uuid
 
 URL_BASE = "http://localhost:5000/"
 DEFAULT_PORT = 5000
@@ -80,7 +81,7 @@ def write_note(payload: str) -> None:
 
 ### adds id to the payload if id is not None
 # NOTE: To be invoked inside the send_custom function only.
-def idifiy_payload(value: str = "test", id: int = None) -> str:
+def idifiy_payload(value: str = "test", id: str = None) -> str:
     if id is not None:
         return json.dumps({"id": id, "value": value})
 
@@ -106,17 +107,21 @@ def send_custom(
     inject_size: int = 1,
     **kwargs,
 ) -> SendResult:
+    from urllib.parse import quote
+
     injected_header = f"malicious-value{'x' * inject_size}"
 
     response_timestamps: Optional[List[float]] = kwargs.get("response_timestamps", None)
+    path = quote(path)
 
     match request:
         case HttpMethod.POST:
-            print(kwargs.get("id"), payload)
-
             if payload and kwargs.get("id") is None:
-                payload = idifiy_payload(payload, id=secrets.randbits(32))
+                uid = uuid.uuid4()
+                # print(f"Generated UID: {uid}")
+                payload = idifiy_payload(payload, id=str(uid))
             elif payload:
+                # Self defined id
                 payload = idifiy_payload(payload, id=kwargs.get("id"))
 
             headers = (
@@ -149,13 +154,17 @@ def send_custom(
 
     def create_socket(message: str) -> str:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((host, DEFAULT_PORT))
-            s.sendall(message.encode())
+            try:
+                s.connect((host, DEFAULT_PORT))
+                s.sendall(message.encode())
 
-            response = s.recv(1024).decode()
-            # s.close()
+                response = s.recv(1024).decode()
+                # s.close()
 
-            return response
+                return response
+            except OSError as e:
+                print(f"Socket error: {e}")
+                return "500"
 
     response = create_socket(headers)
 
@@ -227,6 +236,7 @@ def run_multithreaded(
     for idx, thread in enumerate(thread_list):
         thread.join()
         print(f"Thread {idx} done. Failures: {results.count(False)}")
+        results.clear()
 
     return {"results": results, "request_size": request_size}
 
@@ -302,7 +312,7 @@ def run_benchmark(
 
     plot_response_timestamps(response_timestamps)
 
-    with open("benchmark.log", "a", encoding="utf-8") as f:
+    with open("benchmarks/benchmark.log", "a", encoding="utf-8") as f:
         f.write("\n".join(log_entry) + "\n")
 
     print("\n".join(log_entry))
@@ -335,6 +345,22 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
     plt.title("Response Timestamps per Thread")
     plt.grid()
 
+    # timestamps_avg = np.mean(timestamps, axis=0)
+    # xs = np.arange(-4000, 4000, 0.01)
+    # # count = 1, threads_count = 10, requests_count = 10000, empty db
+    # quadratic_approx = (
+    #     7.064454015189068e-08 * xs**2
+    #     + 0.00035391819927912033 * xs
+    #     + 0.07135582499828524
+    # )
+    # plt.plot(
+    #     xs,
+    #     quadratic_approx,
+    #     label="Current slope (quadratic fit x^2)",
+    #     linestyle="--",
+    # )
+    # plt.show()
+
     for i, ts in enumerate(timestamps):
         plt.plot(ts, marker=".", label=f"Benchmark {i + 1}")
 
@@ -358,21 +384,24 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
     # count = 5, requests_count = 1000, threads_count = 1
     single_slope = 0.00069040234219954
 
-    # count = 1, threads_count = 10, requests_count = 10000
+    # 2 * 7.064454015189068e-08 => slope of the polynomial approximation at some x
+    # count = 1, threads_count = 10, requests_count = 10000, empty db
     quadratic_approx = (
         7.064454015189068e-08 * xs**2
         + 0.00035391819927912033 * xs
         + 0.07135582499828524
     )
-    # 2 * 7.064454015189068e-08 => slope of the polynomial approximation at some x
+
+    current_fit = a * xs**2 + b * xs + c
 
     plt.plot(xs, single_slope * xs, label="Single thread", linestyle="--")
     plt.plot(xs, multi_slope * xs, label="Multi thread", linestyle="--")
     # plt.plot(xs, slope * xs, label="Current slope (linear fit)", linestyle="--")
+    plt.plot(xs, quadratic_approx, label="Multi threaded quadratic fit", linestyle="--")
     plt.plot(
         xs,
-        a * xs**2 + b * xs + c,
-        label="Current slope (quadratic fit x^2)",
+        current_fit,
+        label="Current fit (quadratic approximation)",
         linestyle="--",
     )
 
@@ -383,24 +412,24 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
 
 def main():
-    run_benchmark(
-        callback=functools.partial(
-            run_multithreaded,
-            callback=send_custom,
-            threads_count=10,
-            requests_count=100_00,
-            payload="test",
-        ),
+    send_custom(
         request=HttpMethod.POST,
         path="/database/tasks.json",
-        count=1,
+        payload="test",
+        # host="localhost",
     )
-
-    # send_custom(
+    
+    # run_benchmark(
+    #     callback=functools.partial(
+    #         run_multithreaded,
+    #         callback=send_custom,
+    #         threads_count=1000,
+    #         requests_count=100_00,
+    #         payload="test",
+    #     ),
     #     request=HttpMethod.POST,
-    #     path="/database/test",
-    #     payload="test",
-    #     # id=i,
+    #     path="/database/tasks.json",
+    #     count=1,
     # )
 
 

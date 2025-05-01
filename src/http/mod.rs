@@ -1,13 +1,12 @@
 pub mod http_request;
 pub mod http_response;
 
+use crate::prelude::*;
 use crate::{config::Config, http_response::HttpResponse};
+use http_request::HttpRequest;
 use serde::{Deserialize, Serialize};
-use std::{
-    borrow::Cow, collections::HashMap, error::Error, fmt::Display, str::FromStr,
-};
+use std::{borrow::Cow, collections::HashMap, error::Error, fmt::Display, str::FromStr};
 use tokio::{net::tcp::OwnedWriteHalf, sync::MutexGuard};
-
 // use crate::prelude::*;
 
 #[derive(Debug)]
@@ -60,8 +59,8 @@ pub struct HttpRequestRequestLine {
     /// This is a work around to store the Url as the request_target, as the library `url::Url` does not allow relative urls parsing.
     /// It is build with the domain, protocol in the config file and port under env.
     ///
-    /// `NOTE`: No information is read from `request_target` other than it's path, changes to protocol and host part are only made to
-    /// avoid ambiguity in requests. `request_target` is only read with a getter, that performs proper parsing.
+    /// `NOTE`: No information is read from `request_target` other than it's path, changes to protocol are only made to
+    /// avoid ambiguity in code. `request_target` is only read with a getter, that performs proper parsing.
     request_target: url::Url,
     protocol: HttpProtocol,
 }
@@ -70,34 +69,49 @@ impl<'a> HttpRequestRequestLine {
     pub async fn new(
         config: &MutexGuard<'_, Config>,
         line: &'a str,
-    ) -> Result<Self, HttpRequestError> {
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let fields = line.split_whitespace().collect::<Vec<&'a str>>();
+
+        if fields.len() != 3 {
+            return Err(HttpRequestError {
+                status_code: 400,
+                status_text: String::from("Bad Request"),
+                internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                    "Request line is malformed, possibly request_target did not encode the separator: {}",
+                    line
+                ))),
+                ..Default::default()
+            }
+            .into());
+        }
 
         let [method, request_target, protocol] = fields
             .get(0..3)
-            .ok_or_else(|| {
-                eprintln!("Bad Request line: {:?}", fields);
-                HttpRequestError {
-                    status_code: 400,
-                    status_text: String::from("Bad Request"),
-                    ..Default::default()
-                }
+            .ok_or(HttpRequestError {
+                status_code: 400,
+                status_text: String::from("Bad Request"),
+                internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                    "Request line is malformed: {}",
+                    line
+                ))),
+                ..Default::default()
             })?
             .try_into()
-            .map_err(|e| {
-                eprintln!("Error converting slice to array: {}", e);
-                HttpRequestError {
-                    status_code: 400,
-                    status_text: String::from("Bad Request"),
-                    ..Default::default()
-                }
+            .map_err(|e| HttpRequestError {
+                status_code: 400,
+                status_text: String::from("Bad Request"),
+                internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                    "Error converting slice to array: {}",
+                    e
+                ))),
+                ..Default::default()
             })?;
 
         // The idea there is to use the url::Url lib, but it does not allow building relative URL's so we will use
         // absolute one but with a default's for domain, port and protocol under Config file for safety.
         // We want the functionality for setting path segments and queries so we have to do that.
 
-        let mut host = config.http_url.clone();
+        let base = config.http_url.clone();
 
         // Remove leading root identifier from the request_target as that would end up redundant and invalid
         // The reason is doing parsing with url::Url you will end up with a double root after clearing the segments
@@ -105,28 +119,56 @@ impl<'a> HttpRequestRequestLine {
         // NOTE: The segments actually does not exists in the url that does come with the config.http_url
         // that is just for being overly cautious (look at this man, what you taking about, you and cautions...).
 
-        let request_target = request_target.strip_prefix("/").unwrap_or(&request_target);
+        // Check if request target is a valid URL.
+        if let Ok(_) = url::Url::parse(request_target) {
+            return Err(HttpRequestError {
+                status_code: 400,
+                status_text: String::from("Bad Request"),
+                internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                    "request target was sent as an URL: {}",
+                    request_target
+                ))),
+                ..Default::default()
+            }
+            .into());
+        }
 
-        host.path_segments_mut()
-            .map_err(|_| {
-                eprintln!("Error getting mutable segments of request_target");
-                HttpRequestError::default()
-            })
-            .map(|mut segments| {
-                segments.clear();
-                segments.push(request_target);
+        // take the path portion of the request_target
+        // we have to do that as in the query part those symbols could not be considered invalid all the time,
+        // for example if we want to sent query to search for something, we should not be limited
+        // what we could search for.
+        let path = request_target.split('?').next().unwrap_or(request_target);
+        HttpRequestHeaders::validate_request_target_path(path.to_string())?;
+
+        let mut request_target = base
+            // .strip_prefix("/").unwrap_or(&request_target)
+            .join(request_target)
+            .map_err(|e| HttpRequestError {
+                status_code: 400,
+                status_text: String::from("Bad Request"),
+                message: Some(format!("Invalid request target: {}", request_target)),
+                internals: Some(Box::<dyn Error + Send + Sync>::from(e)),
+                ..Default::default()
             })?;
 
         let protocol: HttpProtocol = HttpProtocol::from_str(protocol)?;
 
-        host.set_scheme(protocol.simplify()).map_err(|_| {
-            eprintln!("Error setting scheme to the request_target");
-            HttpRequestError::default()
-        })?;
+        request_target
+            .set_scheme(protocol.simplify())
+            .map_err(|_| HttpRequestError {
+                status_code: 400,
+                status_text: String::from("Bad Request"),
+                message: Some(format!("Invalid request target: {}", request_target)),
+                internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                    "Could not change scheme on request_target: {} | scheme: {}",
+                    request_target, protocol
+                ))),
+                ..Default::default()
+            })?;
 
         Ok(Self {
             method: HttpRequestMethod::from_str(method)?,
-            request_target: host,
+            request_target,
             protocol,
         })
     }
@@ -215,15 +257,23 @@ impl<'a> std::fmt::Display for HttpResponseStartLine<'a> {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize)]
 /// `status_code` and `status_text` are specific to the HTTP protocol, specifically the start line of HTTP message
 /// `content_type` is used to return appropriate response to the client
 /// `message` is used to inform the user about the error, not standardized in HTTP
 pub struct HttpRequestError {
     pub status_code: u16,
+    /// Standardized description of an error, technically should be optional.
     pub status_text: String,
+    /// Used to describe in what format the response is sent to the client.
     pub content_type: Option<String>,
+    /// Is used to give context of an error that is sent to the client, not strictly to be displayed always.
+    /// It should not contain any sensitive information, but that is implicit as it gets redirected to the client.
     pub message: Option<String>,
+    /// For logging purposes, used to redirect some errors to up the stack to avoid repetitive printing on server
+    /// while returning the error to the client. Should not be exposed to the client.
+    #[serde(skip)]
+    pub internals: Option<Box<dyn Error + Send + Sync>>,
 }
 
 impl Default for HttpRequestError {
@@ -233,6 +283,7 @@ impl Default for HttpRequestError {
             status_text: String::from("Internal Server Error"),
             content_type: Some(String::from("text/html")),
             message: None,
+            internals: None,
         }
     }
 }
@@ -269,14 +320,19 @@ impl HttpRequestError {
     ///
     /// NOTE: Default error message can be send by setting `err` to HttpRequestError::default()
     pub async fn send_error_response(
-        config: &MutexGuard<'_, Config>,
-        stream: &mut MutexGuard<'_, OwnedWriteHalf>,
+        config: Arc<Mutex<Config>>,
+        writer: Arc<Mutex<OwnedWriteHalf>>,
+        // writer: &mut OwnedWriteHalf,
+        // stream: &mut MutexGuard<'_, OwnedWriteHalf>,
         err: Box<dyn Error + Send + Sync>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // NOTE: This page could be dynamically set, but this function is sketchy and not very useful and flexible, so maybe we will refactor in the future.
 
+        let mut writer = writer.lock().await;
+        let config = config.lock().await;
+
         if let Some(http_err) = err.as_ref().downcast_ref::<HttpRequestError>() {
-            eprintln!("Error while responding: {:?}", http_err);
+            eprintln!("Error while responding: {:#?}", http_err);
             let error_page = Config::get_server_public().join("pages/error.html");
 
             let start_line = HttpResponseStartLine::new(
@@ -289,6 +345,7 @@ impl HttpRequestError {
 
             let body = match &http_err.content_type {
                 Some(content_type) if content_type == "application/json" => {
+                    // This basically sends the `struct` stringified as JSON
                     serde_json::to_string(http_err)?
                 }
                 Some(content_type) if content_type == "text/plain" => {
@@ -296,6 +353,7 @@ impl HttpRequestError {
                 }
                 // NOTE: matching different content-types
                 // Some(content_type) if content_type == "application/x-www-form-urlencoded"
+                // Otherwise sending HTML error page as a response
                 _ => std::fs::read_to_string(error_page)?,
             };
 
@@ -316,10 +374,10 @@ impl HttpRequestError {
             );
 
             let mut response = HttpResponse::new(headers, Some(body));
-            return response.write(&config, stream).await;
+            return response.write(&config, &mut writer).await;
         } else {
             // Sending text/plain as the error message if the error is not of the HttpRequestError type
-            eprintln!("Error while responding: {:?}", err);
+            eprintln!("Error while responding: {:#?}", err);
 
             let mut headers = HttpResponseHeaders::new(HttpResponseStartLine::new(
                 HttpProtocol::HTTP1_1,
@@ -339,7 +397,7 @@ impl HttpRequestError {
 
             let mut response = HttpResponse::new(headers, Some(body));
 
-            return response.write(&config, stream).await;
+            return response.write(&config, &mut writer).await;
         }
         // NOTE: This is how you can handle different errors by downcasting to the specific error type
         // else if let Some(io_err) = err.downcast_ref::<std::io::Error>() {}
@@ -433,6 +491,63 @@ impl<'a> HttpRequestHeaders<'a> {
             headers: HeaderMap::new(),
             request_line,
         }
+    }
+
+    /// Invalidates request target if it contains file system traversal symbols, `./` | `../` or consecutive slashes
+    /// (slashes the do not contain a path segment in between them).
+    ///
+    /// NOTE: This validating function creates some limitations for the request target, that could technically be valid paths
+    /// but due to my negligence I will keep it this way. Path with encoded slashes are not supported, so any file encoding
+    /// "/" or "\", eg. "asd/asd%2Fasd" would evaluate to whole different path: "asd/asd/asd", we want to avoid that,
+    /// so we will not support it. Also I cannot think of way to decode something like a space but do not decode the slash,
+    /// and when to do so.
+    /// `NOTE`: This should be run on un-decoded request target path.
+    pub fn validate_request_target_path(
+        request_target: String,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        const RELATIVE_TO_PATH_SYMBOL: &str = "./";
+        const ONE_DIRECTORY_DOWN_SYMBOL: &str = "../";
+        // Equivalent using backslash.
+        const ONE_DIRECTORY_DOWN_SYMBOL_2: &str = "..\\";
+        const RELATIVE_TO_PATH_SYMBOL_2: &str = ".\\";
+        const PERCENT_ENCODED_SLASH: &str = "%2F";
+        const PERCENT_ENCODED_BACKSLASH: &str = "%5C";
+
+        let mut is_prev_slash = false;
+
+        for (idx, symbol) in request_target.to_string().chars().enumerate() {
+            let window_2 = request_target.get(idx..idx + 2).unwrap_or_default();
+            let window_3 = request_target.get(idx..idx + 3).unwrap_or_default();
+
+            if window_2 == RELATIVE_TO_PATH_SYMBOL
+                || window_2 == RELATIVE_TO_PATH_SYMBOL_2
+                || window_3 == ONE_DIRECTORY_DOWN_SYMBOL
+                || window_3 == ONE_DIRECTORY_DOWN_SYMBOL_2
+                || window_3 == PERCENT_ENCODED_BACKSLASH
+                || window_3 == PERCENT_ENCODED_SLASH
+                || ((symbol == '/' || symbol == '\\') && is_prev_slash)
+            {
+                return Err(HttpRequestError {
+                    status_code: 400,
+                    status_text: "Bad Request".into(),
+                    message: "Corrupted request target".to_string().into(),
+                    internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                        "Path contains file system traversal symbols or consecutive slashes {}",
+                        request_target
+                    ))),
+                    ..Default::default()
+                }
+                .into());
+            }
+
+            if symbol == '/' || symbol == '\\' {
+                is_prev_slash = true;
+            } else {
+                is_prev_slash = false;
+            }
+        }
+
+        Ok(())
     }
 
     // NOTE: I think the below getters could be migrated to HttpResponse as the field that it accesses

@@ -3328,3 +3328,183 @@ File path: public\database/tasks.json (Size: 2 bytes)
 Payload size: 252 bytes
 Average execution time: 10.7519 seconds
 
+Running 1 benchmarks on 1 threads, making 1 requests per thread, at 2025-04-27 15:14:03
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 909711 bytes)
+Payload size: 253 bytes
+Average execution time: 0.0045 seconds
+
+Running 1 benchmarks on 1 threads, making 1 requests per thread, at 2025-04-27 15:16:24
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 909711 bytes)
+Payload size: 252 bytes
+Average execution time: 0.0040 seconds
+
+Running 1 benchmarks on 1 threads, making 1 requests per thread, at 2025-04-27 15:16:31
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 909711 bytes)
+Payload size: 251 bytes
+Average execution time: 0.0038 seconds
+
+Running 1 benchmarks on 1 threads, making 1 requests per thread, at 2025-04-27 15:16:40
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 909711 bytes)
+Payload size: 253 bytes
+Average execution time: 0.0040 seconds
+
+Running 1 benchmarks on 100 threads, making 100 requests per thread, at 2025-04-27 15:19:25
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 2 bytes)
+Payload size: 253 bytes
+Average execution time: 10.8919 seconds
+
+Running 1 benchmarks on 100 threads, making 100 requests per thread, at 2025-04-27 15:20:21
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 2 bytes)
+Payload size: 253 bytes
+Average execution time: 10.2342 seconds
+
+Running 1 benchmarks on 100 threads, making 100 requests per thread, at 2025-04-27 15:21:28
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 2 bytes)
+Payload size: 253 bytes
+Average execution time: 11.6276 seconds
+
+Running 1 benchmarks on 10 threads, making 10000 requests per thread, at 2025-04-27 15:28:43
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 450239 bytes)
+Payload size: 253 bytes
+Average execution time: 830.4393 seconds
+
+Running 1 benchmarks on 10 threads, making 1000 requests per thread, at 2025-05-01 18:07:57
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 4 bytes)
+Payload size: 253 bytes
+Average execution time: 13.0118 seconds
+
+Running 1 benchmarks on 10 threads, making 1000 requests per thread, at 2025-05-01 18:16:15
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 2 bytes)
+Payload size: 253 bytes
+Average execution time: 13.0319 seconds
+
+Running 1 benchmarks on 10 threads, making 1000 requests per thread, at 2025-05-01 18:19:24
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 454725 bytes)
+Payload size: 253 bytes
+Average execution time: 6.9846 seconds
+
+Running 1 benchmarks on 10 threads, making 1000 requests per thread, at 2025-05-01 18:25:31
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 2 bytes)
+Payload size: 253 bytes
+Average execution time: 16.4859 seconds
+
+Running 1 benchmarks on 10 threads, making 1000 requests per thread, at 2025-05-01 18:29:29
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 2 bytes)
+Payload size: 253 bytes
+Average execution time: 12.5868 seconds
+
+Running 1 benchmarks on 10 threads, making 1000 requests per thread, at 2025-05-01 18:31:55
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 2 bytes)
+Payload size: 252 bytes
+Average execution time: 9.6882 seconds
+
+Running 1 benchmarks on 10 threads, making 10000 requests per thread, at 2025-05-01 18:32:22
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 454823 bytes)
+Payload size: 253 bytes
+Average execution time: 1192.0956 seconds
+
+Running 1 benchmarks on 10 threads, making 1000 requests per thread, at 2025-05-01 20:22:59
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 2 bytes)
+Payload size: 281 bytes
+Average execution time: 12.3063 seconds
+
+Running 1 benchmarks on 10 threads, making 1000 requests per thread, at 2025-05-01 20:25:24
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 1000001 bytes)
+Payload size: 281 bytes
+Average execution time: 33.6718 seconds
+
+Running 1 benchmarks on 10 threads, making 1000 requests per thread, at 2025-05-01 20:26:57
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 2 bytes)
+Payload size: 281 bytes
+Average execution time: 13.1360 seconds
+
+Running 1 benchmarks on 10 threads, making 1000 requests per thread, at 2025-05-01 20:32:29
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 2 bytes)
+Payload size: 281 bytes
+Average execution time: 3.7420 seconds
+
+Running 1 benchmarks on 10 threads, making 1000 requests per thread, at 2025-05-01 20:32:42
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 2 bytes)
+Payload size: 281 bytes
+Average execution time: 3.3175 seconds
+
+Running 1 benchmarks on 10 threads, making 10000 requests per thread, at 2025-05-01 20:35:40
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 2 bytes)
+Payload size: 281 bytes
+Average execution time: 43.3340 seconds
+
+Running 1 benchmarks on 10 threads, making 1 requests per thread, at 2025-05-01 20:41:56
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 9000001 bytes)
+Payload size: 281 bytes
+Average execution time: 0.0079 seconds
+
+Running 1 benchmarks on 10 threads, making 1000 requests per thread, at 2025-05-01 20:44:29
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 9687101 bytes)
+Payload size: 281 bytes
+Average execution time: 5.7799 seconds
+
+Running 1 benchmarks on 10 threads, making 1000 requests per thread, at 2025-05-01 20:44:44
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 10687101 bytes)
+Payload size: 281 bytes
+Average execution time: 5.6066 seconds
+
+Running 1 benchmarks on 10 threads, making 1000 requests per thread, at 2025-05-01 20:44:55
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 11687101 bytes)
+Payload size: 281 bytes
+Average execution time: 5.9129 seconds
+
+Running 1 benchmarks on 100 threads, making 100 requests per thread, at 2025-05-01 20:45:12
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 12687101 bytes)
+Payload size: 281 bytes
+Average execution time: 3.4727 seconds
+
+Running 1 benchmarks on 100 threads, making 100 requests per thread, at 2025-05-01 20:50:36
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 12687101 bytes)
+Payload size: 281 bytes
+Average execution time: 6.1590 seconds
+
+Running 1 benchmarks on 100 threads, making 100 requests per thread, at 2025-05-01 20:52:03
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 2 bytes)
+Payload size: 281 bytes
+Average execution time: 3.6769 seconds
+
+Running 1 benchmarks on 100 threads, making 100 requests per thread, at 2025-05-01 20:52:14
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 1000001 bytes)
+Payload size: 281 bytes
+Average execution time: 4.0712 seconds
+
+Running 1 benchmarks on 1000 threads, making 10 requests per thread, at 2025-05-01 21:04:49
+Running: HttpMethod.POST /database/tasks.json
+File path: public\database/tasks.json (Size: 11400648 bytes)
+Payload size: 281 bytes
+Average execution time: 34.2890 seconds
+

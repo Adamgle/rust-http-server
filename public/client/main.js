@@ -35,7 +35,7 @@ const addTask = async (formData) => {
 
   taskObject = {
     // Most secure
-    id: Math.floor(Math.random() * (2 ** 31 - 1)),
+    id: Math.floor(Math.random() * (2 ** 31 - 1)).toString(),
     value: taskValue,
   };
 

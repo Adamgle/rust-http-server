@@ -55,13 +55,13 @@ pub trait DatabaseEntryTrait: Send + Sync + Debug + Any {
 
     /// Value that is used as the "primary key" for the entry. This information is could also be embedded
     /// in the entry itself. Every entry should have a unique id define in it's struct definition.
-    fn get_id(&self) -> usize;
+    fn get_id(&self) -> String;
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct DatabaseTask {
     value: String,
-    id: usize,
+    id: String,
 }
 
 impl DatabaseEntryTrait for DatabaseTask {
@@ -73,7 +73,7 @@ impl DatabaseEntryTrait for DatabaseTask {
         serde_json::to_value(self).unwrap_or_default()
     }
 
-    fn get_id(&self) -> usize {
+    fn get_id(&self) -> String {
         self.id.clone()
     }
 }
@@ -81,7 +81,7 @@ impl DatabaseEntryTrait for DatabaseTask {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct DatabaseUser {
     name: String,
-    id: usize,
+    id: String,
 }
 
 // #[typetag::serde]
@@ -94,7 +94,7 @@ impl DatabaseEntryTrait for DatabaseUser {
         serde_json::to_value(self).unwrap_or_default()
     }
 
-    fn get_id(&self) -> usize {
+    fn get_id(&self) -> String {
         self.id.clone()
     }
 }
@@ -129,7 +129,8 @@ impl DatabaseEntry {
 // see issue #112792 <https://github.com/rust-lang/rust/issues/112792> for more information
 // `#[warn(type_alias_bounds)]` on by default
 // T: DatabaseEntryTrait => T
-type DatabaseStorage<T> = HashMap<usize, T>;
+/// We are using Strings as the keys to store uuids.
+type DatabaseStorage<T> = HashMap<String, T>;
 
 #[derive(Debug)]
 /// `THESIS`: The only interface that we will expose to the user is the `Database` struct impl's with `inherited` public interface on it's fields.
@@ -206,7 +207,6 @@ impl Database {
     async fn parse_WAL(
         handler: Arc<Mutex<File>>,
         size: usize,
-        // WAL: MutexGuard<'_, DatabaseWAL>,
     ) -> Result<Vec<DatabaseCommand>, Box<dyn Error + Send + Sync>> {
         let mut handler = handler.lock().await;
 
@@ -361,7 +361,7 @@ impl Database {
     pub async fn delete(
         &mut self,
         d_type: DatabaseType,
-        id: usize,
+        id: String,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.exec(DatabaseCommand::Delete(d_type, id)).await
     }
@@ -369,7 +369,7 @@ impl Database {
     pub async fn select<'a>(
         &mut self,
         d_type: DatabaseType,
-        id: usize,
+        id: String,
     ) -> Result<Box<dyn DatabaseEntryTrait>, Box<dyn Error + Send + Sync>> {
         let WAL = self.get_wal();
         let WAL = WAL.lock().await;
@@ -478,7 +478,7 @@ impl Database {
     fn _delete(
         &self,
         storage: &mut HashMap<DatabaseType, DatabaseStorage<Box<dyn DatabaseEntryTrait>>>,
-        id: usize,
+        id: String,
         d_type: DatabaseType,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Retrieves the collection from the storage
@@ -565,7 +565,7 @@ impl DatabaseCollection {
 
     async fn overwrite_database_file(
         &self,
-        data: &HashMap<usize, Box<dyn DatabaseEntryTrait>>,
+        data: &DatabaseStorage<Box<dyn DatabaseEntryTrait>>,
         // d_type: &DatabaseType,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Hold entries as raw data instead of deserialized instances of `dyn DatabaseEntryTrait`
@@ -591,7 +591,7 @@ impl DatabaseCollection {
         Ok(())
     }
 
-    /// Parses the collection file to the `HashMap<usize, Box<dyn DatabaseEntryTrait>>` type.
+    /// Parses the collection file to the `HashMap<String, Box<dyn DatabaseEntryTrait>>` type.
     async fn parse_collection(
         &self,
     ) -> Result<DatabaseStorage<Box<dyn DatabaseEntryTrait>>, Box<dyn Error + Send + Sync>> {
@@ -675,6 +675,12 @@ struct DatabaseWAL {
     d_types: HashSet<DatabaseType>,
 }
 
+/// The size of the WAL file, when it reaches that size, it will be flushed to the database file.
+/// Greater in size the better performance, may result with higher memory usage, but I think it's negligible.
+///
+/// There is also possibility to opt-out of slushing on certain size, do it only on commands
+/// like select, select_all to provide stateful output, but otherwise just flush it on shutdown.
+/// To opt-out set it to max value of `usize`.
 const WAL_COMMAND_SIZE: usize = 100;
 
 impl DatabaseWAL {
@@ -744,7 +750,7 @@ impl DatabaseWAL {
     async fn save_command(
         &mut self,
         command: DatabaseCommand,
-    ) -> Result<String, Box<dyn Error + Send + Sync>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Below we will write the actual entry to the WAL file.
 
         let file = self.get_handler();
@@ -761,7 +767,7 @@ impl DatabaseWAL {
         self.add_d_type(command.get_database_type().clone());
         self.increment_size();
 
-        Ok(String::new())
+        Ok(())
     }
 
     fn get_handler(&self) -> Arc<Mutex<File>> {
@@ -811,12 +817,12 @@ enum DatabaseCommand {
     /// Update one entry to given DatabaseType with a new entry
     Update(DatabaseType, DatabaseEntry),
     /// Delete one entry to given DatabaseType
-    Delete(DatabaseType, usize),
+    Delete(DatabaseType, String),
     // Select and SelectAll are commands that cannot be buffered in the WAL file,
     // as they are not trigger the side effect on database, so they will not be stored in the WAL file
     // if executed, but evaluated eagerly and they will also trigger the execution of the buffered commands as if not, the result could be stale.
     /// Select one entry to given DatabaseType
-    Select(DatabaseType, usize),
+    Select(DatabaseType, String),
     /// Select everything to given DatabaseType
     SelectAll(DatabaseType),
 }

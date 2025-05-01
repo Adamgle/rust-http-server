@@ -97,15 +97,8 @@ impl<'a> HttpResponse<'a> {
     pub async fn write(
         &mut self,
         config: &MutexGuard<'_, Config>,
-        stream: &mut MutexGuard<'_, OwnedWriteHalf>,
+        writer: &mut MutexGuard<'_, OwnedWriteHalf>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // let mut logger = Logger::new()?;
-        // config
-        //     .logger
-        //     .log_tcp_stream(format!("--- Response ---\r\n{:?}\r\n", self.headers))?;
-
-        // println!("Response: {}", self.headers.get_start_line());
-
         let data = match self.parse_response() {
             Ok(res) => res,
             Err(err) => {
@@ -114,24 +107,24 @@ impl<'a> HttpResponse<'a> {
             }
         };
 
-        stream
+        writer
             .writable()
             .await
             .inspect_err(|_| eprintln!("Stream is not writable"))?;
 
-        stream
+        writer
             .write_all(&data)
             .await
             .inspect_err(|_| println!("Could not write to the stream"))?;
 
-        stream
+        writer
             .flush()
             .await
             .inspect_err(|_| println!("Could not flush the stream after writing to it"))?;
 
         // Disregarded the error as it is not critical.
 
-        stream.shutdown().await?;
+        writer.shutdown().await?;
 
         Ok(())
     }

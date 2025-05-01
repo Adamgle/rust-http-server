@@ -59,28 +59,34 @@ pub mod tcp_handlers {
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    // println!("Connection established with: {:?}", socket);
-
                     let (mut reader, writer) = stream.into_split();
-
                     let writer = Arc::new(Mutex::new(writer));
-                    let config = Arc::clone(&config);
 
+                    let config = Arc::clone(&config);
                     let task_error_writer = Arc::clone(&writer);
 
                     let task = tokio::spawn(async move {
-                        let config = config.lock().await;
-                        let mut writer = writer.lock().await;
+                        let writer = Arc::clone(&writer);
 
-                        if let Err(err) =
-                            self::handle_client(&mut reader, &mut writer, &config).await
+                        if let Err(err) = self::handle_client(
+                            &mut reader,
+                            Arc::clone(&writer),
+                            Arc::clone(&config),
+                        )
+                        .await
                         {
-                            if let Err(err) =
-                                HttpRequestError::send_error_response(&config, &mut writer, err)
-                                    .await
+                            if let Err(err) = HttpRequestError::send_error_response(
+                                Arc::clone(&config),
+                                Arc::clone(&writer),
+                                err,
+                            )
+                            .await
                             {
                                 eprintln!("Error sending error response: {}", err);
                             };
+
+                            // The above code SHOULD release the lock so no deadlock, but keep in mind.
+                            let mut writer = writer.lock().await;
 
                             // Shutdown for writing
                             if let Err(err) = writer.shutdown().await {
@@ -126,26 +132,37 @@ pub mod tcp_handlers {
     /// Handles incoming request from the client.
     async fn handle_client(
         reader: &mut OwnedReadHalf,
-        writer: &mut MutexGuard<'_, OwnedWriteHalf>,
-        config: &MutexGuard<'_, Config>,
+        writer: Arc<Mutex<OwnedWriteHalf>>,
+        // writer: &mut OwnedWriteHalf,
+        // writer: &mut MutexGuard<'_, OwnedWriteHalf>,
+        config: Arc<Mutex<Config>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let config = Arc::clone(&config);
+        let config = config.lock().await;
+
+        let writer = Arc::clone(&writer);
+        let mut writer = writer.lock().await;
+
         let request: HttpRequest<'_> = HttpRequest::new(&config, reader).await?;
         let mut headers: HttpResponseHeaders<'_> =
             HttpResponseHeaders::new(HttpResponseStartLine::default());
 
         // If path is invalid and cannot be encoded, that should end the request
-        let path = request.get_request_target()?;
+        let path = request.get_request_target_path()?;
 
         let (method, path) = (request.get_headers().get_method(), path);
 
-        // println!("Requesting: {:?} {}", method, path);
+        println!("Requesting: {:?} {}", method, path);
 
         // This will be executed for every request and try to match paths that should be redirected
         // although the only redirection that we are doing is from http://127.0.0.1:<port> to http://localhost:<port>
         // paths are defined in the config file under 'domain' field, for domains and path redirect in the "paths" field
 
         // Give back the reference supplied to the function
-        if request.redirect_request(&config, writer, &path).await? {
+        if request
+            .redirect_request(&config, &mut writer, &path)
+            .await?
+        {
             return Ok(());
         };
 
@@ -161,26 +178,11 @@ pub mod tcp_handlers {
         //     _ => {}
         // }
 
-        // TODO: Initialization of the Database should be done once, presumably in the middleware when necessary.
-        // but it cannot be done once in this format as each DatabaseType requires different initialization
-
         let database = config.get_database()?;
 
         let body = match method {
-            // This throws an error because the app is making a GET request to the path
-            // that does not exists, which is correct by definition
-            // NOTE: We should initialize the database only once, or at least at the top,
-            // but that tomorrow...
-            // GET /database/tasks.json => Database::init() => Give back the control flow to the request initialized \end_middleware
             HttpRequestMethod::GET => Some(request.read_requested_resource(&mut headers)?),
             HttpRequestMethod::POST => {
-                // This would return Path not found if the path does not exists
-                // If we would want to make custom endpoints without actual path existence
-                // then it should be rewritten
-
-                // NOTE: Paths under /database should validate the existence of WAL and database_config only once
-                // not to avoid checking the same thing multiple times
-
                 match path {
                     p if p == "/database/tasks.json" => {
                         Some(match config.config_file.database.as_ref() {
@@ -188,7 +190,7 @@ pub mod tcp_handlers {
                                 // Some(body) => instance.insert(body).await?,
                                 Some(body) => {
                                     let mut database = database.lock().await;
-                                    // dbg!(&database);
+                                    dbg!(&database);
 
                                     database.insert(body, DatabaseType::Tasks).await?;
 
@@ -199,32 +201,14 @@ pub mod tcp_handlers {
                             None => Err("Database not configured in the config file.")?,
                         })
                     }
-                    // p if p == "/database/test" => {
-                    //     Some(match config.config_file.database.as_ref() {
-                    //         Some(_) => match request.get_body() {
-                    //             // Some(body) => instance.insert(body).await?,
-                    //             Some(body) => {
-                    //                 let mut database = database.lock().await;
-                    //                 // dbg!(&database);
-
-                    //                 let entry = database.select_all(DatabaseType::Tasks).await?;
-                    //                 println!("Entry: {:?}", entry);
-
-                    //                 String::from("Ok")
-                    //             }
-                    //             None => Err("No body in the request")?,
-                    //         },
-                    //         None => Err("Database not configured in the config file.")?,
-                    //     })
-                    // }
                     _ => {
-                        eprintln!("Path does not exists on the server or the method used is unsupported for that path: {:?}", path);
-
                         return Err(HttpRequestError {
                             status_code: 404,
                             status_text: String::from("Not Found"),
                             message: String::from("Path does not exists on the server or the method used is unsupported for that path").into(),
-                            content_type: "text/plain".to_string().into()
+                            content_type: "application/json".to_string().into(),
+                            internals: Some(Box::<dyn std::error::Error + Send + Sync>::from(
+                                format!("Path does not exists on the server or the method used is unsupported for that path: {:?}", path))),
                         })?;
                     }
                 }
@@ -238,7 +222,7 @@ pub mod tcp_handlers {
 
         let mut response: HttpResponse<'_> = HttpResponse::new(headers, body);
 
-        response.write(&config, writer).await?;
+        response.write(&config, &mut writer).await?;
         Ok(())
     }
 }

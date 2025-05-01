@@ -2,5 +2,6 @@
 
 .vscode
 
-./benchmark.log
+./benchmarks
 ./wireshark
+./logs

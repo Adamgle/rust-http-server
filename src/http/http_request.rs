@@ -48,11 +48,6 @@ impl<'a> HttpRequest<'a> {
         config: &MutexGuard<'_, Config>,
         stream: &mut OwnedReadHalf,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        // ONGOING FIXES
-
-        // TODO: Verify the presence of the Host header, 400 if not present
-        // Also make the headers validation as there is none at the moment, not only the Host header.
-
         // Could be None if TcpStream is not valid HTTP message.
         let mut headers: Option<HttpRequestHeaders> = None;
 
@@ -70,7 +65,40 @@ impl<'a> HttpRequest<'a> {
             eprintln!("Error reading line from the stream: {}", e);
         })? {
             if line.is_empty() {
-                break;
+                match headers.as_ref() {
+                    Some(headers) => {
+                        if let Some(host) = headers.get("Host") {
+                            let domain = &config.config_file.domain;
+                            let port = Config::get_server_port();
+
+                            if host.to_string() == format!("{}:{}", domain, port) {
+                                break;
+                            } else {
+                                return Err(Box::from(HttpRequestError {
+                                    status_code: 400,
+                                    status_text: "Bad Request".into(),
+                                    message: "Invalid request".to_string().into(),
+                                    internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                                        "Invalid Host header: {}",
+                                        host
+                                    ))),
+                                    ..Default::default()
+                                }));
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(Box::from(HttpRequestError {
+                            status_code: 400,
+                            status_text: "Bad Request".into(),
+                            message: "Invalid request".to_string().into(),
+                            internals: Some(Box::<dyn Error + Send + Sync>::from(
+                                "Empty line before headers",
+                            )),
+                            ..Default::default()
+                        }));
+                    }
+                }
             } else if headers.is_none() {
                 // First line is request line
                 headers = Some(HttpRequestHeaders::new(
@@ -82,9 +110,14 @@ impl<'a> HttpRequest<'a> {
 
                 headers
                     .as_mut()
-                    .ok_or_else(|| {
-                        eprintln!("Headers are not initialized while parsing header from line.");
-                        "Invalid request"
+                    .ok_or_else(|| HttpRequestError {
+                        status_code: 400,
+                        status_text: "Bad Request".into(),
+                        message: "Invalid request".to_string().into(),
+                        internals: Some(Box::<dyn Error + Send + Sync>::from(
+                            "Headers are not initialized while parsing header from line.",
+                        )),
+                        ..Default::default()
                     })?
                     .add_header_line(line);
             }
@@ -111,7 +144,7 @@ impl<'a> HttpRequest<'a> {
 
                     // No data loss is acceptable
                     while transferred != content_length {
-                        let chunk = reader.fill_buf().await?;   
+                        let chunk = reader.fill_buf().await?;
 
                         // What if there is no data on the wire while reading, but it will be?
                         if chunk.is_empty() {
@@ -169,7 +202,7 @@ impl<'a> HttpRequest<'a> {
         &self,
         // config: &MutexGuard<'_, Config>,
     ) -> Result<PathBuf, HttpRequestError> {
-        match self.get_request_target() {
+        match self.get_request_target_path() {
             Ok(path) => {
                 // We will map specialized directories to the extension of the file requested, so if the file is requested with .html extension
                 // we will look in the /public/pages directory, if the file is requested with .css extension we will look in the /public/styles directory
@@ -185,32 +218,44 @@ impl<'a> HttpRequest<'a> {
                 // DESIGN NOTE: We will support default files of the directories in the path, only index.html as the default. Other specialized directories will not
                 // try to resolve any paths when not given with full filename.
 
+                // println!("Path in get_absolute_resource_path: {:?}", path);
+
                 let public = Config::get_server_public();
 
-                let path: String = path.to_string();
+                let path = path.to_string();
 
                 // NOTE: Error handling should be done here
-                let path = Path::new(&path).strip_prefix("/").expect("Invalid path");
+                let path = Path::new(&path)
+                    .strip_prefix("/")
+                    .map_err(|e| HttpRequestError {
+                        status_code: 400,
+                        status_text: "Bad Request".into(),
+                        message: "Corrupted path".to_string().into(),
+                        internals: Some(Box::<dyn Error + Send + Sync>::from(e)),
+                        ..Default::default()
+                    })?;
+
+                // println!("Path after: {:?}", path);
 
                 // If that would be absolute and would join with the public directory path, it would create a new absolute path
                 // effectively allowing to traverse the file system of the server
 
                 // I do not know if that is stable enough, as windows has weird absolute path handling
 
-                if path.is_absolute() || path.starts_with("/") && path.is_relative() {
+                if path.is_absolute() || (path.starts_with("/") && path.is_relative()) {
                     eprintln!("Path is absolute, not allowed: {:?}", path);
                     return Err(HttpRequestError {
                         status_code: 400,
                         status_text: "Bad Request".into(),
+                        message: "Corrupted path".to_string().into(),
                         // NOTE: I do not understand why this is declared as an owned String
-                        content_type: String::from("application/json").into(),
                         ..Default::default()
                     });
                 };
 
                 // Routing to /pages, /styles, /client is undefined behavior, as those paths are not accessible by the client directly
 
-                match path.extension() {
+                let path = match path.extension() {
                     Some(ext) => {
                         let dir = ext
                             .to_str()
@@ -228,8 +273,41 @@ impl<'a> HttpRequest<'a> {
                                 // Handle cases where the path is already prefixed with the directory
                                 // considering the filenames that are of the name of specialized directories
 
-                                if (path.starts_with(dir)
-                                    && path.file_stem().unwrap().to_str().unwrap() == dir)
+                                // File stem is a portion of the file name before the last dot
+                                // Technically that file_prefix would be more appropriate but that is nightly only
+                                //
+                                // assert_eq!("foo", Path::new("foo.rs").file_stem().unwrap());
+                                // assert_eq!("foo.tar", Path::new("foo.tar.gz").file_stem().unwrap());
+
+                                let filename = path
+                                    .file_stem()
+                                    .ok_or(HttpRequestError {
+                                        status_code: 400,
+                                        status_text: "Bad Request".into(),
+                                        message: "Invalid request target".to_string().into(),
+                                        content_type: "text/html".to_string().into(),
+                                        internals: Some(Box::<dyn Error + Send + Sync>::from(
+                                            format!(
+                                                "File stem does not exists in the path: {:?}",
+                                                path
+                                            ),
+                                        )),
+                                        ..Default::default()
+                                    })
+                                    .map(|s| {
+                                        s.to_str().ok_or(HttpRequestError {
+                                            status_code: 400,
+                                            status_text: "Bad Request".into(),
+                                            message: "Invalid request target".to_string().into(),
+                                            content_type: "text/html".to_string().into(),
+                                            internals: Some(Box::<dyn Error + Send + Sync>::from(
+                                                format!("Could not convert the path as valid UTF-8 string: {:?}", path)
+                                            )),
+                                            ..Default::default()
+                                        })
+                                    })??;
+
+                                if (path.starts_with(dir) && filename == dir)
                                     || path.starts_with(dir)
                                 {
                                     // Case of: /pages/pages.html not prefixing
@@ -248,9 +326,7 @@ impl<'a> HttpRequest<'a> {
                             None => public.join(path),
                         };
 
-                        if path.exists() {
-                            return Ok(path);
-                        }
+                        path
                     }
                     None => {
                         // Treat it as a directory
@@ -262,42 +338,58 @@ impl<'a> HttpRequest<'a> {
                         // What happens: /dir => /pages/dir/index.html
                         let path = public.join("pages").join(path.join("index.html"));
 
-                        if let Ok(exists) = path.try_exists() {
-                            if exists {
-                                return Ok(path);
-                            }
-                        }
+                        path
                     }
                 };
 
-                return Err(HttpRequestError::default());
+                match path.try_exists() {
+                    Ok(true) if path.starts_with(public) => Ok(path),
+                    _ => Err(HttpRequestError {
+                        status_code: 400,
+                        status_text: "Bad Request".into(),
+                        message: "Invalid request target".to_string().into(),
+                        internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                            "Path does not start with the public directory : {:?}",
+                            path
+                        ))),
+                        ..Default::default()
+                    }),
+                }
             }
             Err(err) => {
-                eprintln!("Could not decode the path as UTF-8: {}", err);
-
                 return Err(HttpRequestError {
                     status_code: 400,
                     status_text: "Bad Request".into(),
+                    internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                        "Could not decode the path as UTF-8: {}",
+                        err
+                    ))),
                     ..Default::default()
                 });
             }
         }
     }
 
+    /// Returns Iterator over the query parameters of the request target, presumably percent-encoded.
+    pub fn get_request_target_query(&self) -> url::form_urlencoded::Parse<'_> {
+        self.headers.get_request_target().query_pairs()
+    }
+
     /// Returns path of the requested resource without resolving "/" to "index.html"
     ///
     /// Decoding the percent-encoded path to UTF-8
-    // NOTE: Consider making it eagerly unwrapped as this is critical for request to continue
-    pub fn get_request_target(&self) -> Result<Cow<'_, str>, Utf8Error> {
-        percent_encoding::percent_decode(
-            self.headers
-                .get_request_target()
-                .path()
-                // TODO: Think about improving the error handling there
-                // .expect("Invalid request target, does not follow a scheme of a path.")
-                .as_bytes(),
-        )
-        .decode_utf8()
+    pub fn get_request_target_path(&self) -> Result<Cow<'_, str>, Box<dyn Error + Send + Sync>> {
+        let decoded =
+            percent_encoding::percent_decode_str(self.headers.get_request_target().path())
+                .decode_utf8()?;
+
+        // That would validate the decoded port of the path of the URL, leaving query parameters untouched.
+        // This create an ambiguity as it would invalidate slashes given as literal, in percent encoded form,
+        // maybe we should opt out of that behavior as that would make some path names invalid
+        // that contain the encoded slash, which they are technically valid.
+        // HttpRequestHeaders::validate_request_target(decoded.to_string())?;
+
+        Ok(decoded)
     }
 
     /// Takes Response `HttpHeaders` and write `Content-Type` and `Content-Length` headers, returning the requested resource as a String
@@ -312,7 +404,16 @@ impl<'a> HttpRequest<'a> {
 
         let relative_path = resource_path
             .strip_prefix(Config::get_server_public())
-            .expect("Server public directory is not a prefix of the requested resource")
+            .map_err(|e| HttpRequestError {
+                status_code: 400,
+                status_text: "Bad Request".into(),
+                message: "Invalid request target".to_string().into(),
+                internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                    "Path does not start with the public directory: {:?} | {:?}",
+                    resource_path, e
+                ))),
+                ..Default::default()
+            })?
             // clone there
             .to_owned();
 
@@ -418,7 +519,8 @@ impl<'a> HttpRequest<'a> {
     pub async fn redirect_request(
         &self,
         config: &MutexGuard<'_, Config>,
-        stream: &mut MutexGuard<'_, OwnedWriteHalf>,
+        // writer: &mut OwnedWriteHalf,
+        writer: &mut MutexGuard<'_, OwnedWriteHalf>,
         path: &Cow<'_, str>,
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         // NOTE: Indentation in this function are f'ed up, should be fixed
@@ -471,7 +573,7 @@ impl<'a> HttpRequest<'a> {
 
                         let mut response: HttpResponse<'_> = HttpResponse::new(headers, None);
 
-                        response.write(config, stream).await?;
+                        response.write(config, writer).await?;
 
                         return Ok(true);
                     }

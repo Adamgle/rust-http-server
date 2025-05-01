@@ -164,7 +164,7 @@ ISSUES
     -> NOTE: It happens every single request after a sufficient period, Wireshark shows [TCP keep-alive] AND [TCP Dup ACK]
     -> which I think should imply something about the issue
     \\ UPDATE => That's keep-alive packet, currently it does not create an issue in any way, shape or form.
-15. Paths like this "http://localhost:5000/////////////////////////////////////////////////" works and resolves to "http://localhost:5000/"
+15. <RESOLVED> Paths like this "http://localhost:5000/////////////////////////////////////////////////" works and resolves to "http://localhost:5000/"
 16. Detect when `run_benchmark` did crash so to not write it to `benchmark.log`
 17. <RESOLVED> Issues related to Database
     -> Current design requires that `DatabaseWAL` have access to Database as it have to invoke Database methods of insert, delete, etc., which does not happen.
@@ -207,6 +207,10 @@ ISSUES
     -> Error sending error response: A request to send or receive data was disallowed because the socket had already 
     -> been shut down in that direction with a previous shutdown call. (os error 10058)
     -> Error while responding: Os { code: 10054, kind: ConnectionReset, message: "An existing connection was forcibly closed by the remote host." }
+19. There is a way to inject a "/" in the path, just need to percent encode it in the URL. We should treat percent encoded slashes
+    -> as literals, otherwise, it could allow file system traversal. It is not an issue with the consecutive slashes check in `get_request_target`
+    -> the issue could occur when we decode the URL and parse it to `Path`. Maybe we should never convert to `Path` and do the logic 
+    -> on some abstracted interfaces via `url` crate. Look up the `url::Url::make_relative`.
 
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,
