@@ -13,13 +13,36 @@ const buildUrl = (root, path) => {
 
 const DATABASE_URL = buildUrl(SERVER_ROOT, DATABASE_ROOT);
 
-const DATABASE_TASKS_URL = buildUrl(DATABASE_URL, "database/tasks.json");
+const DATABASE_TASKS_PATH = buildUrl(DATABASE_URL, "database/tasks.json");
 
 const buildTaskElement = (value, id) => {
+  const task_container = document.createElement("div");
   const task = document.createElement("div");
+  const deleteButton = document.createElement("button");
+
   task.classList.add("task");
   task.appendChild(document.createTextNode(value));
   task.setAttribute("id", id);
+
+  task.addEventListener("click", async (e) => {
+    e.preventDefault();
+
+    const res = await fetch(DATABASE_TASKS_PATH, {
+      method: "DELETE",
+      // mode: "cors",
+      body: JSON.stringify({ id }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (res.status === 200) {
+    }
+  });
+
+  [deleteButton, task].forEach((el) => {
+    task_container.appendChild(el);
+  });
 
   return task;
 };
@@ -43,6 +66,7 @@ const addTask = async (formData) => {
   // const header = document.querySelector(".header-content");
 
   const task = buildTaskElement(taskValue, taskObject.id);
+
   task.value = taskValue;
   tasks.appendChild(task);
 
@@ -53,7 +77,7 @@ const addTask = async (formData) => {
   const errorContainer = document.getElementById("error-div");
 
   // Add task to database
-  const res = await fetch(DATABASE_TASKS_URL, {
+  const res = await fetch(DATABASE_TASKS_PATH, {
     method: "POST",
     mode: "cors",
     headers: {
@@ -73,10 +97,15 @@ const addTask = async (formData) => {
   return taskObject;
 };
 
+const addUser = async (formData) => {
+  const { email, password } = Object.fromEntries(formData.entries());
+  console.log(email, password);
+};
+
 async function getTasks() {
   const tasks = document.querySelector("#tasks");
 
-  const res = await fetch(DATABASE_TASKS_URL, {
+  const res = await fetch(DATABASE_TASKS_PATH, {
     method: "GET",
     mode: "cors",
     headers: {
@@ -104,6 +133,7 @@ async function getTasks() {
 
 async function main() {
   const taskForm = document.querySelector("#task-form");
+  const registerForm = document.querySelector("#register-form");
 
   await getTasks();
 
@@ -113,6 +143,18 @@ async function main() {
     const data = new FormData(taskForm, submitter);
 
     await addTask(data);
+
+    return null;
+  });
+
+  registerForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const submitter = document.querySelector(
+      "#register-form button[type=submit]"
+    );
+    const data = new FormData(registerForm, submitter);
+
+    await addUser(data);
 
     return null;
   });

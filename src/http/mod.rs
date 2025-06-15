@@ -1,9 +1,12 @@
 pub mod http_request;
 pub mod http_response;
 
+use crate::config::SpecialDirectories;
 use crate::prelude::*;
 use crate::{config::Config, http_response::HttpResponse};
 use serde::{Deserialize, Serialize};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::{borrow::Cow, collections::HashMap, error::Error, fmt::Display, str::FromStr};
 use tokio::{net::tcp::OwnedWriteHalf, sync::MutexGuard};
 // use crate::prelude::*;
@@ -136,6 +139,7 @@ impl<'a> HttpRequestRequestLine {
         // we have to do that as in the query part those symbols could not be considered invalid all the time,
         // for example if we want to sent query to search for something, we should not be limited
         // what we could search for.
+
         let path = request_target.split('?').next().unwrap_or(request_target);
         HttpRequestHeaders::validate_request_target_path(path.to_string())?;
 
@@ -194,7 +198,8 @@ pub enum HttpRequestMethod {
     GET,
     POST,
     DELETE,
-    UPDATE,
+    // PATCH and PUT will be equivalent to each other.
+    PATCH,
     PUT,
 }
 
@@ -306,6 +311,24 @@ impl From<HttpRequestError> for std::io::Error {
     }
 }
 
+#[derive(Debug)]
+/// Used as a sentinel to indicate to control the flow of the request handling.
+/// When request gets redirected, the response is sent to the client,
+/// the previous writer is shutdown and the request handling is stopped via error propagation.
+///
+pub struct RequestRedirected;
+
+impl std::fmt::Display for RequestRedirected {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "Request was redirected and response was sent, writer was shutdown."
+        )
+    }
+}
+
+impl std::error::Error for RequestRedirected {}
+
 impl HttpRequestError {
     /// NOTE: Can log anything that implements `std::fmt::Display`
     ///
@@ -374,6 +397,10 @@ impl HttpRequestError {
 
             let mut response = HttpResponse::new(headers, Some(body));
             return response.write(&config, &mut writer).await;
+        } else if let Some(sentinel_redirection) = err.as_ref().downcast_ref::<RequestRedirected>()
+        {
+            eprintln!("Sentinel redirection: {}", sentinel_redirection);
+            return Ok(());
         } else {
             // Sending text/plain as the error message if the error is not of the HttpRequestError type
             eprintln!("Error while responding: {:#?}", err);
@@ -411,7 +438,7 @@ impl FromStr for HttpRequestMethod {
             "GET" => Ok(HttpRequestMethod::GET),
             "POST" => Ok(HttpRequestMethod::POST),
             "DELETE" => Ok(HttpRequestMethod::DELETE),
-            "UPDATE" => Ok(HttpRequestMethod::UPDATE),
+            "PATCH" => Ok(HttpRequestMethod::PATCH),
             "PUT" => Ok(HttpRequestMethod::PUT),
             _ => Err(HttpRequestError {
                 status_code: 501,
@@ -562,6 +589,163 @@ impl<'a> HttpRequestHeaders<'a> {
 
     pub fn get_request_target(&self) -> &url::Url {
         self.get_request_line().get_request_target()
+    }
+
+    // `NOTE`: That method is also hoisted to `HttpRequest`
+    pub fn get_request_target_path(&self) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+        let path = self.get_request_target().path();
+        let path = match path.strip_prefix("/") {
+            // Case of the root requested: "/"
+            // Some(stripped_path) if stripped_path.is_empty() => path,
+            Some(stripped_path) => stripped_path,
+            None => path,
+        };
+
+        let decoded = percent_encoding::percent_decode_str(path).decode_utf8()?;
+
+        // That would validate the decoded port of the path of the URL, leaving query parameters untouched.
+        // This create an ambiguity as it would invalidate slashes given as literal, in percent encoded form,
+        // maybe we should opt out of that behavior as that would make some path names invalid
+        // that contain the encoded slash, which they are technically valid.
+        // HttpRequestHeaders::validate_request_target(decoded.to_string())?;
+
+        // NOTE: That may a breaking change so need to watch it closely, currently in the path
+        // there is leading slash and I want to remove it. Maybe that will no broke anything as
+        // we either way removing that slash when reading the resource.
+
+        // I think we may safely convert it to path as that is not absolute path as it lacks the leading slash.
+        let mut path = PathBuf::from(decoded.as_ref());
+
+        // println!("path: {:?}", path);
+
+        if path != Path::new("/")
+            && (path.is_absolute()
+                || path.starts_with("/")
+                || path.starts_with("\\")
+                || path.has_root())
+        {
+            return Err(HttpRequestError {
+                status_code: 400,
+                status_text: "Bad Request".into(),
+                message: "Invalid request target".to_string().into(),
+                content_type: "text/html".to_string().into(),
+                internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                    "Request target path is absolute, but should be relative: {:?}",
+                    path
+                ))),
+                ..Default::default()
+            }
+            .into());
+        }
+
+        let path = match path.extension() {
+            Some(ext) => {
+                let dir_path = SpecialDirectories::resolve_path(ext).and_then(|f| {
+                    Some((
+                        f.clone(),
+                        PathBuf::from_str(f.as_str())
+                            .inspect_err(|f| {
+                                eprintln!(
+                                    "Could not convert the special directory to PathBuf: {}",
+                                    f
+                                );
+                            })
+                            .ok(),
+                    ))
+                });
+
+                match dir_path {
+                    Some((dir, Some(mut dir_path))) => {
+                        // Handle cases where the path is already prefixed with the directory
+                        // considering the filenames that are of the name of specialized directories
+
+                        // File stem is a portion of the file name before the last dot
+                        // Technically that file_prefix would be more appropriate but that is nightly only
+                        //
+                        // assert_eq!("foo", Path::new("foo.rs").file_stem().unwrap());
+                        // assert_eq!("foo.tar", Path::new("foo.tar.gz").file_stem().unwrap());
+
+                        let filename = path
+                            .file_stem()
+                            .ok_or(HttpRequestError {
+                                status_code: 400,
+                                status_text: "Bad Request".into(),
+                                message: "Invalid request target".to_string().into(),
+                                content_type: "text/html".to_string().into(),
+                                internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                                    "File stem does not exists in the path: {:?}",
+                                    path
+                                ))),
+                                ..Default::default()
+                            })
+                            .map(|s| {
+                                s.to_str().ok_or(HttpRequestError {
+                                    status_code: 400,
+                                    status_text: "Bad Request".into(),
+                                    message: "Invalid request target".to_string().into(),
+                                    content_type: "text/html".to_string().into(),
+                                    internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                                        "Could not convert the path as valid UTF-8 string: {:?}",
+                                        path
+                                    ))),
+                                    ..Default::default()
+                                })
+                            })??;
+
+                        if (path.starts_with(&dir) && filename == &dir) || path.starts_with(dir) {
+                            // Case of: /pages/pages.html not prefixing
+                            // Case of: /pages/...
+
+                            // Do not prefix that
+                            // public.join(path)
+                            path
+                        } else {
+                            // Things like: /pages.html are prefixing
+
+                            // Do prefix that
+
+                            dir_path.push(path);
+                            dir_path
+                            // &Path::new(&dir).join(path)
+                        }
+                    }
+                    // There is not specialized directory for the extension or parsing the extension to UTF-8 failed, do not care
+                    _ => path,
+                }
+            }
+            None => {
+                // Treat it as a directory
+                // If file extension does not fall into the mapping, we would lookup that in the directory, joining the path to the public directory
+                // and try to match an existing path. If the path does point to a file or has no extension, there is not way in current approach to detect
+                // it's format, we will throw an error in that case as we cannot know the format of the file and we cannot serve it.
+                // The same if the path points to a directory
+
+                // What happens: /dir => /pages/dir/index.html
+                // That also prefixes the root "/" to "/pages/index.html"
+                let mut dir = PathBuf::from(SpecialDirectories::Pages.to_string().as_str());
+
+                path.push("index.html");
+                dir.push(path.clone());
+
+                dir
+            }
+        };
+
+        // let path_str = path.to_str().ok_or(HttpRequestError {
+        //     status_code: 400,
+        //     status_text: "Bad Request".into(),
+        //     message: "Invalid request target".to_string().into(),
+        //     content_type: "text/html".to_string().into(),
+        //     internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+        //         "Could not convert the path as valid UTF-8 string: {:?}",
+        //         path
+        //     ))),
+        //     ..Default::default()
+        // })?;
+
+        // println!("Request target path: {:?}", path);
+
+        return Ok(path);
     }
 
     pub fn get_request_protocol(&self) -> &HttpProtocol {

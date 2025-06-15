@@ -165,7 +165,7 @@ ISSUES
     -> which I think should imply something about the issue
     \\ UPDATE => That's keep-alive packet, currently it does not create an issue in any way, shape or form.
 15. <RESOLVED> Paths like this "http://localhost:5000/////////////////////////////////////////////////" works and resolves to "http://localhost:5000/"
-16. Detect when `run_benchmark` did crash so to not write it to `benchmark.log`
+16. <N/A> Detect when `run_benchmark` did crash so to not write it to `benchmark.log`
 17. <RESOLVED> Issues related to Database
     -> Current design requires that `DatabaseWAL` have access to Database as it have to invoke Database methods of insert, delete, etc., which does not happen.
     -> `DatabaseType` does not connect to a `Schema`, which is an issue, because we want to write to Database of specific type a specific entry
@@ -207,11 +207,16 @@ ISSUES
     -> Error sending error response: A request to send or receive data was disallowed because the socket had already 
     -> been shut down in that direction with a previous shutdown call. (os error 10058)
     -> Error while responding: Os { code: 10054, kind: ConnectionReset, message: "An existing connection was forcibly closed by the remote host." }
-19. There is a way to inject a "/" in the path, just need to percent encode it in the URL. We should treat percent encoded slashes
+        => UPDATE: I forgot when this occurs
+19. <RESOLVED> There is a way to inject a "/" in the path, just need to percent encode it in the URL. We should treat percent encoded slashes
     -> as literals, otherwise, it could allow file system traversal. It is not an issue with the consecutive slashes check in `get_request_target`
     -> the issue could occur when we decode the URL and parse it to `Path`. Maybe we should never convert to `Path` and do the logic 
     -> on some abstracted interfaces via `url` crate. Look up the `url::Url::make_relative`.
-
+20. There may be an issue related to how router is made, it uses String as paths given in the URL from the client, that may lose some information if 
+    => the path is not valid UTF-8, the problem is also applicable of how we walk the directories in SpecialDirectories::walk_dir, because we will be using
+    => the data that is given to us in the handle_client, that would means that we are working already on that UTF-8 decoded String. Currently if string is not 
+    => valid UTF-8 we are throwing an error in the HttpRequestHeaders::get_request_target_path and of course in it's alias HttpRequest::get_request_target_path.
+    => I don't think we will refactor that, we will just keep the server UTF-8 compliant.
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,
     -> or abort them early, just for debugging purposes.
@@ -233,10 +238,8 @@ We will make a stateful todo-app with a static file as a database.
         1. We could add functionality of sending files via http, like files with default request or images that lays on the server
         2. We will use json file as a database
         3. We could sent css spreadsheets via http request
-        4. Database could be secured <PREMIUM IDEA>
-
-
-CURRENT STATE OF APP:
--> Completely f'ed up, don't even know what next to do, what to fix, everything to fix, nothing can be fixed.
-    -> We will try thought.
-    -> UPDATE: Now that is partially true, probably will stay that way.
+        4. Database could be secured <PREMIUM IDEA> => "Secured" database would imply the security layer on making a request that utilizes
+            => database. That is usually done by making an distinct account for a user that will hold it's own token that enables him
+            => to utilize API.
+            -> 4.1. We will make dummy users to accomplish that. We will store users in users.json file, make dummy account consisting of
+                emails, password, and generated API token.  

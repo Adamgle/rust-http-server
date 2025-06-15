@@ -27,16 +27,6 @@ impl<'a> HttpResponse<'a> {
         }
     }
 
-    /// Initializes HttpResponseHeaders with start line, providing default value for headers field with `HashMap::<&str, Cow<str>>::new()`
-    /// Start line is initialized with `HTTP/1.1 200 OK` status code and status text,
-    /// custom start line as an argument to the function.
-    // pub fn new_headers(start_line: Option<HttpResponseStartLine<'a>>) -> HttpResponseHeaders<'a> {
-    //     HttpResponseHeaders::new(match start_line {
-    //         Some(start_line) => Some(start_line),
-    //         None => HttpResponseStartLine::new(HttpProtocol::HTTP1_1, 200, "Ok").into(),
-    //     })
-    // }
-
     /// Parses headers field from HashMap<String, String> and body to Vec<u8>
     ///
     /// This could return an error when data is semantically incorrect
@@ -72,13 +62,7 @@ impl<'a> HttpResponse<'a> {
         let mut response = Vec::<u8>::with_capacity(content_length);
 
         // start-line serialization
-        response.extend(
-            self.headers
-                .get_start_line()
-                .to_string()
-                .as_bytes()
-                .to_vec(),
-        );
+        response.extend(self.headers.get_start_line().to_string().as_bytes());
 
         // Write line with key-value pair structuring a header
         for (key, value) in self.headers.iter() {
@@ -94,6 +78,7 @@ impl<'a> HttpResponse<'a> {
         Ok(response)
     }
 
+    /// `NOTE`: Internally check for writer being writable.
     pub async fn write(
         &mut self,
         config: &MutexGuard<'_, Config>,

@@ -113,8 +113,8 @@ def send_custom(
 
     response_timestamps: Optional[List[float]] = kwargs.get("response_timestamps", None)
     path = quote(path)
-
     match request:
+
         case HttpMethod.POST:
             if payload and kwargs.get("id") is None:
                 uid = uuid.uuid4()
@@ -166,6 +166,7 @@ def send_custom(
                 print(f"Socket error: {e}")
                 return "500"
 
+    print(headers)
     response = create_socket(headers)
 
     if response:
@@ -413,18 +414,18 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
 def main():
     send_custom(
-        request=HttpMethod.POST,
-        path="/database/tasks.json",
-        payload="test",
-        # host="localhost",
+        # request=HttpMethod.GET,
+        # path="/",
+        # payload="test",
+        host="127.0.0.1",
     )
-    
+
     # run_benchmark(
     #     callback=functools.partial(
     #         run_multithreaded,
     #         callback=send_custom,
-    #         threads_count=1000,
-    #         requests_count=100_00,
+    #         threads_count=10,
+    #         requests_count=100,
     #         payload="test",
     #     ),
     #     request=HttpMethod.POST,

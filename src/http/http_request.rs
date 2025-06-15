@@ -1,12 +1,12 @@
 use crate::config::Config;
-use crate::http::HttpResponseHeaders;
+use crate::http::{HttpResponseHeaders, RequestRedirected};
 
 use std::borrow::Cow;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::time::timeout;
 
@@ -32,21 +32,29 @@ impl<'a> std::fmt::Display for HttpRequest<'a> {
     }
 }
 impl<'a> HttpRequest<'a> {
-    // Creates new HttpRequest instance from TcpStream, reads the stream to UTF-8 String and parses the headers
+    /// Creates new HttpRequest instance from TcpStream, reads the stream to UTF-8 String and parses the headers
+    ///
+    /// `NOTE`: This could return an error if the request was redirect of: `"Request was redirected, writer was shutdown"`
     pub async fn new(
         config: &MutexGuard<'_, Config>,
         stream: &mut OwnedReadHalf,
+        writer: &mut MutexGuard<'_, OwnedWriteHalf>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        // Parse the TCP stream
-
-        Ok(Self::parse_request(config, stream).await?)
+        Ok(Self::parse_request(config, stream, writer).await?)
     }
 
-    /// Parses http request from the TcpStream
+    /// Parses to HTTP/1.1 from the TcpStream, relying on Content-Length headers, no chunked transfer encoding
+    /// is supported. It will read the stream and allocate as much as Content-Length header specifies.
     async fn parse_request(
         config: &MutexGuard<'_, Config>,
         stream: &mut OwnedReadHalf,
+        writer: &mut MutexGuard<'_, OwnedWriteHalf>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        // TODO: There is still and issue with the TCP-Keep-Alive packets, currently they are non-blocking,
+        // and quickly aborted by the timeout or by the irruption from another task.
+
+        // NOTE: There could be a potential buffer overflow here, if the request is too large for server to handle.
+
         // Could be None if TcpStream is not valid HTTP message.
         let mut headers: Option<HttpRequestHeaders> = None;
 
@@ -60,43 +68,26 @@ impl<'a> HttpRequest<'a> {
         let reader = BufReader::new(stream);
         let mut lines = reader.lines();
 
+        let mut host_validated = false;
+
         while let Some(line) = lines.next_line().await.inspect_err(|e| {
             eprintln!("Error reading line from the stream: {}", e);
         })? {
             if line.is_empty() {
-                match headers.as_ref() {
-                    Some(headers) => {
-                        if let Some(host) = headers.get("Host") {
-                            let domain = &config.config_file.domain;
-                            let port = Config::get_server_port();
-
-                            if host.to_string() == format!("{}:{}", domain, port) {
-                                break;
-                            } else {
-                                return Err(Box::from(HttpRequestError {
-                                    status_code: 400,
-                                    status_text: "Bad Request".into(),
-                                    message: "Invalid request".to_string().into(),
-                                    internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
-                                        "Invalid Host header: {}",
-                                        host
-                                    ))),
-                                    ..Default::default()
-                                }));
-                            }
-                        }
-                    }
-                    _ => {
-                        return Err(Box::from(HttpRequestError {
-                            status_code: 400,
-                            status_text: "Bad Request".into(),
-                            message: "Invalid request".to_string().into(),
-                            internals: Some(Box::<dyn Error + Send + Sync>::from(
-                                "Empty line before headers",
-                            )),
-                            ..Default::default()
-                        }));
-                    }
+                if headers.is_some() {
+                    // Empty line means end of headers
+                    break;
+                } else {
+                    // If headers are not initialized, that means we have not read the request line yet
+                    return Err(Box::from(HttpRequestError {
+                        status_code: 400,
+                        status_text: "Bad Request".into(),
+                        message: "Invalid request".to_string().into(),
+                        internals: Some(Box::<dyn Error + Send + Sync>::from(
+                            "Empty line in the request before reading the request line.",
+                        )),
+                        ..Default::default()
+                    }));
                 }
             } else if headers.is_none() {
                 // First line is request line
@@ -120,10 +111,90 @@ impl<'a> HttpRequest<'a> {
                     })?
                     .add_header_line(line);
             }
+
+            // Look for Host header, to validate it's correctness, try to redirect the request
+            if let Some((headers, Some(host))) = headers.as_ref().map(|h| (h, h.get("Host"))) {
+                // If the Host header is not present, we will not redirect the request
+                // First try to redirect the request if the Host header is present
+                // We are doing it first as we would fall in the endless loop if we would check for host
+                // header being wrong, then redirecting to the other host header which could also end up wrong
+                // and so on. This approach is correct under the assumption that we will redirect to the valid domain
+                // given in the configuration file.
+
+                // Someday we could if we would want to support redirection to multiple domains
+                // `redirect_request` would have to either return a iterator over the domains to redirect to
+                // and if something matches that we would just redirect to that one, or we could do that based on the geolocation
+                // of the user location to redirect to the closest domain
+
+                match host_validated {
+                    true => {
+                        // Host header was already validated, do not validate it again
+
+                        let domain = &config.config_file.domain;
+                        let port = Config::get_server_port();
+
+                        if host.to_string() != format!("{}:{}", domain, port) {
+                            return Err(Box::from(HttpRequestError {
+                                status_code: 400,
+                                status_text: "Bad Request".into(),
+                                message: "Invalid request".to_string().into(),
+                                internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                                    "Invalid Host header: {}",
+                                    host
+                                ))),
+                                ..Default::default()
+                            }));
+                        }
+                    }
+                    false => {
+                        // Validate the Host header against the configuration file
+                        // First =>  run the redirection logic to check if we should redirect early
+                        // that would work for any redirection that is configured and is done while
+                        // first processing the request
+                        // Second => validate the Host header against the configured domain
+                        // If the Host header is not valid, we will return an error
+                        // Third => If the Host header is valid, we will continue processing the request
+
+                        // If the host is not valid, return an error
+                        // If the host is valid, continue processing the request
+
+                        // The redirection logic may seem ambiguous, because we are doing it before
+                        // validating the domain, but either way we would have to do it, so we have to run it
+                        // before the Host header validation to not just return an error if it is invalid
+                        // but also redirect if we should. But really the order of the checks does not matter.
+
+                        let is_redirected = Self::redirect_request(
+                            config,
+                            &headers,
+                            writer,
+                            &headers.get_request_target_path()?,
+                        )
+                        .await?;
+
+                        if is_redirected {
+                            // The only way we want to pass the information about the redirection without explicitly sending some flag
+                            // that it was redirected is to return error from the function as it would propagate up the call stack
+                            // the propagation would end the request that was redirected and the writer was already utilized to write the response,
+                            // any checks about reading the requested resource would be pointless or could be malicious as we would operate on the invalid Host header
+
+                            // To make sure the previous request will be surely aborted and even if we forget
+                            // about the error propagation, we will still be unable to use the previous request
+                            // by closing also the reader portion of the stream.
+                            // Writer is being closed in the `redirect_request` function, so we do not have to worry about that.
+                            // UPDATE: We cant close the reading portion of the stream as that is not specified in TCP.
+
+                            // Send a sentinel error to indicate that the request was redirected
+                            return Err(Box::from(RequestRedirected));
+                        }
+
+                        host_validated = true;
+                    }
+                }
+            }
         }
 
         // Read the rest of the stream, if any
-        // Body of the request will only be present if the request method is POST, PUT, UPDATE/PATCH
+        // Body of the request will only be present if the request method is POST, PUT, PATCH
         // and when the Content-Length header is present in the headers
 
         let mut body_buffer: Option<Vec<u8>> = None;
@@ -221,27 +292,19 @@ impl<'a> HttpRequest<'a> {
 
                 let public = Config::get_server_public();
 
-                let path = path.to_string();
-
-                // NOTE: Error handling should be done here
-                let path = Path::new(&path)
-                    .strip_prefix("/")
-                    .map_err(|e| HttpRequestError {
-                        status_code: 400,
-                        status_text: "Bad Request".into(),
-                        message: "Corrupted path".to_string().into(),
-                        internals: Some(Box::<dyn Error + Send + Sync>::from(e)),
-                        ..Default::default()
-                    })?;
-
-                // println!("Path after: {:?}", path);
-
                 // If that would be absolute and would join with the public directory path, it would create a new absolute path
                 // effectively allowing to traverse the file system of the server
 
                 // I do not know if that is stable enough, as windows has weird absolute path handling
 
-                if path.is_absolute() || (path.starts_with("/") && path.is_relative()) {
+                let path = PathBuf::from(path);
+
+                // NOTE: The second condition looks weird.
+                // On Windows, a path is absolute if it has a prefix and starts with the root: c:\windows is absolute, while c:temp and !!! \temp !!! are not.
+
+                if path.is_absolute()
+                    || ((path.starts_with("/") || path.starts_with("\\")) && path.is_relative())
+                {
                     eprintln!("Path is absolute, not allowed: {:?}", path);
                     return Err(HttpRequestError {
                         status_code: 400,
@@ -254,91 +317,101 @@ impl<'a> HttpRequest<'a> {
 
                 // Routing to /pages, /styles, /client is undefined behavior, as those paths are not accessible by the client directly
 
-                let path = match path.extension() {
-                    Some(ext) => {
-                        let dir = ext
-                            .to_str()
-                            .map(|ext| match ext {
-                                // NOTE: pages, styles, and client should not be String, enum for those should be declared
-                                "html" => Some("pages"),
-                                "css" => Some("styles"),
-                                "js" => Some("client"),
-                                _ => None,
-                            })
-                            .flatten();
+                // return (path, resolved_path);
+                // let path = public.join(path);
 
-                        let path = match dir {
-                            Some(dir) => {
-                                // Handle cases where the path is already prefixed with the directory
-                                // considering the filenames that are of the name of specialized directories
+                // let path = match path.extension() {
+                //     Some(ext) => {
+                //         let dir = ext
+                //             .to_str()
+                //             .map(|ext| match ext {
+                //                 // NOTE: pages, styles, and client should not be String, enum for those should be declared
+                //                 "html" => Some("pages"),
+                //                 "css" => Some("styles"),
+                //                 "js" => Some("client"),
+                //                 _ => None,
+                //             })
+                //             .flatten();
 
-                                // File stem is a portion of the file name before the last dot
-                                // Technically that file_prefix would be more appropriate but that is nightly only
-                                //
-                                // assert_eq!("foo", Path::new("foo.rs").file_stem().unwrap());
-                                // assert_eq!("foo.tar", Path::new("foo.tar.gz").file_stem().unwrap());
+                //         let path: PathBuf = match dir {
+                //             Some(dir) => {
+                //                 // Handle cases where the path is already prefixed with the directory
+                //                 // considering the filenames that are of the name of specialized directories
 
-                                let filename = path
-                                    .file_stem()
-                                    .ok_or(HttpRequestError {
-                                        status_code: 400,
-                                        status_text: "Bad Request".into(),
-                                        message: "Invalid request target".to_string().into(),
-                                        content_type: "text/html".to_string().into(),
-                                        internals: Some(Box::<dyn Error + Send + Sync>::from(
-                                            format!(
-                                                "File stem does not exists in the path: {:?}",
-                                                path
-                                            ),
-                                        )),
-                                        ..Default::default()
-                                    })
-                                    .map(|s| {
-                                        s.to_str().ok_or(HttpRequestError {
-                                            status_code: 400,
-                                            status_text: "Bad Request".into(),
-                                            message: "Invalid request target".to_string().into(),
-                                            content_type: "text/html".to_string().into(),
-                                            internals: Some(Box::<dyn Error + Send + Sync>::from(
-                                                format!("Could not convert the path as valid UTF-8 string: {:?}", path)
-                                            )),
-                                            ..Default::default()
-                                        })
-                                    })??;
+                //                 // File stem is a portion of the file name before the last dot
+                //                 // Technically that file_prefix would be more appropriate but that is nightly only
+                //                 //
+                //                 // assert_eq!("foo", Path::new("foo.rs").file_stem().unwrap());
+                //                 // assert_eq!("foo.tar", Path::new("foo.tar.gz").file_stem().unwrap());
 
-                                if (path.starts_with(dir) && filename == dir)
-                                    || path.starts_with(dir)
-                                {
-                                    // Case of: /pages/pages.html not prefixing
-                                    // Case of: /pages/...
+                //                 let filename = path
+                //                     .file_stem()
+                //                     .ok_or(HttpRequestError {
+                //                         status_code: 400,
+                //                         status_text: "Bad Request".into(),
+                //                         message: "Invalid request target".to_string().into(),
+                //                         content_type: "text/html".to_string().into(),
+                //                         internals: Some(Box::<dyn Error + Send + Sync>::from(
+                //                             format!(
+                //                                 "File stem does not exists in the path: {:?}",
+                //                                 path
+                //                             ),
+                //                         )),
+                //                         ..Default::default()
+                //                     })
+                //                     .map(|s| {
+                //                         s.to_str().ok_or(HttpRequestError {
+                //                             status_code: 400,
+                //                             status_text: "Bad Request".into(),
+                //                             message: "Invalid request target".to_string().into(),
+                //                             content_type: "text/html".to_string().into(),
+                //                             internals: Some(Box::<dyn Error + Send + Sync>::from(
+                //                                 format!("Could not convert the path as valid UTF-8 string: {:?}", path)
+                //                             )),
+                //                             ..Default::default()
+                //                         })
+                //                     })??;
 
-                                    // Do not prefix that
-                                    public.join(path)
-                                } else {
-                                    // Things like: /pages.html are prefixing
+                //                 if (path.starts_with(dir) && filename == dir)
+                //                     || path.starts_with(dir)
+                //                 {
+                //                     // Case of: /pages/pages.html not prefixing
+                //                     // Case of: /pages/...
 
-                                    // Do prefix that
-                                    public.join(dir).join(path)
-                                }
-                            }
-                            // There is not specialized directory for the extension or parsing the extension to UTF-8 failed, do not care
-                            None => public.join(path),
-                        };
+                //                     // Do not prefix that
+                //                     public.join(path)
+                //                 } else {
+                //                     // Things like: /pages.html are prefixing
 
-                        path
-                    }
-                    None => {
-                        // Treat it as a directory
-                        // If file extension does not fall into the mapping, we would just traverse the directory, joining the path to the public directory
-                        // and try to match an existing path. If the path does point to a file or has no extension, there is not way in current approach to detect
-                        // it's format, we will throw an error in that case as we cannot know the format of the file and we cannot serve it.
-                        // The same if the path points to a directory
+                //                     // Do prefix that
+                //                     public.join(dir).join(path)
+                //                 }
+                //             }
+                //             // There is not specialized directory for the extension or parsing the extension to UTF-8 failed, do not care
+                //             None => public.join(path),
+                //         };
 
-                        // What happens: /dir => /pages/dir/index.html
-                        let path = public.join("pages").join(path.join("index.html"));
+                //         path
+                //     }
+                //     None => {
+                //         // Treat it as a directory
+                //         // If file extension does not fall into the mapping, we would lookup that in the directory, joining the path to the public directory
+                //         // and try to match an existing path. If the path does point to a file or has no extension, there is not way in current approach to detect
+                //         // it's format, we will throw an error in that case as we cannot know the format of the file and we cannot serve it.
+                //         // The same if the path points to a directory
 
-                        path
-                    }
+                //         // What happens: /dir => /pages/dir/index.html
+                //         // That also prefixes the root "/" to "/pages/index.html"
+                //         let path = public.join("pages").join(path.join("index.html"));
+
+                //         path
+                //     }
+                // };
+
+                let path = if path.is_relative() {
+                    public.join(path)
+                } else {
+                    path
                 };
 
                 match path.try_exists() {
@@ -374,23 +447,13 @@ impl<'a> HttpRequest<'a> {
         self.headers.get_request_target().query_pairs()
     }
 
-    /// Returns path of the requested resource without resolving "/" to "index.html"
+    /// Wrapper around `HttpHeaders::get_request_target_path` just to hoist the logic into `HttpRequest` struct.
+    /// Returns path of the requested resource without resolving "/" to "pages/index.html"
     ///
     /// Decoding the percent-encoded path to UTF-8
-    pub fn get_request_target_path(&self) -> Result<Cow<'_, str>, Box<dyn Error + Send + Sync>> {
-        let decoded =
-            percent_encoding::percent_decode_str(self.headers.get_request_target().path())
-                .decode_utf8()?;
-
-        // That would validate the decoded port of the path of the URL, leaving query parameters untouched.
-        // This create an ambiguity as it would invalidate slashes given as literal, in percent encoded form,
-        // maybe we should opt out of that behavior as that would make some path names invalid
-        // that contain the encoded slash, which they are technically valid.
-        // HttpRequestHeaders::validate_request_target(decoded.to_string())?;
-
-        Ok(decoded)
+    pub fn get_request_target_path(&self) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+        self.headers.get_request_target_path()
     }
-
     /// Takes Response `HttpHeaders` and write `Content-Type` and `Content-Length` headers, returning the requested resource as a String
     ///
     /// Walks `/public` directory looking for path
@@ -447,6 +510,7 @@ impl<'a> HttpRequest<'a> {
                         .expect("Request target does not point to a file."),
                 );
 
+                // Shenanigans, foolishness
                 match actual_file.extension() {
                     Some(extension) => {
                         // NOTE: That is controversial string conversion
@@ -516,20 +580,20 @@ impl<'a> HttpRequest<'a> {
     ///
     /// Return bool indicating if the request was redirected
     pub async fn redirect_request(
-        &self,
+        // &self,
         config: &MutexGuard<'_, Config>,
-        // writer: &mut OwnedWriteHalf,
+        headers: &HttpRequestHeaders<'a>,
         writer: &mut MutexGuard<'_, OwnedWriteHalf>,
-        path: &Cow<'_, str>,
+        // writer: &mut MutexGuard<'_, OwnedWriteHalf>,
+        path: &PathBuf,
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         // NOTE: Indentation in this function are f'ed up, should be fixed
-        // NOTE: This function is very stupid, it iterates over HashMap instead using O(1) lookup
 
         // Redirection is done based on config file deps under redirect/domains declared
         // as the Vector of RedirectDomainEntry structs
 
         // for (key, value) in self.get_headers() {
-        if let Some(host) = self.headers.get("Host") {
+        if let Some(host) = headers.get("Host") {
             if let Some(Some(domains)) = config.config_file.redirect.as_ref().map(|r| &r.domains) {
                 // NOTE: That Would make sens if the domains would be a HashMap, domain.from would be key and domain.to a value
                 // although maybe we would want to have single domain redirect to multiple domains eg. based on location
@@ -550,20 +614,18 @@ impl<'a> HttpRequest<'a> {
                         let mut headers = HttpResponseHeaders::new(start_line);
 
                         // NOTE: What if domain is invalid and the path is invalid
-                        // then we would have to redirect both.
+                        // then we would have to redirect both. That is we need path variable to be passed
 
                         // NOTE: Macro for writing headers would be great
                         let mut location = config.config_file.domain_to_url(&domain.to)?;
 
-                        // NOTE: Headers should be refactored to separate structs for Response and Request,
-                        // as this ads the ambiguity of path segment to be None which is impossible
-                        // and cannot be set as an normal Type because in the Response headers it would be None
-                        // and in the given approach we always have to check for it to be Some
-                        // UPDATE: Not really, see todo.txt
+                        // Could be problems if the path is not valid UTF-8
+                        let path = path.to_string_lossy();
 
                         println!("Redirecting from: {} | {}", domain.from, path);
                         println!("Redirecting to: {} | {}", location, path);
-                        location.set_path(path);
+
+                        location.set_path(path.as_ref());
 
                         // NOTE: This as it happens can be relative, so we could try to make it relative someday
                         headers.add("Location".into(), location.to_string().into());
@@ -574,13 +636,12 @@ impl<'a> HttpRequest<'a> {
 
                         response.write(config, writer).await?;
 
+                        writer.shutdown().await?;
+
                         return Ok(true);
                     }
                 }
             }
-            // }
-            // To redirect based on paths, not the domain, you need to match appropriate header,
-            // than we will parse to url::Url and try to match the path to the one in the config file
             // _ => (),
         }
         // }

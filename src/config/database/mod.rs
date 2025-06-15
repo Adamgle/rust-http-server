@@ -1,8 +1,16 @@
 /*
     ### What started as a joke, remained one ###
-    NOTE: That was does purely for educational purposes, I would not recommend using this in production as it's file system based database and reinvented wheel (rectangular one).
+    NOTE: That was does purely for educational purposes, I would not recommend using this in production as it's a file system based database and reinvented wheel (rectangular one).
 */
 #![allow(non_snake_case)]
+
+// ### NOTES ###
+// This database is deeply flawed, as insertions are not done in O(1) append only time, since we have to parse the file to
+// add a new entry. Implementing the WAL file, which is append only, we could postpone that process, but that is not even the
+// biggest issue that is resolved, we still have to bring the data to memory, parse it and operate on it to insert new entries. That also
+// means that if we would want to select and entry we would have to flush the WAL file to the database file to provide stateful output.
+// It is easy to see that when database grows, the performance of the database would degrade.
+// #############
 
 // The problem with database is that it has it's tradeoffs with the possible implementations of it that I am seeing;
 // The main issue is that it is just a file which posses a lot of tradeoffs:
@@ -29,10 +37,15 @@
 // that would involve Arc<Mutex<T>>, also executing the commands on certain threshold or on system shutdown must be done on separate thread
 // so to avoid blocking the IO overhead, though the IO is async from tokio, thought don't sure if windows supports async IO
 
-use crate::config::{config_file::DatabaseConfigEntry, Config};
+pub mod collections;
+
+pub use crate::config::database::collections::{
+    DatabaseEntry, DatabaseEntryTrait, DatabaseTask, DatabaseUser,
+};
+
+pub use crate::config::{config_file::DatabaseConfigEntry, Config};
 use crate::prelude::*;
 use erased_serde::Deserializer;
-use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::Debug;
@@ -45,84 +58,6 @@ use tokio::{
     fs::File,
     io::{AsyncSeekExt, AsyncWriteExt},
 };
-
-pub trait DatabaseEntryTrait: Send + Sync + Debug + Any {
-    /// Converts the entry to the `Any` trait object, so it could be downcasted to the actual type.
-    fn as_any(&self) -> &dyn Any;
-
-    /// Serializes the entry to the JSON format, so it could be written to the file.
-    fn serialize(&self) -> serde_json::Value;
-
-    /// Value that is used as the "primary key" for the entry. This information is could also be embedded
-    /// in the entry itself. Every entry should have a unique id define in it's struct definition.
-    fn get_id(&self) -> String;
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct DatabaseTask {
-    value: String,
-    id: String,
-}
-
-impl DatabaseEntryTrait for DatabaseTask {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn serialize(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_default()
-    }
-
-    fn get_id(&self) -> String {
-        self.id.clone()
-    }
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct DatabaseUser {
-    name: String,
-    id: String,
-}
-
-// #[typetag::serde]
-impl DatabaseEntryTrait for DatabaseUser {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn serialize(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_default()
-    }
-
-    fn get_id(&self) -> String {
-        self.id.clone()
-    }
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
-struct DatabaseEntry(Vec<u8>);
-
-impl DatabaseEntry {
-    fn new(bytes: &impl AsRef<[u8]>) -> Self {
-        DatabaseEntry(bytes.as_ref().to_vec())
-    }
-
-    /// Deserializes the entry to the actually type behind the trait object of `DatabaseEntryTrait` defined with `Box<dyn DatabaseEntryTrait>`.
-    ///
-    /// `NOTE`: This function is `STATIC` and would require change in definition if new `DatabaseType` would be added.
-    fn parse(
-        &self,
-        d_type: DatabaseType,
-    ) -> Result<Box<dyn DatabaseEntryTrait>, Box<dyn Error + Send + Sync>> {
-        Ok(match d_type {
-            // I think there will be error because DatabaseUser and DatabaseTask declared macro of `typetag::serde`,
-            // so deserializer will expect the tag type which is not present as the data we are deserializing was not
-            // previously serialized, so was never tagged.
-            DatabaseType::Users => Box::new(serde_json::from_slice::<DatabaseUser>(&self.0)?),
-            DatabaseType::Tasks => Box::new(serde_json::from_slice::<DatabaseTask>(&self.0)?),
-        })
-    }
-}
 
 // bounds on generic parameters in type aliases are not enforced
 // this is a known limitation of the type checker that may be lifted in a future edition.
@@ -270,7 +205,9 @@ impl Database {
             // TODO: If Logger would be implemented I would want to log the result of that.
             match command {
                 DatabaseCommand::Insert(d_type, entry) => self._insert(&mut storage, entry, d_type),
-                DatabaseCommand::Update(d_type, entry) => self._update(&mut storage, entry, d_type),
+                DatabaseCommand::Update(d_type, id, entry) => {
+                    self._update(&mut storage, id, entry, d_type)
+                }
                 DatabaseCommand::Delete(d_type, id) => self._delete(&mut storage, id, d_type),
                 // Select and SelectAll are commands that cannot be buffered in the WAL file, invocation of those makes the WAL commands flushed
                 // to provide stateful output.
@@ -351,18 +288,28 @@ impl Database {
 
     pub async fn update(
         &mut self,
+        id: &(impl AsRef<[u8]> + std::fmt::Debug),
         entry: &(impl AsRef<[u8]> + std::fmt::Debug),
         d_type: DatabaseType,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.exec(DatabaseCommand::Update(d_type, DatabaseEntry::new(entry)))
-            .await
+        self.exec(DatabaseCommand::Update(
+            d_type,
+            String::from_utf8(id.as_ref().to_vec()).map_err(|_| "Id is not a valid UTF-8")?,
+            DatabaseEntry::new(entry),
+        ))
+        .await
     }
 
     pub async fn delete(
         &mut self,
         d_type: DatabaseType,
-        id: String,
+        id: &(impl AsRef<[u8]> + std::fmt::Debug),
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Id should come as a string, and what we get from the request is
+        // a Vec<u8>, we take the reference to that vector, and since it implements that
+        // trait we can use it as is and convert it to String.
+        let id = String::from_utf8(id.as_ref().to_vec()).map_err(|_| "Id is not a valid UTF-8")?;
+
         self.exec(DatabaseCommand::Delete(d_type, id)).await
     }
 
@@ -449,21 +396,22 @@ impl Database {
         Ok(())
     }
 
+    /// Replaces the entry given by the `id` with the new entry.
     /// update is the same as insert as we just overwriting the entry in the collection.
     fn _update(
         &self,
         storage: &mut HashMap<DatabaseType, DatabaseStorage<Box<dyn DatabaseEntryTrait>>>,
+        id: String,
         entry: DatabaseEntry,
         d_type: DatabaseType,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Retrieves the collection from the storage
         let collection = storage.get_mut(&d_type).unwrap();
 
-        // Serializes the Vec<u8> to the Box<dyn DatabaseEntryTrait>, tagging the type of the entry
-        // to allow the deserialization to the correct type.
+        // Serializes the Vec<u8> to the Box<dyn DatabaseEntryTrait>
         let entry = entry.parse(d_type)?;
 
-        let id = entry.get_id();
+        // let id = entry.get_id();
 
         if !collection.contains_key(&id) {
             return Err(format!("Entry with the provided id: {id} does not exists.").into());
@@ -513,7 +461,6 @@ impl DatabaseCollection {
         d_type: &DatabaseType,
     ) -> Result<Arc<Mutex<Self>>, Box<dyn Error + Send + Sync>> {
         Ok(Arc::new(Mutex::new(Self {
-            // WAL: Arc::clone(WAL),
             handler: Some(Self::open_database_file(config, &d_type).await?),
             d_type: d_type.clone(),
         })))
@@ -550,7 +497,7 @@ impl DatabaseCollection {
             .open(path)
             .await?;
 
-        // NOTE: This check is useless if the file was just created
+        // NOTE: This check is useless if the file was just created, but we can't know that without checking.
         if file.metadata().await?.len() == 0 {
             file.write(b"{}").await?;
             file.flush().await?;
@@ -647,7 +594,7 @@ impl DatabaseCollection {
 /// and allow to supply it's own database name instead using the one defined as an enum variant
 #[derive(
     Debug,
-    EnumIter,
+    // EnumIter,
     serde::Serialize,
     serde::Deserialize,
     strum_macros::Display,
@@ -656,6 +603,20 @@ impl DatabaseCollection {
     PartialEq,
     Hash,
 )]
+// If Tasks would be user specific, that would provide separation between users tasks, currently it just does not make any sense,
+// as everyone shares the same tasks.
+// QUESTION: How would database WAL look-like?
+// ANSWER: Currently DatabaseCommand just takes the collection type and entry, sometimes additionally the id for updates.
+//  => We would have to map also the id of the user that posted the content, then build a filename essentially as
+//  => the collection is just a file but suffix that with "-{user_id}", eg. "tasks-1234.json", that would be done
+//  => when we create the collection, currently we are creating collections when flushing the WAL file.
+//  => DatabaseCommand would look like: DatabaseCommand::Insert(DatabaseType, String, DatabaseEntry, Option<String>),
+//  => that is the easy version, would require many changes to the code, essentially even the constructor of the
+//  => DatabaseCollection would have to take the user id as an argument.
+//  => Given that when user is logged, his API key is carried over the requests, we could somehow utilize that.
+//  =>
+
+// #[serde(rename_all = "lowercase")]
 pub enum DatabaseType {
     Users,
     Tasks,
@@ -815,7 +776,7 @@ enum DatabaseCommand {
     /// Insert one entry to given DatabaseType with a new entry
     Insert(DatabaseType, DatabaseEntry),
     /// Update one entry to given DatabaseType with a new entry
-    Update(DatabaseType, DatabaseEntry),
+    Update(DatabaseType, String, DatabaseEntry),
     /// Delete one entry to given DatabaseType
     Delete(DatabaseType, String),
     // Select and SelectAll are commands that cannot be buffered in the WAL file,
@@ -831,7 +792,7 @@ impl DatabaseCommand {
     fn get_database_type(&self) -> &DatabaseType {
         use DatabaseCommand::*;
         match self {
-            Insert(dt, _) | Update(dt, _) | Delete(dt, _) | Select(dt, _) | SelectAll(dt) => dt,
+            Insert(dt, _) | Update(dt, _, _) | Delete(dt, _) | Select(dt, _) | SelectAll(dt) => dt,
         }
     }
 

@@ -1,11 +1,13 @@
 pub mod database;
 
 use crate::logger::Logger;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::ffi::OsStr;
 use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use strum::IntoEnumIterator;
 use tokio::sync::Mutex;
 
 use self::database::Database;
@@ -26,7 +28,6 @@ pub struct Config {
     /// Under development,
     /// `NOTE`: I think that should be removed from there, kind of shenanigans.
     /// `NOTE`: Waiting to be fixed        
-    // #[allow(dead_code)]
     pub database: Option<Arc<Mutex<Database>>>,
 }
 
@@ -88,6 +89,7 @@ pub mod config_file {
     // `index_path` and `protocol` are not optional because they are required for server to work
     // and they will be set to defaults if not supplied
     #[derive(serde::Deserialize, Debug, Clone)]
+    #[allow(non_snake_case)]
     pub struct DatabaseConfigEntry {
         /// `root` directory where paths are defined, relative to the server `/public`
         pub root: PathBuf,
@@ -102,6 +104,8 @@ pub mod config_file {
         pub database: Option<DatabaseConfigEntry>,
         pub redirect: Option<RedirectEntry>,
         pub protocol: ConfigHttpProtocol,
+        /// `TODO`: That should be renamed to `host` as that is host not domain, and any other fields using
+        /// word `domain` should be renamed to `host` as well
         pub domain: String,
     }
 
@@ -173,6 +177,104 @@ pub mod config_file {
     }
 }
 
+#[derive(strum_macros::Display, strum_macros::EnumIter)]
+#[strum(serialize_all = "lowercase")]
+pub enum SpecialDirectories {
+    /// If resource is requested, it will try to find it in the `public` directory
+    /// under `pages`, `{public}/pages`.
+    /// First, if the path contains `.html` extension it will look it up in the `pages` directory,
+    /// Second, if the path is requested without an extension, it will assume that directory is requested
+    /// and look it up in the `pages` directory, suffixing with `index.html`
+    /// Third, If none of the above is true, it will thrown an error.
+    Pages,
+    /// Directory related to static styles, any with `.css` extension will be looked up in that directory
+    /// under `public` directory.
+    Styles,
+    /// Directory related to static scripts, any with `.js` extension will be looked up in that directory.
+    /// under `public` directory.
+    Client, // ServerRoot, => We won't support this there as they are dynamic, defined base on information in the config files
+            // ServerPublic, => We won't support this there as they are dynamic, defined base on information in the config file
+            // ServerConfig, => We won't support this there as they are dynamic, defined base on information in the config file
+}
+
+impl SpecialDirectories {
+    /// Returns the path to the directory under `SERVER_PUBLIC` environment variable
+    pub fn get_path(&self) -> PathBuf {
+        let public = Config::get_server_public();
+
+        return public.join(self.to_string().to_lowercase());
+    }
+
+    /// Recursively walks through the directories and collects all files in the directory,
+    /// stripping the prefix of the `SERVER_PUBLIC` directory.
+    fn walk_dir(
+        path: &impl AsRef<Path>,
+        paths: &mut HashSet<PathBuf>,
+        prefix: &PathBuf,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if let Ok(entries) = std::fs::read_dir(path.as_ref()) {
+            for entry in entries.flatten() {
+                let file_type = entry.file_type()?;
+                if file_type.is_dir() {
+                    // If the entry is a directory, recursively walk through it
+                    let sub_path = entry.path();
+                    Self::walk_dir(&sub_path, paths, prefix)?;
+                } else if file_type.is_file() {
+                    // If the entry is a file, add it to the set of paths
+                    let file_path = entry.path();
+                    // println!("file_path: {:?} | prefix: {:?}", file_path, prefix);
+
+                    let file_path = file_path.strip_prefix(prefix).inspect_err(|e| {
+                        eprintln!("File not under public directory: {:?}", e);
+                    })?;
+
+                    // println!("Path collected: {:?}", file_path);
+
+                    // Insert the file path into the set, converting it to PathBuf
+                    paths.insert(PathBuf::from(file_path));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// This functions Vector of paths, relative to the `SERVER_PUBLIC` directory,
+    /// that are available for the user to request.
+    ///
+    /// Any file under SpecialDirectories can be requested by the user with authentication,
+    /// with a GET method.
+    ///
+    /// NOTE: Normally that kind of functionality would be statically generated at build time,
+    /// because now we have to walk through the directories every time we are making a request.
+    /// That may diminish the performance of the server. We could implement a caching mechanism though,
+    /// but then if in dev time you add a new path, you would have to restart the server to see the changes.
+    /// Or we could just implement that as that is not so hard to do, some kind of file that will be created
+    /// at build time.
+    pub fn collect() -> Result<HashSet<PathBuf>, Box<dyn Error + Send + Sync>> {
+        // We should walk through the directories and collect all files,
+
+        let mut paths = HashSet::<PathBuf>::new();
+        let public = Config::get_server_public();
+
+        for dir in SpecialDirectories::iter() {
+            let path = dir.get_path();
+            Self::walk_dir(&path, &mut paths, &public)
+                .inspect_err(|e| eprintln!("Error walking through directory {:?}: {}", path, e))?;
+        }
+
+        return Ok(paths);
+    }
+
+    pub fn resolve_path(ext: &OsStr) -> Option<String> {
+        ext.to_str().and_then(|ext| match ext {
+            "html" => Some(Self::Pages.to_string()),
+            "css" => Some(Self::Styles.to_string()),
+            "js" => Some(Self::Client.to_string()),
+            _ => None,
+        })
+    }
+}
 impl Config {
     /// Parses user defined args while executing the program
     pub async fn new(
@@ -223,6 +325,7 @@ impl Config {
         // This has to be done AFTER env's are set, as it may rely on them
         let config_file = config_file::ServerConfigFile::get_config()?;
 
+        // If database is configured in the config file, it would initialized on server startup.
         let database = match config_file.database.as_ref() {
             Some(database_config) => Some(Arc::new(Mutex::new(
                 Database::new(database_config).await.inspect_err(|e| {
