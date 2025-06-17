@@ -52,7 +52,6 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::atomic::AtomicUsize;
 use std::{path::PathBuf, sync::Arc};
-use strum_macros::EnumIter;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::{
     fs::File,
@@ -279,8 +278,8 @@ impl Database {
 
     pub async fn insert(
         &mut self,
-        entry: &(impl AsRef<[u8]> + std::fmt::Debug),
         d_type: DatabaseType,
+        entry: &(impl AsRef<[u8]> + std::fmt::Debug),
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.exec(DatabaseCommand::Insert(d_type, DatabaseEntry::new(entry)))
             .await

@@ -5,7 +5,6 @@ use crate::config::SpecialDirectories;
 use crate::prelude::*;
 use crate::{config::Config, http_response::HttpResponse};
 use serde::{Deserialize, Serialize};
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::{borrow::Cow, collections::HashMap, error::Error, fmt::Display, str::FromStr};
 use tokio::{net::tcp::OwnedWriteHalf, sync::MutexGuard};
@@ -193,7 +192,7 @@ impl<'a> HttpRequestRequestLine {
     // }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Eq, Hash, PartialEq)]
 pub enum HttpRequestMethod {
     GET,
     POST,
@@ -275,7 +274,7 @@ pub struct HttpRequestError {
     /// It should not contain any sensitive information, but that is implicit as it gets redirected to the client.
     pub message: Option<String>,
     /// For logging purposes, used to redirect some errors to up the stack to avoid repetitive printing on server
-    /// while returning the error to the client. Should not be exposed to the client.
+    /// while returning the error to the client. Should not be exposed to the client. Is skipped during serialization.
     #[serde(skip)]
     pub internals: Option<Box<dyn Error + Send + Sync>>,
 }
@@ -353,8 +352,9 @@ impl HttpRequestError {
         let mut writer = writer.lock().await;
         let config = config.lock().await;
 
+        let (mut body, mut headers): (Option<String>, Option<HttpResponseHeaders>) = (None, None);
+
         if let Some(http_err) = err.as_ref().downcast_ref::<HttpRequestError>() {
-            eprintln!("Error while responding: {:#?}", http_err);
             let error_page = Config::get_server_public().join("pages/error.html");
 
             let start_line = HttpResponseStartLine::new(
@@ -363,9 +363,9 @@ impl HttpRequestError {
                 &http_err.status_text,
             );
 
-            let mut headers = HttpResponseHeaders::new(start_line);
+            headers = Some(HttpResponseHeaders::new(start_line));
 
-            let body = match &http_err.content_type {
+            body = Some(match &http_err.content_type {
                 Some(content_type) if content_type == "application/json" => {
                     // This basically sends the `struct` stringified as JSON
                     serde_json::to_string(http_err)?
@@ -377,10 +377,10 @@ impl HttpRequestError {
                 // Some(content_type) if content_type == "application/x-www-form-urlencoded"
                 // Otherwise sending HTML error page as a response
                 _ => std::fs::read_to_string(error_page)?,
-            };
+            });
 
             // Setting default content-type as text/html
-            headers.add(
+            headers.as_mut().unwrap().add(
                 Cow::from("Content-Type"),
                 Cow::from(
                     http_err
@@ -390,43 +390,63 @@ impl HttpRequestError {
                 ),
             );
 
-            headers.add(
-                Cow::from("Content-Length"),
-                Cow::from(body.len().to_string()),
-            );
-
-            let mut response = HttpResponse::new(headers, Some(body));
+            let mut response = HttpResponse::new(headers.unwrap(), body);
             return response.write(&config, &mut writer).await;
-        } else if let Some(sentinel_redirection) = err.as_ref().downcast_ref::<RequestRedirected>()
+        }
+        // This is used to control the flow of the program, not really an error.
+        // It is used to early return from the request parsing when the Host header is invalid or is configured for an redirection
+        // It also allows us to not check for the error message in the request handling code, currently the entry point is the `handle_client` function.
+        // and we just propagate the error up the stack if any occurs.
+        else if let Some(sentinel_redirection) = err.as_ref().downcast_ref::<RequestRedirected>()
         {
             eprintln!("Sentinel redirection: {}", sentinel_redirection);
-            return Ok(());
-        } else {
-            // Sending text/plain as the error message if the error is not of the HttpRequestError type
-            eprintln!("Error while responding: {:#?}", err);
 
-            let mut headers = HttpResponseHeaders::new(HttpResponseStartLine::new(
+            return Ok(());
+        }
+
+        eprintln!("Error while responding: {}", err);
+
+        if let Some(mut headers) = headers {
+            // Error message can have no body, for some status codes
+            // the body is forbidden.
+            if let Some(body) = body.as_ref() {
+                headers.add(
+                    Cow::from("Content-Length"),
+                    Cow::from(body.len().to_string()),
+                );
+            }
+
+            let mut response = HttpResponse::new(headers, body);
+
+            return response.write(&config, &mut writer).await;
+        } else {
+            // If there is no headers and body we cannot sent full custom response, as without it
+            // it is just a malformed response. We will return a base error response.
+            // It is also a case if the error is not of specific type where we know how to handle it
+            // We won't expose that error to the client.
+
+            headers = Some(HttpResponseHeaders::new(HttpResponseStartLine::new(
                 HttpProtocol::HTTP1_1,
                 500,
                 "Internal Server Error",
-            ));
+            )));
 
-            headers.add(Cow::from("Content-Type"), Cow::from("text/plain"));
+            headers
+                .as_mut()
+                .unwrap()
+                .add(Cow::from("Content-Type"), Cow::from("text/plain"));
 
-            // err cannot expose any sensitive information, but that is implicit as it gets redirected to the client.
-            let body = format!("An error occurred while processing a request: {:#?}", err);
+            body = Some(String::from("An error occurred while processing a request"));
 
-            headers.add(
+            headers.as_mut().unwrap().add(
                 Cow::from("Content-Length"),
-                Cow::from(body.len().to_string()),
+                Cow::from(body.as_ref().unwrap().len().to_string()),
             );
 
-            let mut response = HttpResponse::new(headers, Some(body));
+            let mut response = HttpResponse::new(headers.unwrap(), body);
 
             return response.write(&config, &mut writer).await;
         }
-        // NOTE: This is how you can handle different errors by downcasting to the specific error type
-        // else if let Some(io_err) = err.downcast_ref::<std::io::Error>() {}
     }
 }
 
@@ -593,6 +613,20 @@ impl<'a> HttpRequestHeaders<'a> {
 
     // `NOTE`: That method is also hoisted to `HttpRequest`
     pub fn get_request_target_path(&self) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+        // We will map specialized directories to the extension of the file requested, so if the file is requested with .html extension
+        // we will look in the /public/pages directory, if the file is requested with .css extension we will look in the /public/styles directory
+        // thought that solution cannot predict the requested path if it does not end with an extension that would resolve to appropriate directory
+        // In that case, if the requested_path does not contain a file extension as the last segment, we would treat that as a directory,
+        // thought we have to check if it is not a file without an extension, and then we would try to find index.html in that directory.
+
+        // If file extension does not fall into the mapping, we would just traverse the directory, joining the path to the public directory
+        // and try to match an existing path.
+        // If the path does point to a file and has no extension, there is not way in current approach to detect
+        // it's type, we will throw an error in that case as we cannot know the type of the file and we cannot serve it.
+
+        // DESIGN NOTE: We will support default files of the directories in the path, only index.html as the default. Other specialized directories will not
+        // try to resolve any paths when not given with full filename.
+
         let path = self.get_request_target().path();
         let path = match path.strip_prefix("/") {
             // Case of the root requested: "/"

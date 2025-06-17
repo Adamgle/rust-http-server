@@ -2,6 +2,7 @@ pub mod config;
 pub mod http;
 pub mod logger;
 pub mod prelude;
+pub mod routes;
 
 pub use http::http_request;
 pub use http::http_response;
@@ -27,8 +28,9 @@ pub mod tcp_handlers {
     use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
+    use tokio::time::timeout;
 
-    // QUESTION: Why is the server you are about to make is asynchronous, not multithreaded?
+    // QUESTION: Why is the server you are about to make asynchronous, not multithreaded?
     // => FOLLOW UP QUESTION:
     //  -> Can certain tasks be handled in async manner and the other in threading manner. If any, which one should be handled in which way.
     // ANSWER: Handling multiple connection, which spawn it's separate thread is computationally heavy, may include a system call to spawn a thread,
@@ -53,14 +55,40 @@ pub mod tcp_handlers {
         // This extra lock will only affect first load time of the server and it is also negligible
         let listener = self::connect(config.lock().await).await?;
 
-        // println!(
-        //     "TCP Connection Established at {:?}\nListening...",
-        //     listener.local_addr().unwrap()
-        // );
+        println!(
+            "TCP Connection Established at {:?}\nListening...",
+            listener.local_addr().unwrap()
+        );
 
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
+                    // let mut buf = [0; 10];
+
+                    // That is the solution for the keep-alive packets that are sent to the server.
+
+                    // Wait for the stream to be readable before proceeding to parse it as http message
+                    // to not trigger the http error.
+                    // For packets like TCP-keep-alive stream will never be readable and is not a valid http message
+                    // so we abort early.
+
+                    // We don't want to propagate the error, because that would end out in the main loop.
+                    // and that is not a critical error.
+                    if let Err(err) =
+                        timeout(tokio::time::Duration::from_secs(5), stream.readable()).await
+                    {
+                        eprintln!("Stream is not readable, skipping: {err:?}");
+                        continue;
+                    };
+
+                    // let n = stream.peek(&mut buf).await?;
+                    // println!("Received: {:?} | {}", buf, n);
+
+                    println!(
+                        "New connection established: {}",
+                        stream.peer_addr().unwrap()
+                    );
+
                     let (mut reader, writer) = stream.into_split();
                     let writer = Arc::new(Mutex::new(writer));
 
@@ -77,6 +105,7 @@ pub mod tcp_handlers {
                         )
                         .await
                         {
+                            // This is error that occurs while handling the error.
                             if let Err(err) = HttpRequestError::send_error_response(
                                 Arc::clone(&config),
                                 Arc::clone(&writer),
@@ -90,7 +119,9 @@ pub mod tcp_handlers {
                             // The above code SHOULD release the lock so no deadlock, but keep in mind.
                             let mut writer = writer.lock().await;
 
-                            // Shutdown for writing
+                            // We need to ensure that the writer is shutdown, because if the
+                            // error occurs while errors handling the http request, we could not
+                            // shut it down.
                             if let Err(err) = writer.shutdown().await {
                                 eprintln!("Error shutting down the stream: {}", err);
                             }
@@ -99,15 +130,17 @@ pub mod tcp_handlers {
                         }
                     });
 
+                    // Timeout on each task
                     if let Err(err) =
                         tokio::time::timeout(tokio::time::Duration::from_secs(5), task).await
                     {
+                        // println!("Is task still running? {}", task.is_finished());
                         eprintln!("Error spawning task: {}", err);
 
                         let mut writer = task_error_writer.lock().await;
 
+                        // Ensure the writer is shutdown, although it could already be shutdown
                         // Shut downs the writing portion of the stream if error occurs
-
                         if let Err(err) = writer.shutdown().await {
                             eprintln!("Error shutting down the stream: {}", err);
                         };
@@ -155,7 +188,7 @@ pub mod tcp_handlers {
 
         let (method, path) = (request.get_method(), path);
 
-        println!("REQUESTING: {} | {}", method, path.display());
+        println!("{} {}", method, path.display());
 
         // This will be executed for every request and try to match paths that should be redirected
         // although the only redirection that we are doing is from http://127.0.0.1:<port> to http://localhost:<port>
@@ -187,8 +220,18 @@ pub mod tcp_handlers {
         // Refactored: match first on path, then on method
         // NOTE: For that to be more maintainable, each match on method could be a separate function.
 
+        println!("{:#?}", SpecialDirectories::collect()?);
+
+        // We could think of refactoring that to the routes table as
+        // HashMap<Path, HashMap<HttpRequestMethod, fn(&mut HttpRequest, &mut HttpResponseHeaders) -> Result<Option<String>, Box<dyn Error + Send + Sync>>>>,
+        // That would have to be statically defined we would then make a static file out of it I guess for faster retrieval. We would also
+        // include the files that in the SpecialDirectories caching the computation for walking in the file system to get the paths.
+        // We still have those abstracted paths and those have to be hard-coded somewhere in the code. I guess we would have a HashMap
+        // with the path as key and the closure that carries over also some data about the request.
+
+        //
+
         let body: Option<String> = match &path {
-            // p if p == "/" => Some(request.read_requested_resource(&mut headers)?),
             p if SpecialDirectories::collect()?.contains(p) => {
                 // If the path is one of the special directories, we will just read the resource from the file system
                 // Any paths under special directories can be requested by the client without API-key using GET requests
@@ -197,47 +240,55 @@ pub mod tcp_handlers {
                     _ => return base_error?,
                 }
             }
-            // The trailing slash at the end is  important, as that ensures there is no extension attached to the "database", meaning that is a file.
+            // The trailing slash at the end is important, as that ensures there is no extension attached to the "database", meaning that is a file,
+            // here we match the directory.
+            // TODO: If there will be authentication done we should check if the user is authenticated to proceed to database
+            // but not every request to the database should require authentication.
             p if p.starts_with("database/") => match config.config_file.database.as_ref() {
                 Some(_) => match path {
-                    p if p == Path::new("database/tasks.json") => match method {
-                        HttpRequestMethod::GET => {
-                            Some(request.read_requested_resource(&mut headers)?)
-                        }
-                        HttpRequestMethod::POST => match request.get_body() {
-                            Some(task) => {
-                                let mut database = database.lock().await;
-                                database.insert(task, DatabaseType::Tasks).await?;
-                                String::from("Ok").into()
+                    p if p == Path::new("database/tasks.json") => {
+                        match method {
+                            HttpRequestMethod::GET => {
+                                Some(request.read_requested_resource(&mut headers)?)
                             }
-                            None => Err("Task not provided in the request body")?,
-                        },
-                        HttpRequestMethod::DELETE => match request.get_body() {
-                            Some(id) => {
-                                let mut database: MutexGuard<'_, config::database::Database> =
-                                    database.lock().await;
-                                database.delete(DatabaseType::Tasks, id).await?;
-                                // database.delete(DatabaseType::Tasks);
+                            HttpRequestMethod::POST => {
+                                if let Some(task) = request.get_body() {
+                                    let mut database = database.lock().await;
+                                    database.insert(DatabaseType::Tasks, task).await?;
+                                    String::from("Ok").into()
+                                } else {
+                                    Err("Task not provided in the request body")?
+                                }
+                            }
+                            HttpRequestMethod::DELETE => {
+                                if let Some(id) = request.get_body() {
+                                    let mut database = database.lock().await;
+                                    database.delete(DatabaseType::Tasks, id).await?;
+                                    // database.delete(DatabaseType::Tasks);
 
-                                String::from("Ok").into()
+                                    String::from("Ok").into()
+                                } else {
+                                    Err("Id not provided in the request body")?
+                                }
                             }
-                            None => Err("Id not provided in the request body")?,
-                        },
-                        _ => return base_error?,
-                    },
+
+                            _ => return base_error?,
+                        }
+                    }
                     p if p == Path::new("database/users.json") => match method {
                         HttpRequestMethod::GET => {
                             Some(request.read_requested_resource(&mut headers)?)
                         }
-                        HttpRequestMethod::POST => Some(match request.get_body() {
-                            Some(body) => {
+                        HttpRequestMethod::POST => {
+                            if let Some(body) = request.get_body() {
                                 let mut database = database.lock().await;
-                                database.insert(body, DatabaseType::Users).await?;
-                                String::from("Ok")
+                                database.insert(DatabaseType::Users, body).await?;
+
+                                String::from("Ok").into()
+                            } else {
+                                Err("No body in the request")?
                             }
-                            None => Err("No body in the request")?,
-                        }),
-                        // Add other methods as needed
+                        }
                         _ => return base_error?,
                     },
                     _ => return base_error?,
@@ -247,7 +298,7 @@ pub mod tcp_handlers {
             _ => return base_error?,
         };
 
-        headers.add(Cow::from("Connection"), Cow::from("close"));
+        headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
 
         let mut response: HttpResponse<'_> = HttpResponse::new(headers, body);
 

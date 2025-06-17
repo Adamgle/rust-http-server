@@ -1,6 +1,9 @@
 pub mod database;
 
+use crate::http::{HttpRequestMethod, HttpResponseHeaders};
+use crate::http_request::HttpRequest;
 use crate::logger::Logger;
+use crate::routes::{RouteTableKey, RouterHandler};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsStr;
@@ -18,17 +21,75 @@ pub struct Config {
     pub socket_address: SocketAddrV4,
     /// `unimplemented!()`
     pub options: Option<HashMap<String, String>>,
-    /// URL of the server, composed of the parts in the config file, under `protocol` and `domain`, with `port` number
-    /// set on the `SERVER_PORT` env
-    pub http_url: url::Url,
+    pub app: AppConfig,
     /// `NOTE`: It's not optional because in the near future we will create the file with default when the server starts
     pub config_file: config_file::ServerConfigFile,
     /// `unimplemented!()`
     pub logger: Logger,
     /// Under development,
-    /// `NOTE`: I think that should be removed from there, kind of shenanigans.
-    /// `NOTE`: Waiting to be fixed        
     pub database: Option<Arc<Mutex<Database>>>,
+}
+
+
+/// Contains information related to the application configuration, not the server configuration.
+///
+/// It is used to store the URL of the server, routes, and other application-specific settings.
+pub struct AppConfig {
+    /// URL of the server, composed of the parts in the config file, under `protocol` and `domain`, with `port` number
+    /// set on the `SERVER_PORT` environment variable.
+    pub url: url::Url,
+    /// `routes` is a HashMap of routes, where key is a tuple of path and method,
+    /// and value is a function that takes a mutable reference to HttpRequest and HttpResponseHeaders.
+    /// We are evaluating the routes on startup and use it for the duration of the program.
+    pub routes: Option<
+        HashMap<
+            (&'static str, HttpRequestMethod),
+            Box<dyn Fn(&mut HttpRequest, &mut HttpResponseHeaders) -> ()>,
+        >,
+    >,
+}
+
+impl AppConfig {
+    /// Creates a new AppConfig
+    pub fn new(url: url::Url) -> Self {
+        AppConfig {
+            routes: Self::create_routes(),
+            url,
+        }
+    }
+
+    /// Creates a new routes HashMap, that is used to store the routes of the application.
+    /// Routes are defined statically in the code, and are evaluated on startup.
+    ///
+    /// Since the function could get big, we will use a wrapper function to create the routes.
+    ///
+    pub fn create_routes() -> Result<
+        Option<
+            HashMap<
+                (&'static str, HttpRequestMethod),
+                Box<dyn Fn(&mut HttpRequest, &mut HttpResponseHeaders) -> ()>,
+            >,
+        >,
+        Box<dyn Error + Send + Sync>,
+    > {
+    }
+    crate::routes::create_routes()
+}
+
+// We will omit value of the routes HashMap to be printed as it is a function pointer
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("url", &self.url)
+            .field(
+                "routes",
+                &self
+                    .routes
+                    .as_ref()
+                    .and_then(|r| Some(r.keys().collect::<Vec<_>>())),
+            )
+            .finish()
+    }
 }
 
 // TODO: Config file should be generate when server is first started with some crap that is default and required
@@ -171,16 +232,19 @@ pub mod config_file {
 
         // NOTE: Work around, make domains practically invalids domain just to fit the requirement for the application
         // new field specific for that functionality should be created
-        pub fn domain_to_url(&self, domain: &str) -> Result<url::Url, url::ParseError> {
-            Ok(url::Url::parse(&format!("{}://{}", self.protocol, domain))?)
+        pub fn domain_to_url(&self, domain: &str, port: &u16) -> Result<url::Url, url::ParseError> {
+            Ok(url::Url::parse(&format!(
+                "{}://{}:{}",
+                self.protocol, domain, port
+            ))?)
         }
     }
 }
 
 #[derive(strum_macros::Display, strum_macros::EnumIter)]
 #[strum(serialize_all = "lowercase")]
+/// If resource is requested, it will try to find it in the `public` directory
 pub enum SpecialDirectories {
-    /// If resource is requested, it will try to find it in the `public` directory
     /// under `pages`, `{public}/pages`.
     /// First, if the path contains `.html` extension it will look it up in the `pages` directory,
     /// Second, if the path is requested without an extension, it will assume that directory is requested
@@ -192,9 +256,12 @@ pub enum SpecialDirectories {
     Styles,
     /// Directory related to static scripts, any with `.js` extension will be looked up in that directory.
     /// under `public` directory.
-    Client, // ServerRoot, => We won't support this there as they are dynamic, defined base on information in the config files
-            // ServerPublic, => We won't support this there as they are dynamic, defined base on information in the config file
-            // ServerConfig, => We won't support this there as they are dynamic, defined base on information in the config file
+    Client,
+    /// No restriction for authentication and type of the files stored.
+    Assets,
+    // ServerRoot, => We won't support this there as they are dynamic, defined base on information in the config files
+    // ServerPublic, => We won't support this there as they are dynamic, defined base on information in the config file
+    // ServerConfig, => We won't support this there as they are dynamic, defined base on information in the config file
 }
 
 impl SpecialDirectories {
@@ -209,7 +276,7 @@ impl SpecialDirectories {
     /// stripping the prefix of the `SERVER_PUBLIC` directory.
     fn walk_dir(
         path: &impl AsRef<Path>,
-        paths: &mut HashSet<PathBuf>,
+        paths: &mut HashSet<(PathBuf, HttpRequestMethod)>,
         prefix: &PathBuf,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if let Ok(entries) = std::fs::read_dir(path.as_ref()) {
@@ -231,7 +298,8 @@ impl SpecialDirectories {
                     // println!("Path collected: {:?}", file_path);
 
                     // Insert the file path into the set, converting it to PathBuf
-                    paths.insert(PathBuf::from(file_path));
+                    // Every path can be accessed with GET method, nothing else is guaranteed.
+                    paths.insert((PathBuf::from(file_path), HttpRequestMethod::GET));
                 }
             }
         }
@@ -251,10 +319,11 @@ impl SpecialDirectories {
     /// but then if in dev time you add a new path, you would have to restart the server to see the changes.
     /// Or we could just implement that as that is not so hard to do, some kind of file that will be created
     /// at build time.
-    pub fn collect() -> Result<HashSet<PathBuf>, Box<dyn Error + Send + Sync>> {
+    pub fn collect() -> Result<HashSet<(PathBuf, HttpRequestMethod)>, Box<dyn Error + Send + Sync>>
+    {
         // We should walk through the directories and collect all files,
 
-        let mut paths = HashSet::<PathBuf>::new();
+        let mut paths = HashSet::<(PathBuf, HttpRequestMethod)>::new();
         let public = Config::get_server_public();
 
         for dir in SpecialDirectories::iter() {
@@ -343,13 +412,20 @@ impl Config {
         // As the url::Url does not allow relative url parsing, we are initializing one to default url,
         // though only the path segment is the important part
 
+        let app_config = AppConfig {
+            url: config_file
+                .domain_to_url(&domain, &socket_address.port())
+                .inspect_err(|e| eprintln!("Error parsing domain to URL: {}", e))?,
+            routes: AppConfig::create_routes(), // TODO: We will implement that later
+        };
+
         // Bat-shit crazy
-        let http_url = url::Url::parse(&format!(
-            "{}://{}:{}",
-            config_file.protocol,
-            domain,
-            socket_address.port().to_string()
-        ))?;
+        // let http_url = url::Url::parse(&format!(
+        //     "{}://{}:{}",
+        //     config_file.protocol,
+        //     domain,
+        //     socket_address.port().to_string()
+        // ))?;
 
         Ok(Arc::new(Mutex::new(Config {
             socket_address,
@@ -357,7 +433,7 @@ impl Config {
             // server_root,
             config_file,
             logger: Logger {},
-            http_url,
+            app: app_config,
             database,
         })))
     }

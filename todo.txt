@@ -202,12 +202,17 @@ ISSUES
         or parsed if not yet been parsed. But the one heavy implication of that idea is that we would store the potentially big chunk of memory in RAM making it resource consuming.
         Doing parsing on go makes it still allocate that memory but freeing it quickly, although account for greater performance loss.
         Of course the whole discussion is just delusional as real database does not parse the entire collection just to retrieve one entry. 
-18. There is an issue with a `shutdown` call on writer in `HttpResponse::write`, it closes faster than the request could be fulfilled.
+18. <RESOLVED> There is an issue with a `shutdown` call on writer in `HttpResponse::write`, it closes faster than the request could be fulfilled.
     -> Getting: Could not write to the stream
     -> Error sending error response: A request to send or receive data was disallowed because the socket had already 
     -> been shut down in that direction with a previous shutdown call. (os error 10058)
     -> Error while responding: Os { code: 10054, kind: ConnectionReset, message: "An existing connection was forcibly closed by the remote host." }
         => UPDATE: I forgot when this occurs
+        => UPDATE: The error was occurring with the keep-alive packet, in that approach we were just throwing an error for keep-alive packets
+            -> because I did not know how to detect them. I still do not know what was closing the stream beforehand of writing
+            -> writer.writable() was returning true but this did not guarantee that you can write to the stream. Anyways know we are 
+            -> solving the issue with checking for readability of the packet on the stream level, meaning when it first comes
+            -> to the server, and currently the error of unreadable streams are ignored including the keep-alive packet.
 19. <RESOLVED> There is a way to inject a "/" in the path, just need to percent encode it in the URL. We should treat percent encoded slashes
     -> as literals, otherwise, it could allow file system traversal. It is not an issue with the consecutive slashes check in `get_request_target`
     -> the issue could occur when we decode the URL and parse it to `Path`. Maybe we should never convert to `Path` and do the logic 
@@ -215,8 +220,10 @@ ISSUES
 20. There may be an issue related to how router is made, it uses String as paths given in the URL from the client, that may lose some information if 
     => the path is not valid UTF-8, the problem is also applicable of how we walk the directories in SpecialDirectories::walk_dir, because we will be using
     => the data that is given to us in the handle_client, that would means that we are working already on that UTF-8 decoded String. Currently if string is not 
-    => valid UTF-8 we are throwing an error in the HttpRequestHeaders::get_request_target_path and of course in it's alias HttpRequest::get_request_target_path.
+    => valid UTF-8 we are throwing an error in the HttpRequestHeaders::get_request_target_path and of course in its alias HttpRequest::get_request_target_path.
     => I don't think we will refactor that, we will just keep the server UTF-8 compliant.
+    
+    
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,
     -> or abort them early, just for debugging purposes.
@@ -225,6 +232,7 @@ IDEAS
 ON THE AGENDA: 
 1. Multithreading is on the agenda which will enable us to handle multiple requests simultaneously but far away and we do not bother just know <DONE>
 2. Logger is next on the agenda, because we need to measure failed and successful requests that happen.
+
 
 DREAMLAND
 Let's try to develop something...

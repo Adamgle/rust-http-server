@@ -37,17 +37,17 @@ impl<'a> HttpRequest<'a> {
     /// `NOTE`: This could return an error if the request was redirect of: `"Request was redirected, writer was shutdown"`
     pub async fn new(
         config: &MutexGuard<'_, Config>,
-        stream: &mut OwnedReadHalf,
+        reader: &mut OwnedReadHalf,
         writer: &mut MutexGuard<'_, OwnedWriteHalf>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        Ok(Self::parse_request(config, stream, writer).await?)
+        Ok(Self::parse_request(config, reader, writer).await?)
     }
 
     /// Parses to HTTP/1.1 from the TcpStream, relying on Content-Length headers, no chunked transfer encoding
     /// is supported. It will read the stream and allocate as much as Content-Length header specifies.
     async fn parse_request(
         config: &MutexGuard<'_, Config>,
-        stream: &mut OwnedReadHalf,
+        reader: &mut OwnedReadHalf,
         writer: &mut MutexGuard<'_, OwnedWriteHalf>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         // TODO: There is still and issue with the TCP-Keep-Alive packets, currently they are non-blocking,
@@ -59,13 +59,14 @@ impl<'a> HttpRequest<'a> {
         let mut headers: Option<HttpRequestHeaders> = None;
 
         // NOTE: Stream will not become readable for TCP-Keep-Alive packet.
-        timeout(Duration::from_secs(5), stream.readable())
+        // The writer would be shutdown upstream when error occurs, inside the
+        timeout(Duration::from_secs(5), reader.readable())
             .await
             .inspect_err(|e| {
                 eprintln!("Error waiting for the stream to be readable: {:?}", e);
             })??;
 
-        let reader = BufReader::new(stream);
+        let reader = BufReader::new(reader);
         let mut lines = reader.lines();
 
         let mut host_validated = false;
@@ -237,6 +238,8 @@ impl<'a> HttpRequest<'a> {
                 headers,
             });
         } else {
+            // TCP_keepalive
+
             eprintln!("Headers are not initialized");
             return Err("Invalid request".into());
         }
@@ -317,97 +320,6 @@ impl<'a> HttpRequest<'a> {
 
                 // Routing to /pages, /styles, /client is undefined behavior, as those paths are not accessible by the client directly
 
-                // return (path, resolved_path);
-                // let path = public.join(path);
-
-                // let path = match path.extension() {
-                //     Some(ext) => {
-                //         let dir = ext
-                //             .to_str()
-                //             .map(|ext| match ext {
-                //                 // NOTE: pages, styles, and client should not be String, enum for those should be declared
-                //                 "html" => Some("pages"),
-                //                 "css" => Some("styles"),
-                //                 "js" => Some("client"),
-                //                 _ => None,
-                //             })
-                //             .flatten();
-
-                //         let path: PathBuf = match dir {
-                //             Some(dir) => {
-                //                 // Handle cases where the path is already prefixed with the directory
-                //                 // considering the filenames that are of the name of specialized directories
-
-                //                 // File stem is a portion of the file name before the last dot
-                //                 // Technically that file_prefix would be more appropriate but that is nightly only
-                //                 //
-                //                 // assert_eq!("foo", Path::new("foo.rs").file_stem().unwrap());
-                //                 // assert_eq!("foo.tar", Path::new("foo.tar.gz").file_stem().unwrap());
-
-                //                 let filename = path
-                //                     .file_stem()
-                //                     .ok_or(HttpRequestError {
-                //                         status_code: 400,
-                //                         status_text: "Bad Request".into(),
-                //                         message: "Invalid request target".to_string().into(),
-                //                         content_type: "text/html".to_string().into(),
-                //                         internals: Some(Box::<dyn Error + Send + Sync>::from(
-                //                             format!(
-                //                                 "File stem does not exists in the path: {:?}",
-                //                                 path
-                //                             ),
-                //                         )),
-                //                         ..Default::default()
-                //                     })
-                //                     .map(|s| {
-                //                         s.to_str().ok_or(HttpRequestError {
-                //                             status_code: 400,
-                //                             status_text: "Bad Request".into(),
-                //                             message: "Invalid request target".to_string().into(),
-                //                             content_type: "text/html".to_string().into(),
-                //                             internals: Some(Box::<dyn Error + Send + Sync>::from(
-                //                                 format!("Could not convert the path as valid UTF-8 string: {:?}", path)
-                //                             )),
-                //                             ..Default::default()
-                //                         })
-                //                     })??;
-
-                //                 if (path.starts_with(dir) && filename == dir)
-                //                     || path.starts_with(dir)
-                //                 {
-                //                     // Case of: /pages/pages.html not prefixing
-                //                     // Case of: /pages/...
-
-                //                     // Do not prefix that
-                //                     public.join(path)
-                //                 } else {
-                //                     // Things like: /pages.html are prefixing
-
-                //                     // Do prefix that
-                //                     public.join(dir).join(path)
-                //                 }
-                //             }
-                //             // There is not specialized directory for the extension or parsing the extension to UTF-8 failed, do not care
-                //             None => public.join(path),
-                //         };
-
-                //         path
-                //     }
-                //     None => {
-                //         // Treat it as a directory
-                //         // If file extension does not fall into the mapping, we would lookup that in the directory, joining the path to the public directory
-                //         // and try to match an existing path. If the path does point to a file or has no extension, there is not way in current approach to detect
-                //         // it's format, we will throw an error in that case as we cannot know the format of the file and we cannot serve it.
-                //         // The same if the path points to a directory
-
-                //         // What happens: /dir => /pages/dir/index.html
-                //         // That also prefixes the root "/" to "/pages/index.html"
-                //         let path = public.join("pages").join(path.join("index.html"));
-
-                //         path
-                //     }
-                // };
-
                 let path = if path.is_relative() {
                     public.join(path)
                 } else {
@@ -454,30 +366,34 @@ impl<'a> HttpRequest<'a> {
     pub fn get_request_target_path(&self) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
         self.headers.get_request_target_path()
     }
+    // Makes a GET request to the server, returning the requested resource as a String
+    ///
     /// Takes Response `HttpHeaders` and write `Content-Type` and `Content-Length` headers, returning the requested resource as a String
     ///
-    /// Walks `/public` directory looking for path
-    /// NOTE: Not sure about the lifetimes there
+    /// Walks `/public` directory looking for path, actually it is O(1) lookup.
+    ///
+    /// `relative_path` is already resolved path, fully valid if prefixed with `/public` directory.
     pub fn read_requested_resource(
         &'a self,
         headers: &mut HttpResponseHeaders<'a>,
+        relative_path: &PathBuf,
     ) -> Result<String, Box<dyn Error + Send + Sync>> {
-        let resource_path: PathBuf = self.get_absolute_resource_path()?;
+        let resource_path: PathBuf = Config::get_server_public().join(relative_path);
 
-        let relative_path = resource_path
-            .strip_prefix(Config::get_server_public())
-            .map_err(|e| HttpRequestError {
-                status_code: 400,
-                status_text: "Bad Request".into(),
-                message: "Invalid request target".to_string().into(),
-                internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
-                    "Path does not start with the public directory: {:?} | {:?}",
-                    resource_path, e
-                ))),
-                ..Default::default()
-            })?
-            // clone there
-            .to_owned();
+        // let relative_path = resource_path
+        //     .strip_prefix(Config::get_server_public())
+        //     .map_err(|e| HttpRequestError {
+        //         status_code: 400,
+        //         status_text: "Bad Request".into(),
+        //         message: "Invalid request target".to_string().into(),
+        //         internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+        //             "Path does not start with the public directory: {:?} | {:?}",
+        //             resource_path, e
+        //         ))),
+        //         ..Default::default()
+        //     })?
+        //     // clone there
+        //     .to_owned();
 
         // Read the file
         let requested_resource = fs::read_to_string(resource_path)?;
@@ -496,7 +412,7 @@ impl<'a> HttpRequest<'a> {
     }
 
     /// I hate this, should be typed
-    pub fn detect_mime_type(&self, request_target: PathBuf) -> &str {
+    pub fn detect_mime_type(&self, request_target: &PathBuf) -> &str {
         match self.headers.get("Content-Type") {
             Some(content_type) => return content_type,
             None => {
@@ -617,7 +533,18 @@ impl<'a> HttpRequest<'a> {
                         // then we would have to redirect both. That is we need path variable to be passed
 
                         // NOTE: Macro for writing headers would be great
-                        let mut location = config.config_file.domain_to_url(&domain.to)?;
+                        let mut location = config.config_file.domain_to_url(
+                            &domain.to,
+                            &Config::get_server_port().parse::<u16>().map_err(|e| {
+                                HttpRequestError {
+                                    internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                                        "Could not parse server port, not valid u16: {}",
+                                        e
+                                    ))),
+                                    ..Default::default()
+                                }
+                            })?,
+                        )?;
 
                         // Could be problems if the path is not valid UTF-8
                         let path = path.to_string_lossy();
