@@ -381,21 +381,6 @@ impl<'a> HttpRequest<'a> {
     ) -> Result<String, Box<dyn Error + Send + Sync>> {
         let resource_path: PathBuf = Config::get_server_public().join(relative_path);
 
-        // let relative_path = resource_path
-        //     .strip_prefix(Config::get_server_public())
-        //     .map_err(|e| HttpRequestError {
-        //         status_code: 400,
-        //         status_text: "Bad Request".into(),
-        //         message: "Invalid request target".to_string().into(),
-        //         internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
-        //             "Path does not start with the public directory: {:?} | {:?}",
-        //             resource_path, e
-        //         ))),
-        //         ..Default::default()
-        //     })?
-        //     // clone there
-        //     .to_owned();
-
         // Read the file
         let requested_resource = fs::read_to_string(resource_path)?;
 

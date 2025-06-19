@@ -193,7 +193,7 @@ impl<'a> HttpRequestRequestLine {
     // }
 }
 
-#[derive(Debug, PartialEq, Clone, Eq, Hash)]
+#[derive(Debug, PartialEq, Clone, Eq, Hash, strum_macros::EnumIter)]
 pub enum HttpRequestMethod {
     GET,
     POST,
@@ -613,7 +613,6 @@ impl<'a> HttpRequestHeaders<'a> {
     // NOTE: I think the below getters could be migrated to HttpResponse as the field that it accesses
     // gets exposed to `super` context, either way it is surely visible out there.
 
-
     pub fn get_request_line(&self) -> &HttpRequestRequestLine {
         &self.request_line
     }
@@ -624,6 +623,64 @@ impl<'a> HttpRequestHeaders<'a> {
 
     pub fn get_request_target(&self) -> &url::Url {
         self.get_request_line().get_request_target()
+    }
+
+    pub fn normalize_path(path: impl AsRef<Path>) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+        let path = path.as_ref();
+
+        if path != Path::new("/")
+            && (path.is_absolute()
+                || path.starts_with("/")
+                || path.starts_with("\\")
+                || path.has_root())
+        {
+            return Err(Box::<dyn Error + Send + Sync>::from(format!(
+                "Request target path is absolute, should be relative: {:?}",
+                path
+            )));
+        }
+
+        let mut normalized = PathBuf::from(path);
+
+        match normalized.extension() {
+            Some(ext) => {
+                let dir_path = SpecialDirectories::resolve_path(ext)
+                    .and_then(|f| PathBuf::from_str(&f).ok().map(|p| (f, p)));
+
+                if let Some((dir, mut dir_path)) = dir_path {
+                    let filename =
+                        normalized
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .ok_or_else(|| {
+                                Box::<dyn Error + Send + Sync>::from(format!(
+                                    "Failed to extract file stem from path: {:?}",
+                                    path
+                                ))
+                            })?;
+
+                    if (normalized.starts_with(&dir) && filename == dir)
+                        || normalized.starts_with(&dir)
+                    {
+                        // Already prefixed, do nothing
+                        Ok(normalized)
+                    } else {
+                        dir_path.push(normalized);
+                        Ok(dir_path)
+                    }
+                } else {
+                    Ok(normalized)
+                }
+            }
+
+            None => {
+                let mut dir = PathBuf::from(SpecialDirectories::Pages.to_string());
+
+                normalized.push("index.html");
+                dir.push(normalized);
+                Ok(dir)
+            }
+        }
     }
 
     // `NOTE`: That method is also hoisted to `HttpRequest`
@@ -663,138 +720,18 @@ impl<'a> HttpRequestHeaders<'a> {
         // we either way removing that slash when reading the resource.
 
         // I think we may safely convert it to path as that is not absolute path as it lacks the leading slash.
-        let mut path = PathBuf::from(decoded.as_ref());
-
+        let path = Path::new(decoded.as_ref());
         // Single root path is acceptable, that would resolve the pages/index.html
 
-        if path != Path::new("/")
-            && (path.is_absolute()
-                || path.starts_with("/")
-                || path.starts_with("\\")
-                || path.has_root())
-        {
-            return Err(HttpRequestError {
+        return Ok(Self::normalize_path(path).map_err(|e| {
+            Box::<dyn Error + Send + Sync>::from(HttpRequestError {
                 status_code: 400,
                 status_text: "Bad Request".into(),
-                message: "Invalid request target".to_string().into(),
-                content_type: "text/html".to_string().into(),
-                internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
-                    "Request target path is absolute, but should be relative: {:?}",
-                    path
-                ))),
+                message: Some(format!("Invalid request target path: {}", path.display())),
+                internals: Some(Box::<dyn Error + Send + Sync>::from(e)),
                 ..Default::default()
-            }
-            .into());
-        }
-
-        let path = match path.extension() {
-            Some(ext) => {
-                let dir_path = SpecialDirectories::resolve_path(ext).and_then(|f| {
-                    Some((
-                        f.clone(),
-                        PathBuf::from_str(f.as_str())
-                            .inspect_err(|f| {
-                                eprintln!(
-                                    "Could not convert the special directory to PathBuf: {}",
-                                    f
-                                );
-                            })
-                            .ok(),
-                    ))
-                });
-
-                match dir_path {
-                    Some((dir, Some(mut dir_path))) => {
-                        // Handle cases where the path is already prefixed with the directory
-                        // considering the filenames that are of the name of specialized directories
-
-                        // File stem is a portion of the file name before the last dot
-                        // Technically that file_prefix would be more appropriate but that is nightly only
-                        //
-                        // assert_eq!("foo", Path::new("foo.rs").file_stem().unwrap());
-                        // assert_eq!("foo.tar", Path::new("foo.tar.gz").file_stem().unwrap());
-
-                        let filename = path
-                            .file_stem()
-                            .ok_or(HttpRequestError {
-                                status_code: 400,
-                                status_text: "Bad Request".into(),
-                                message: "Invalid request target".to_string().into(),
-                                content_type: "text/html".to_string().into(),
-                                internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
-                                    "File stem does not exists in the path: {:?}",
-                                    path
-                                ))),
-                                ..Default::default()
-                            })
-                            .map(|s| {
-                                s.to_str().ok_or(HttpRequestError {
-                                    status_code: 400,
-                                    status_text: "Bad Request".into(),
-                                    message: "Invalid request target".to_string().into(),
-                                    content_type: "text/html".to_string().into(),
-                                    internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
-                                        "Could not convert the path as valid UTF-8 string: {:?}",
-                                        path
-                                    ))),
-                                    ..Default::default()
-                                })
-                            })??;
-
-                        if (path.starts_with(&dir) && filename == &dir) || path.starts_with(dir) {
-                            // Case of: /pages/pages.html not prefixing
-                            // Case of: /pages/...
-
-                            // Do not prefix that
-                            // public.join(path)
-                            path
-                        } else {
-                            // Things like: /pages.html are prefixing
-
-                            // Do prefix that
-
-                            dir_path.push(path);
-                            dir_path
-                            // &Path::new(&dir).join(path)
-                        }
-                    }
-                    // There is not specialized directory for the extension or parsing the extension to UTF-8 failed, do not care
-                    _ => path,
-                }
-            }
-            None => {
-                // Treat it as a directory
-                // If file extension does not fall into the mapping, we would lookup that in the directory, joining the path to the public directory
-                // and try to match an existing path. If the path does point to a file or has no extension, there is not way in current approach to detect
-                // it's format, we will throw an error in that case as we cannot know the format of the file and we cannot serve it.
-                // The same if the path points to a directory
-
-                // What happens: /dir => /pages/dir/index.html
-                // That also prefixes the root "/" to "/pages/index.html"
-                let mut dir = PathBuf::from(SpecialDirectories::Pages.to_string().as_str());
-
-                path.push("index.html");
-                dir.push(path.clone());
-
-                dir
-            }
-        };
-
-        // let path_str = path.to_str().ok_or(HttpRequestError {
-        //     status_code: 400,
-        //     status_text: "Bad Request".into(),
-        //     message: "Invalid request target".to_string().into(),
-        //     content_type: "text/html".to_string().into(),
-        //     internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
-        //         "Could not convert the path as valid UTF-8 string: {:?}",
-        //         path
-        //     ))),
-        //     ..Default::default()
-        // })?;
-
-        // println!("Request target path: {:?}", path);
-
-        return Ok(path);
+            })
+        })?);
     }
 
     pub fn get_request_protocol(&self) -> &HttpProtocol {

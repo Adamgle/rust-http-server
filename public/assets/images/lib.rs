@@ -189,20 +189,25 @@ pub mod tcp_handlers {
         // If path is invalid and cannot be encoded, that should end the request
 
         let route_key = RouteTableKey::new(path, Some(request.get_method().clone()));
+        let ctx = RouteHandlerContext::new(&request, &mut headers, &route_key);
 
-        let ctx = RouteHandlerContext::new(&request, &mut headers, &route_key, &config);
+        let body = Some(routes.route(ctx)?);
 
-        let body = Some(routes.route(ctx).await?);
+        headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
 
-        println!("Response body: {:?}", body);
+        let mut response = HttpResponse::new(&headers, body);
 
-        // headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
-
-        // let mut response = HttpResponse::new(&headers, body);
-
-        // response.write(&config, &mut writer).await?;
+        response.write(&config, &mut writer).await?;
 
         Ok(())
+
+        // TODO: Check if handler does not capture the ctx, since the error.
+
+        // if let Some(handler) = routes.get(&route_key) {
+        //     println!("{:?}", handler(ctx))
+        // }
+
+        // println!("Body: {:?}", body.len());
 
         // This will be executed for every request and try to match paths that should be redirected
         // although the only redirection that we are doing is from http://127.0.0.1:<port> to http://localhost:<port>

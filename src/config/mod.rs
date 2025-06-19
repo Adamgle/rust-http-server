@@ -25,7 +25,6 @@ pub struct Config {
     pub config_file: config_file::ServerConfigFile,
     /// `unimplemented!()`
     pub logger: Logger,
-    /// Under development,
     pub database: Option<Arc<Mutex<Database>>>,
 }
 
@@ -44,18 +43,17 @@ pub struct AppConfig {
 
 impl<'a> AppConfig {
     /// Creates a new AppConfig
-    pub fn new(url: url::Url) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        Ok(AppConfig {
-            routes: Self::create_routes()?,
-            url,
-        })
-    }
+    // pub fn new(url: url::Url) -> Result<Self, Box<dyn Error + Send + Sync>> {
+    //     Ok(AppConfig {
+    //         routes: Self::create_routes()?,
+    //         url,
+    //     })
+    // }
 
     /// Creates a new routes HashMap, that is used to store the routes of the application.
     /// Routes are defined statically in the code, and are evaluated on startup.
     ///
     /// Since the function could get big, we will use a wrapper function to create the routes.
-    ///
     pub fn create_routes() -> Result<RouteTable, Box<dyn Error + Send + Sync>> {
         crate::routes::RouteTable::create_routes()
     }
@@ -454,13 +452,17 @@ impl<'a> Config {
         self.config_file.database.as_ref()
     }
 
-    /// `NOTE`: Dummy types in return statement
+    /// Check if the database is initialized and return a clone of the Arc<Mutex<Database>> if it is.
     pub fn get_database(&self) -> Result<Arc<Mutex<Database>>, Box<dyn Error + Send + Sync>> {
+        // Database config already checked in the Config constructor, no need to check it again.
+        // if let Some(_) = &self.config_file.database {
         if let Some(database) = &self.database {
-            Ok(Arc::clone(database))
-        } else {
-            Err("Database not initialized".into())
+            // If database is initialized, return a clone of the Arc<Mutex<Database>>
+            return Ok(Arc::clone(database));
         }
+        // }
+
+        return Err("Database not initialized".into());
     }
 
     pub fn get_routes(&self) -> &RouteTable {
