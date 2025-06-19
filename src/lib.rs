@@ -1,6 +1,7 @@
 pub mod config;
 pub mod http;
 pub mod logger;
+pub mod middleware;
 pub mod prelude;
 pub mod routes;
 
@@ -12,17 +13,14 @@ use std::error::Error;
 use crate::prelude::*;
 
 pub mod tcp_handlers {
-    use super::http::HttpRequestMethod;
     use super::http_request::HttpRequest;
-    use crate::config::database::DatabaseType;
     use crate::config::Config::{self};
-    use crate::config::SpecialDirectories;
     use crate::http::{HttpHeaders, HttpResponseHeaders, HttpResponseStartLine};
+    use crate::http_response::HttpResponse;
+    use crate::routes::{RouteHandlerContext, RouteTableKey};
     use crate::*;
     use http::HttpRequestError;
-    use http_response::HttpResponse;
     use std::borrow::Cow;
-    use std::path::Path;
     use std::sync::Arc;
     use tokio::io::AsyncWriteExt;
     use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -40,7 +38,7 @@ pub mod tcp_handlers {
     // can come at different intervals of time. Thread approach would be great if you would like to parallelize bunch of requests
     // that are independent of each other and this some sort of order of execution is not needed.
 
-    pub async fn connect(
+    pub async fn connect<'a>(
         config: MutexGuard<'_, Config>,
     ) -> Result<TcpListener, Box<dyn Error + Send + Sync>> {
         return TcpListener::bind(config.socket_address)
@@ -49,7 +47,7 @@ pub mod tcp_handlers {
     }
 
     /// Starts TCP server with provided `Config`, continuously listens for incoming request and propagates them further.
-    pub async fn run_tcp_server(
+    pub async fn run_tcp_server<'a>(
         config: Arc<Mutex<Config>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // This extra lock will only affect first load time of the server and it is also negligible
@@ -165,7 +163,7 @@ pub mod tcp_handlers {
     }
 
     /// Handles incoming request from the client.
-    async fn handle_client(
+    async fn handle_client<'a>(
         reader: &mut OwnedReadHalf,
         writer: Arc<Mutex<OwnedWriteHalf>>,
         // writer: &mut OwnedWriteHalf,
@@ -183,12 +181,33 @@ pub mod tcp_handlers {
         let mut headers: HttpResponseHeaders<'_> =
             HttpResponseHeaders::new(HttpResponseStartLine::default());
 
+        // let mut headers = RefCell::new(HttpResponseHeaders::new(HttpResponseStartLine::default()));
+
+        let routes = config.get_routes();
+
         let path = request.get_request_target_path()?;
         // If path is invalid and cannot be encoded, that should end the request
 
-        let (method, path) = (request.get_method(), path);
+        let route_key = RouteTableKey::new(path, request.get_method().clone());
+        let ctx = RouteHandlerContext::new(&request, &mut headers, &route_key);
 
-        println!("{} {}", method, path.display());
+        let body = Some(routes.route(ctx)?);
+
+        headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
+
+        let mut response = HttpResponse::new(&headers, body);
+
+        response.write(&config, &mut writer).await?;
+
+        Ok(())
+
+        // TODO: Check if handler does not capture the ctx, since the error.
+
+        // if let Some(handler) = routes.get(&route_key) {
+        //     println!("{:?}", handler(ctx))
+        // }
+
+        // println!("Body: {:?}", body.len());
 
         // This will be executed for every request and try to match paths that should be redirected
         // although the only redirection that we are doing is from http://127.0.0.1:<port> to http://localhost:<port>
@@ -201,26 +220,24 @@ pub mod tcp_handlers {
         // present in this segment so to not mistake it with a file like database.html, but the whole function should be refactored so just
         // to note that. Also the call to database is not expensive, but we it would be wise to do so as for some requests it is just useless.
 
-        let database = config.get_database()?;
+        // let database = config.get_database()?;
 
         // If we would rely on HTTP methods to differentiate between requests to perform different logic,
         // we would limit ourselves to only one handler per method per path. We could of course
         // abstract that away, and just make custom endpoints for each handler we want to have.
         // But maybe since that is soo small project to test functionality of the server, we will rely on methods
 
-        let base_error = Err(HttpRequestError {
-                status_code: 404,
-                status_text: String::from("Not Found"),
-                message: String::from("Path does not exist on the server or the method used is unsupported for that path").into(),
-                content_type: "application/json".to_string().into(),
-                internals: Some(Box::<dyn std::error::Error + Send + Sync>::from(
-                format!("Path does not exist on the server or the method used is unsupported for that path: {:?}", path))),
-            });
+        // let base_error = Err(HttpRequestError {
+        //         status_code: 404,
+        //         status_text: String::from("Not Found"),
+        //         message: String::from("Path does not exist on the server or the method used is unsupported for that path").into(),
+        //         content_type: "application/json".to_string().into(),
+        //         internals: Some(Box::<dyn std::error::Error + Send + Sync>::from(
+        //         format!("Path does not exist on the server or the method used is unsupported for that path: {:?}", path))),
+        //     });
 
         // Refactored: match first on path, then on method
         // NOTE: For that to be more maintainable, each match on method could be a separate function.
-
-        println!("{:#?}", SpecialDirectories::collect()?);
 
         // We could think of refactoring that to the routes table as
         // HashMap<Path, HashMap<HttpRequestMethod, fn(&mut HttpRequest, &mut HttpResponseHeaders) -> Result<Option<String>, Box<dyn Error + Send + Sync>>>>,
@@ -229,81 +246,71 @@ pub mod tcp_handlers {
         // We still have those abstracted paths and those have to be hard-coded somewhere in the code. I guess we would have a HashMap
         // with the path as key and the closure that carries over also some data about the request.
 
-        //
+        // let body: Option<String> = match &path {
+        //     p if SpecialDirectories::collect()?.contains(p) => {
+        //         // If the path is one of the special directories, we will just read the resource from the file system
+        //         // Any paths under special directories can be requested by the client without API-key using GET requests
+        //         match method {
+        //             HttpRequestMethod::GET => Some(request.read_requested_resource(&mut headers)?),
+        //             _ => return base_error?,
+        //         }
+        //     }
+        //     // The trailing slash at the end is important, as that ensures there is no extension attached to the "database", meaning that is a file,
+        //     // here we match the directory.
+        //     // TODO: If there will be authentication done we should check if the user is authenticated to proceed to database
+        //     // but not every request to the database should require authentication.
+        //     p if p.starts_with("database/") => match config.config_file.database.as_ref() {
+        //         Some(_) => match path {
+        //             p if p == Path::new("database/tasks.json") => {
+        //                 match method {
+        //                     HttpRequestMethod::GET => {
+        //                         Some(request.read_requested_resource(&mut headers)?)
+        //                     }
+        //                     HttpRequestMethod::POST => {
+        //                         if let Some(task) = request.get_body() {
+        //                             let mut database = database.lock().await;
+        //                             database.insert(DatabaseType::Tasks, task).await?;
+        //                             String::from("Ok").into()
+        //                         } else {
+        //                             Err("Task not provided in the request body")?
+        //                         }
+        //                     }
+        //                     HttpRequestMethod::DELETE => {
+        //                         if let Some(id) = request.get_body() {
+        //                             let mut database = database.lock().await;
+        //                             database.delete(DatabaseType::Tasks, id).await?;
+        //                             // database.delete(DatabaseType::Tasks);
 
-        let body: Option<String> = match &path {
-            p if SpecialDirectories::collect()?.contains(p) => {
-                // If the path is one of the special directories, we will just read the resource from the file system
-                // Any paths under special directories can be requested by the client without API-key using GET requests
-                match method {
-                    HttpRequestMethod::GET => Some(request.read_requested_resource(&mut headers)?),
-                    _ => return base_error?,
-                }
-            }
-            // The trailing slash at the end is important, as that ensures there is no extension attached to the "database", meaning that is a file,
-            // here we match the directory.
-            // TODO: If there will be authentication done we should check if the user is authenticated to proceed to database
-            // but not every request to the database should require authentication.
-            p if p.starts_with("database/") => match config.config_file.database.as_ref() {
-                Some(_) => match path {
-                    p if p == Path::new("database/tasks.json") => {
-                        match method {
-                            HttpRequestMethod::GET => {
-                                Some(request.read_requested_resource(&mut headers)?)
-                            }
-                            HttpRequestMethod::POST => {
-                                if let Some(task) = request.get_body() {
-                                    let mut database = database.lock().await;
-                                    database.insert(DatabaseType::Tasks, task).await?;
-                                    String::from("Ok").into()
-                                } else {
-                                    Err("Task not provided in the request body")?
-                                }
-                            }
-                            HttpRequestMethod::DELETE => {
-                                if let Some(id) = request.get_body() {
-                                    let mut database = database.lock().await;
-                                    database.delete(DatabaseType::Tasks, id).await?;
-                                    // database.delete(DatabaseType::Tasks);
+        //                             String::from("Ok").into()
+        //                         } else {
+        //                             Err("Id not provided in the request body")?
+        //                         }
+        //                     }
 
-                                    String::from("Ok").into()
-                                } else {
-                                    Err("Id not provided in the request body")?
-                                }
-                            }
+        //                     _ => return base_error?,
+        //                 }
+        //             }
+        //             p if p == Path::new("database/users.json") => match method {
+        //                 HttpRequestMethod::GET => {
+        //                     Some(request.read_requested_resource(&mut headers)?)
+        //                 }
+        //                 HttpRequestMethod::POST => {
+        //                     if let Some(body) = request.get_body() {
+        //                         let mut database = database.lock().await;
+        //                         database.insert(DatabaseType::Users, body).await?;
 
-                            _ => return base_error?,
-                        }
-                    }
-                    p if p == Path::new("database/users.json") => match method {
-                        HttpRequestMethod::GET => {
-                            Some(request.read_requested_resource(&mut headers)?)
-                        }
-                        HttpRequestMethod::POST => {
-                            if let Some(body) = request.get_body() {
-                                let mut database = database.lock().await;
-                                database.insert(DatabaseType::Users, body).await?;
-
-                                String::from("Ok").into()
-                            } else {
-                                Err("No body in the request")?
-                            }
-                        }
-                        _ => return base_error?,
-                    },
-                    _ => return base_error?,
-                },
-                None => Err("Database not configured in the config file.")?,
-            },
-            _ => return base_error?,
-        };
-
-        headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
-
-        let mut response: HttpResponse<'_> = HttpResponse::new(headers, body);
-
-        response.write(&config, &mut writer).await?;
-
-        Ok(())
+        //                         String::from("Ok").into()
+        //                     } else {
+        //                         Err("No body in the request")?
+        //                     }
+        //                 }
+        //                 _ => return base_error?,
+        //             },
+        //             _ => return base_error?,
+        //         },
+        //         None => Err("Database not configured in the config file.")?,
+        //     },
+        //     _ => return base_error?,
+        // };
     }
 }

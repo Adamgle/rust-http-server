@@ -43,7 +43,7 @@ pub use crate::config::database::collections::{
     DatabaseEntry, DatabaseEntryTrait, DatabaseTask, DatabaseUser,
 };
 
-pub use crate::config::{config_file::DatabaseConfigEntry, Config};
+use crate::config::{config_file::DatabaseConfigEntry, Config};
 use crate::prelude::*;
 use erased_serde::Deserializer;
 use std::collections::{HashMap, HashSet};

@@ -31,6 +31,7 @@ impl<'a> std::fmt::Display for HttpRequest<'a> {
         write!(f, "{:#?}\n{:#?}", self.headers, "")
     }
 }
+
 impl<'a> HttpRequest<'a> {
     /// Creates new HttpRequest instance from TcpStream, reads the stream to UTF-8 String and parses the headers
     ///
@@ -559,7 +560,7 @@ impl<'a> HttpRequest<'a> {
 
                         headers.add(Cow::from("Content-Length"), Cow::from("0"));
 
-                        let mut response: HttpResponse<'_> = HttpResponse::new(headers, None);
+                        let mut response: HttpResponse<'_> = HttpResponse::new(&headers, None);
 
                         response.write(config, writer).await?;
 

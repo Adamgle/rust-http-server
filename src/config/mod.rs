@@ -1,9 +1,8 @@
 pub mod database;
 
-use crate::http::{HttpRequestMethod, HttpResponseHeaders};
-use crate::http_request::HttpRequest;
+use crate::http::HttpRequestMethod;
 use crate::logger::Logger;
-use crate::routes::{RouteTableKey, RouterHandler};
+use crate::routes::RouteTable;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsStr;
@@ -30,7 +29,6 @@ pub struct Config {
     pub database: Option<Arc<Mutex<Database>>>,
 }
 
-
 /// Contains information related to the application configuration, not the server configuration.
 ///
 /// It is used to store the URL of the server, routes, and other application-specific settings.
@@ -41,21 +39,16 @@ pub struct AppConfig {
     /// `routes` is a HashMap of routes, where key is a tuple of path and method,
     /// and value is a function that takes a mutable reference to HttpRequest and HttpResponseHeaders.
     /// We are evaluating the routes on startup and use it for the duration of the program.
-    pub routes: Option<
-        HashMap<
-            (&'static str, HttpRequestMethod),
-            Box<dyn Fn(&mut HttpRequest, &mut HttpResponseHeaders) -> ()>,
-        >,
-    >,
+    pub routes: RouteTable,
 }
 
-impl AppConfig {
+impl<'a> AppConfig {
     /// Creates a new AppConfig
-    pub fn new(url: url::Url) -> Self {
-        AppConfig {
-            routes: Self::create_routes(),
+    pub fn new(url: url::Url) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Ok(AppConfig {
+            routes: Self::create_routes()?,
             url,
-        }
+        })
     }
 
     /// Creates a new routes HashMap, that is used to store the routes of the application.
@@ -63,31 +56,18 @@ impl AppConfig {
     ///
     /// Since the function could get big, we will use a wrapper function to create the routes.
     ///
-    pub fn create_routes() -> Result<
-        Option<
-            HashMap<
-                (&'static str, HttpRequestMethod),
-                Box<dyn Fn(&mut HttpRequest, &mut HttpResponseHeaders) -> ()>,
-            >,
-        >,
-        Box<dyn Error + Send + Sync>,
-    > {
+    pub fn create_routes() -> Result<RouteTable, Box<dyn Error + Send + Sync>> {
+        crate::routes::RouteTable::create_routes()
     }
-    crate::routes::create_routes()
 }
 
 // We will omit value of the routes HashMap to be printed as it is a function pointer
-impl std::fmt::Debug for AppConfig {
+impl<'a> std::fmt::Debug for AppConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppConfig")
             .field("url", &self.url)
-            .field(
-                "routes",
-                &self
-                    .routes
-                    .as_ref()
-                    .and_then(|r| Some(r.keys().collect::<Vec<_>>())),
-            )
+            .field("routes", &self.routes)
+            // .field("routes", &self.routes.0.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -344,7 +324,7 @@ impl SpecialDirectories {
         })
     }
 }
-impl Config {
+impl<'a> Config {
     /// Parses user defined args while executing the program
     pub async fn new(
         args: Vec<String>,
@@ -416,16 +396,8 @@ impl Config {
             url: config_file
                 .domain_to_url(&domain, &socket_address.port())
                 .inspect_err(|e| eprintln!("Error parsing domain to URL: {}", e))?,
-            routes: AppConfig::create_routes(), // TODO: We will implement that later
+            routes: AppConfig::create_routes()?,
         };
-
-        // Bat-shit crazy
-        // let http_url = url::Url::parse(&format!(
-        //     "{}://{}:{}",
-        //     config_file.protocol,
-        //     domain,
-        //     socket_address.port().to_string()
-        // ))?;
 
         Ok(Arc::new(Mutex::new(Config {
             socket_address,
@@ -489,5 +461,13 @@ impl Config {
         } else {
             Err("Database not initialized".into())
         }
+    }
+
+    pub fn get_routes(&self) -> &RouteTable {
+        &self.app.routes
+    }
+
+    pub fn get_routes_mut(&mut self) -> &mut RouteTable {
+        &mut self.app.routes
     }
 }

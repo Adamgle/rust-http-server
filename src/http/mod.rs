@@ -112,7 +112,7 @@ impl<'a> HttpRequestRequestLine {
         // absolute one but with a default's for domain, port and protocol under Config file for safety.
         // We want the functionality for setting path segments and queries so we have to do that.
 
-        let base = config.http_url.clone();
+        let base = config.app.url.clone();
 
         // Remove leading root identifier from the request_target as that would end up redundant and invalid
         // The reason is doing parsing with url::Url you will end up with a double root after clearing the segments
@@ -139,6 +139,7 @@ impl<'a> HttpRequestRequestLine {
         // for example if we want to sent query to search for something, we should not be limited
         // what we could search for.
 
+        // We are working on non-percent-decoded request_target so save to assume that "?" is a separator for queries.
         let path = request_target.split('?').next().unwrap_or(request_target);
         HttpRequestHeaders::validate_request_target_path(path.to_string())?;
 
@@ -192,7 +193,7 @@ impl<'a> HttpRequestRequestLine {
     // }
 }
 
-#[derive(Debug, PartialEq, Clone, Eq, Hash, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub enum HttpRequestMethod {
     GET,
     POST,
@@ -267,6 +268,7 @@ impl<'a> std::fmt::Display for HttpResponseStartLine<'a> {
 pub struct HttpRequestError {
     pub status_code: u16,
     /// Standardized description of an error, technically should be optional.
+    /// NOTE: If we would have an enum of the status_code's we could map the status_text to each of the said status codes.
     pub status_text: String,
     /// Used to describe in what format the response is sent to the client.
     pub content_type: Option<String>,
@@ -349,6 +351,8 @@ impl HttpRequestError {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // NOTE: This page could be dynamically set, but this function is sketchy and not very useful and flexible, so maybe we will refactor in the future.
 
+        dbg!(&err);
+
         let mut writer = writer.lock().await;
         let config = config.lock().await;
 
@@ -390,7 +394,8 @@ impl HttpRequestError {
                 ),
             );
 
-            let mut response = HttpResponse::new(headers.unwrap(), body);
+            let headers = headers.unwrap();
+            let mut response = HttpResponse::new(&headers, body);
             return response.write(&config, &mut writer).await;
         }
         // This is used to control the flow of the program, not really an error.
@@ -416,7 +421,7 @@ impl HttpRequestError {
                 );
             }
 
-            let mut response = HttpResponse::new(headers, body);
+            let mut response = HttpResponse::new(&headers, body);
 
             return response.write(&config, &mut writer).await;
         } else {
@@ -443,7 +448,8 @@ impl HttpRequestError {
                 Cow::from(body.as_ref().unwrap().len().to_string()),
             );
 
-            let mut response = HttpResponse::new(headers.unwrap(), body);
+            let headers = headers.unwrap();
+            let mut response = HttpResponse::new(&headers, body);
 
             return response.write(&config, &mut writer).await;
         }
@@ -561,9 +567,17 @@ impl<'a> HttpRequestHeaders<'a> {
 
         let mut is_prev_slash = false;
 
-        for (idx, symbol) in request_target.to_string().chars().enumerate() {
-            let window_2 = request_target.get(idx..idx + 2).unwrap_or_default();
-            let window_3 = request_target.get(idx..idx + 3).unwrap_or_default();
+        // That is kinda shenanigans, we could just use the `contains` method.
+
+        for (idx, symbol) in request_target.chars().enumerate() {
+            let window_2 = request_target
+                .get(idx..idx + 2)
+                .unwrap_or_default()
+                .to_uppercase();
+            let window_3 = request_target
+                .get(idx..idx + 3)
+                .unwrap_or_default()
+                .to_uppercase();
 
             if window_2 == RELATIVE_TO_PATH_SYMBOL
                 || window_2 == RELATIVE_TO_PATH_SYMBOL_2
@@ -598,6 +612,7 @@ impl<'a> HttpRequestHeaders<'a> {
 
     // NOTE: I think the below getters could be migrated to HttpResponse as the field that it accesses
     // gets exposed to `super` context, either way it is surely visible out there.
+
 
     pub fn get_request_line(&self) -> &HttpRequestRequestLine {
         &self.request_line
@@ -650,7 +665,7 @@ impl<'a> HttpRequestHeaders<'a> {
         // I think we may safely convert it to path as that is not absolute path as it lacks the leading slash.
         let mut path = PathBuf::from(decoded.as_ref());
 
-        // println!("path: {:?}", path);
+        // Single root path is acceptable, that would resolve the pages/index.html
 
         if path != Path::new("/")
             && (path.is_absolute()
