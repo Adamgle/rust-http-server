@@ -17,7 +17,7 @@ pub mod tcp_handlers {
     use crate::config::Config::{self};
     use crate::http::{HttpHeaders, HttpResponseHeaders, HttpResponseStartLine};
     use crate::http_response::HttpResponse;
-    use crate::routes::{RouteHandlerContext, RouteTableKey};
+    use crate::routes::{RouteHandlerContext, RouteHandlerResult, RouteTableKey};
     use crate::*;
     use http::HttpRequestError;
     use std::borrow::Cow;
@@ -28,7 +28,7 @@ pub mod tcp_handlers {
     use tokio::sync::Mutex;
     use tokio::time::timeout;
 
-    pub async fn connect<'a, 'b>(
+    pub async fn connect(
         config: MutexGuard<'_, Config>,
     ) -> Result<TcpListener, Box<dyn Error + Send + Sync>> {
         return TcpListener::bind(config.socket_address)
@@ -37,7 +37,7 @@ pub mod tcp_handlers {
     }
 
     /// Starts TCP server with provided `Config`, continuously listens for incoming request and propagates them further.
-    pub async fn run_tcp_server<'a, 'b>(
+    pub async fn run_tcp_server(
         config: Arc<Mutex<Config>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // This extra lock will only affect first load time of the server and it is also negligible
@@ -147,7 +147,7 @@ pub mod tcp_handlers {
     }
 
     /// Handles incoming request from the client.
-    async fn handle_client<'a, 'b>(
+    async fn handle_client(
         reader: &mut OwnedReadHalf,
         writer: Arc<Mutex<OwnedWriteHalf>>,
         config: Arc<Mutex<Config>>,
@@ -171,13 +171,22 @@ pub mod tcp_handlers {
 
         println!("Requesting: {:?}", route_key);
 
-        let ctx =
-            RouteHandlerContext::new(&request, &mut headers, &route_key, config.get_database());
+        headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
 
-        // Limit the mutable borrow of headers to this block
-        let body = Some(routes.route(ctx).await?);
+        println!(
+            "Size of type headers: {:?} | Size of value headers: {:?}",
+            std::mem::size_of::<HttpResponseHeaders>(),
+            std::mem::size_of_val(&headers)
+        );
 
-        println!("{body:?}");
+        // To resolve the double mutable reference to headers we will move the ownership of headers
+        // that is cheap operation, and hopefully solve the issue.
+        let ctx = RouteHandlerContext::new(&request, headers, &route_key, config.get_database());
+
+        let RouteHandlerResult { mut headers, body } = routes.route(ctx).await?;
+
+        // Early propagate before writing to headers.
+        let body = Some(body?);
 
         headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
 

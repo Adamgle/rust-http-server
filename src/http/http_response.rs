@@ -16,7 +16,7 @@ pub struct HttpResponse<'a> {
     // serialized: Option<Vec<u8>>,
 }
 
-impl<'a, 'b> HttpResponse<'a> {
+impl<'a> HttpResponse<'a> {
     pub fn new(headers: &'a HttpResponseHeaders<'a>, body: Option<String>) -> Self {
         Self {
             body,
@@ -82,7 +82,7 @@ impl<'a, 'b> HttpResponse<'a> {
     /// `NOTE`: Internally check for writer being writable.
     pub async fn write(
         &mut self,
-        config: &MutexGuard<'_, Config>,
+        _config: &MutexGuard<'_, Config>,
         writer: &mut MutexGuard<'_, OwnedWriteHalf>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let data = match self.parse_response() {
@@ -94,8 +94,6 @@ impl<'a, 'b> HttpResponse<'a> {
         };
         // short ----------
         // long     ----
-
-
 
         writer
             .writable()

@@ -9,41 +9,64 @@ use crate::routes::{RouteHandlerContext, RouteTable, RouteTableKey};
 /// for example, `:database/` would run for any path that starts with `database/`, like `database/users` or `database/transactions`.
 pub struct Middleware;
 
+/// Middleware handlers will not give back the headers ownership as they are returning the context
+/// that is passed further to the route handler.
+///
+/// Every change on the headers can be done by a mutable reference, as the context \
+/// is owned by value with headers also owned by value.
+///
+// `NOTE`: This could be type alias.
+pub struct MiddlewareHandlerResult<'b> {
+    // headers: HttpResponseHeaders<'b>,
+    pub ctx: Result<RouteHandlerContext<'b>, Box<dyn Error + Send + Sync>>,
+}
+
 /// The result of executing a middleware function.
-pub type MiddlewareFunctionPointerResult<'b> =
-    Result<RouteHandlerContext<'b>, Box<dyn Error + Send + Sync>>;
+// pub type MiddlewareFunctionPointerResult<'ctx> =
+//     Result<RouteHandlerContext<'ctx>, Box<dyn Error + Send + Sync>>;
 
 /// A function pointer representing a synchronous-style middleware.
-pub type MiddlewareFunctionPointer =
-    for<'b> fn(RouteHandlerContext<'b>) -> MiddlewareFunctionPointerResult<'b>;
+// pub type MiddlewareFunctionPointer =
+//     for<'ctx> fn(RouteHandlerContext<'ctx>) -> MiddlewareFunctionPointerResult<'ctx>;
 
 /// The async version of a middleware — a boxed future resolving to a middleware result.
-pub type MiddlewareClosureResult<'b> =
-    Pin<Box<dyn Future<Output = MiddlewareFunctionPointerResult<'b>> + Send + 'b>>;
+pub type MiddlewareHandlerFuture<'ctx> =
+    Pin<Box<dyn Future<Output = MiddlewareHandlerResult<'ctx>> + Send + 'ctx>>;
 
 /// The actual middleware closure type — async-capable, shareable across threads/tasks.
 
-pub type MiddlewareClosure =
-    Arc<dyn for<'b> Fn(RouteHandlerContext<'b>) -> MiddlewareClosureResult<'b> + Send + Sync>;
+pub type MiddlewareClosure = Arc<
+    dyn for<'ctx> Fn(RouteHandlerContext<'ctx>) -> MiddlewareHandlerFuture<'ctx>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 #[derive(Clone)]
-// 'a is the struct related things, 'b is the context
+// 'a is the struct related things, 'ctx is the context
 pub struct MiddlewareHandler(MiddlewareClosure);
 
 impl MiddlewareHandler {
-    pub fn new(handler: MiddlewareFunctionPointer) -> Self {
-        Self(Self::wrap_handler(handler))
+    pub fn new(handler: fn(RouteHandlerContext<'_>) -> MiddlewareHandlerResult<'_>) -> Self {
+        let c: MiddlewareClosure = Arc::new(move |ctx| {
+            // Convert the function pointer to a boxed future.
+            Box::pin(async move {
+                // Call the handler with the context and return the result.
+                handler(ctx)
+            })
+        });
+        Self(c)
     }
 
-    pub fn wrap_handler<'b>(handler: MiddlewareFunctionPointer) -> MiddlewareClosure {
-        // Wraps the function pointer in an Arc to allow shared ownership.
-        Arc::new(move |ctx| Box::pin(async move { handler(ctx) }))
-    }
+    // pub fn wrap_handler<'ctx>(handler: MiddlewareFunctionPointer) -> MiddlewareClosure {
+    //     // Wraps the function pointer in an Arc to allow shared ownership.
+    //     Arc::new(move |ctx| Box::pin(async move { handler(ctx) }))
+    // }
 
-    pub async fn callback<'b>(
+    pub async fn callback<'ctx>(
         &self,
-        ctx: RouteHandlerContext<'b>,
-    ) -> Result<RouteHandlerContext<'b>, Box<dyn Error + Send + Sync>> {
+        ctx: RouteHandlerContext<'ctx>,
+    ) -> MiddlewareHandlerResult<'ctx> {
         // Call the middleware function pointer with the request, response headers, and key.
 
         (self.0)(ctx).await
@@ -64,28 +87,32 @@ impl std::fmt::Debug for MiddlewareHandler {
 pub const PATH_SEGMENT: &str = ":";
 
 impl Middleware {
-    pub fn init_database<'b>(ctx: RouteHandlerContext<'b>) -> MiddlewareFunctionPointerResult<'b> {
+    pub fn init_database(mut ctx: RouteHandlerContext) -> MiddlewareHandlerResult {
         // Here we could initialize the database connection or any other resource
         // that we need for the middleware.
 
-        println!("Initializing database for context: {:?}", ctx);
+        let _res_headers = ctx.get_response_headers();
 
-        Ok(ctx)
+        // There you do some processing on headers if you want to.
+
+        return MiddlewareHandlerResult { ctx: Ok(ctx) };
     }
 
     pub fn create_middleware(routes: &mut RouteTable) {
         // It should be possible to use the unnormalized paths there
         routes.insert_middleware(
-            RouteTableKey::new(PathBuf::from("pages/\\index.html"), None),
+            // pages/\\index.html => Should be normalized.
+            RouteTableKey::new(PathBuf::from("pages/index.html"), None),
             MiddlewareHandler::new(|ctx| {
                 println!(
                     "Middleware for pages/index.html called with context: {:?}",
                     ctx
                 );
 
-                Ok(ctx)
+                MiddlewareHandlerResult { ctx: Ok(ctx) }
             }),
         );
+
         // routes.insert_middleware(
         //     RouteTableKey::new(Path::new("database/"), None),
         //     MiddlewareHandler::new(Middleware::init_database),

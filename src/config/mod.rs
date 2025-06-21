@@ -332,7 +332,7 @@ impl SpecialDirectories {
     }
 }
 
-impl<'a, 'b> Config {
+impl Config {
     /// Parses user defined args while executing the program
     pub async fn new(args: Vec<String>) -> Result<Arc<Mutex<Self>>, Box<dyn Error + Send + Sync>> {
         if args.len() < 2 {

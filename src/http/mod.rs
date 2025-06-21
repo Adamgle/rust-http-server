@@ -66,7 +66,7 @@ pub struct HttpRequestRequestLine {
     protocol: HttpProtocol,
 }
 
-impl<'a, 'b> HttpRequestRequestLine {
+impl<'a> HttpRequestRequestLine {
     pub async fn new(
         config: &MutexGuard<'_, Config>,
         line: &'a str,
@@ -338,7 +338,7 @@ impl std::fmt::Display for RequestRedirected {
 
 impl std::error::Error for RequestRedirected {}
 
-impl<'a, 'b> HttpRequestError {
+impl HttpRequestError {
     /// NOTE: Can log anything that implements `std::fmt::Display`
     ///
     /// Logs request or response that come from the client or response from the server to ./log.txt
@@ -655,12 +655,24 @@ impl<'a> HttpRequestHeaders<'a> {
     }
 
     pub fn normalize_path(path: impl AsRef<Path>) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
-        let path = path.as_ref();
+        // Rookie conversion.
+        let path = path
+            .as_ref()
+            .to_str()
+            .ok_or_else(|| {
+                Box::<dyn Error + Send + Sync>::from(format!(
+                    "Failed to convert path to string: {:?}",
+                    path.as_ref()
+                ))
+            })?
+            .replace('\\', "/");
+
+        let path = Path::new(&path);
 
         if path != Path::new("/")
             && (path.is_absolute()
                 || path.starts_with("/")
-                || path.starts_with("\\")
+                // || path.starts_with("\\")
                 || path.has_root())
         {
             return Err(Box::<dyn Error + Send + Sync>::from(format!(
