@@ -37,7 +37,7 @@ impl<'a> HttpRequest<'a> {
     ///
     /// `NOTE`: This could return an error if the request was redirect of: `"Request was redirected, writer was shutdown"`
     pub async fn new(
-        config: &MutexGuard<'_, Config>,
+        config: &'a MutexGuard<'_, Config>,
         reader: &mut OwnedReadHalf,
         writer: &mut MutexGuard<'_, OwnedWriteHalf>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
@@ -47,7 +47,7 @@ impl<'a> HttpRequest<'a> {
     /// Parses to HTTP/1.1 from the TcpStream, relying on Content-Length headers, no chunked transfer encoding
     /// is supported. It will read the stream and allocate as much as Content-Length header specifies.
     async fn parse_request(
-        config: &MutexGuard<'_, Config>,
+        config: &'a MutexGuard<'_, Config>,
         reader: &mut OwnedReadHalf,
         writer: &mut MutexGuard<'_, OwnedWriteHalf>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
@@ -483,7 +483,7 @@ impl<'a> HttpRequest<'a> {
     /// Return bool indicating if the request was redirected
     pub async fn redirect_request(
         // &self,
-        config: &MutexGuard<'_, Config>,
+        config: &'a MutexGuard<'_, Config>,
         headers: &HttpRequestHeaders<'a>,
         writer: &mut MutexGuard<'_, OwnedWriteHalf>,
         // writer: &mut MutexGuard<'_, OwnedWriteHalf>,

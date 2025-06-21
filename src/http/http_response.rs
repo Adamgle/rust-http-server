@@ -16,7 +16,7 @@ pub struct HttpResponse<'a> {
     // serialized: Option<Vec<u8>>,
 }
 
-impl<'a> HttpResponse<'a> {
+impl<'a, 'b> HttpResponse<'a> {
     pub fn new(headers: &'a HttpResponseHeaders<'a>, body: Option<String>) -> Self {
         Self {
             body,
@@ -92,6 +92,10 @@ impl<'a> HttpResponse<'a> {
                 return Err(Box::new(HttpRequestError::default()));
             }
         };
+        // short ----------
+        // long     ----
+
+
 
         writer
             .writable()

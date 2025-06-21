@@ -66,7 +66,7 @@ pub struct HttpRequestRequestLine {
     protocol: HttpProtocol,
 }
 
-impl<'a> HttpRequestRequestLine {
+impl<'a, 'b> HttpRequestRequestLine {
     pub async fn new(
         config: &MutexGuard<'_, Config>,
         line: &'a str,
@@ -141,18 +141,26 @@ impl<'a> HttpRequestRequestLine {
 
         // We are working on non-percent-decoded request_target so save to assume that "?" is a separator for queries.
         let path = request_target.split('?').next().unwrap_or(request_target);
-        HttpRequestHeaders::validate_request_target_path(path.to_string())?;
 
-        let mut request_target = base
-            // .strip_prefix("/").unwrap_or(&request_target)
-            .join(request_target)
-            .map_err(|e| HttpRequestError {
-                status_code: 400,
-                status_text: String::from("Bad Request"),
-                message: Some(format!("Invalid request target: {}", request_target)),
-                internals: Some(Box::<dyn Error + Send + Sync>::from(e)),
-                ..Default::default()
-            })?;
+        HttpRequestHeaders::validate_request_target_path(path.to_string()).map_err(
+            |internals| {
+                Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                    status_code: 400,
+                    status_text: "Bad Request".into(),
+                    message: "Corrupted request target".to_string().into(),
+                    internals: Some(internals),
+                    ..Default::default()
+                })
+            },
+        )?;
+
+        let mut request_target = base.join(request_target).map_err(|e| HttpRequestError {
+            status_code: 400,
+            status_text: String::from("Bad Request"),
+            message: Some(format!("Invalid request target: {}", request_target)),
+            internals: Some(Box::<dyn Error + Send + Sync>::from(e)),
+            ..Default::default()
+        })?;
 
         let protocol: HttpProtocol = HttpProtocol::from_str(protocol)?;
 
@@ -193,7 +201,7 @@ impl<'a> HttpRequestRequestLine {
     // }
 }
 
-#[derive(Debug, PartialEq, Clone, Eq, Hash, strum_macros::EnumIter)]
+#[derive(Debug, PartialEq, Clone, Eq, Hash, strum_macros::EnumIter, PartialOrd, Ord)]
 pub enum HttpRequestMethod {
     GET,
     POST,
@@ -330,7 +338,7 @@ impl std::fmt::Display for RequestRedirected {
 
 impl std::error::Error for RequestRedirected {}
 
-impl HttpRequestError {
+impl<'a, 'b> HttpRequestError {
     /// NOTE: Can log anything that implements `std::fmt::Display`
     ///
     /// Logs request or response that come from the client or response from the server to ./log.txt
@@ -554,57 +562,78 @@ impl<'a> HttpRequestHeaders<'a> {
     /// so we will not support it. Also I cannot think of way to decode something like a space but do not decode the slash,
     /// and when to do so.
     /// `NOTE`: This should be run on un-decoded request target path.
+    ///
+    /// `NOTE`: It converts the path to string, when we would want to support not UTF-8 paths that would be a problem.
+    /// currently we are just parsing the encoded path to UTF-8 so does not matter.
     pub fn validate_request_target_path(
         request_target: String,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // MOTIVATION, as in motivation "motivation"?
+        // There is a request target coming to the server, it could contain encoded
+        // slashed, backslashes, relative paths symbols like "./" or "../". We now that
+        // the request target, after the normalization, is resolved to the Path that would look up
+        // the file system. For it to be valid and not breaking or insecure we need to remove
+        // consecutive slashes or backslashes, as well as the relative path symbols like "./" or "../".
+        // We know that we operate on the non-decoded request target path. We also know that
+        // the path should be decoded later, first to normalize, then casted to PathBuf and used
+        // potentially as a file system path (it could also be abstracted path that does not exist on the server
+        // but we know how to respond to that path programmatically, as there is a handler attached to every path)/
+
+        // UPDATE: We will allow consecutive slashes and any consecutive slash would be resolved to single slash.
+
+        // NOTE: Percent encoded slashes or any of the characters that could affect system path resolution,
+        // should not affect the actual file system path resolution, user should not be able to encode
+        // path characters, even thought after validation that would be valid if decoded.
+
+        // Can't I just use the request target as is?
+        // Path "asd/%2F/asd" would normalize to "asd/%2F/asd/index.html"
+        // The problem is that this: "asd/%2F/asd" would be correct if not decoded => "asd/%2F/asd/index.html".
+        // "asd/asd%20asd" => Invalid, as as we would have to resolve %20 to space => "asd/asd asd/index.html"
+        // "asd/asd%20/asd/%2F/asd" => Valid path, but only if we would decode %20 but not %2F
+        // Conclusion: We need to stop decoding slashes and backslashes or disallow them in the request target
+
+        // Update: We will not allow encoded slashes or backslashes in the request target.
+        // We will not allow consecutive slashes, but because of the former we just need
+        // to consider literal slashes not the encoded ones.
+
+        // One edge case I can think about is encoded slashes, like "%2F" or "%5C" as the filename
+        // "asd/%2F.index" | "asd/%5C.index" would be valid paths, but we do not want to allow
+        // But we cannot allow that as a valid path, consider: "asd/asd%20asd/%2F.html"
+        // We would need to decode the space but do not decode the slash, which is not possible with current
+        // crate I am using to parse it.
+        // We could also hit upon a directory name as encoded slash, but we will also invalidate that.
+
+        // File system traversal symbols
         const RELATIVE_TO_PATH_SYMBOL: &str = "./";
-        const ONE_DIRECTORY_DOWN_SYMBOL: &str = "../";
-        // Equivalent using backslash.
-        const ONE_DIRECTORY_DOWN_SYMBOL_2: &str = "..\\";
         const RELATIVE_TO_PATH_SYMBOL_2: &str = ".\\";
+        const ONE_DIRECTORY_DOWN_SYMBOL_2: &str = "..\\";
+        const ONE_DIRECTORY_DOWN_SYMBOL: &str = "../";
+
+        // Percent encoded slashes, that would be invalid in the request target
         const PERCENT_ENCODED_SLASH: &str = "%2F";
         const PERCENT_ENCODED_BACKSLASH: &str = "%5C";
+        const DOUBLE_SLASH: &str = "//";
+        const DOUBLE_BACKSLASH: &str = "\\\\";
 
-        let mut is_prev_slash = false;
+        const DISALLOWED_SYMBOLS: [&str; 8] = [
+            RELATIVE_TO_PATH_SYMBOL,
+            RELATIVE_TO_PATH_SYMBOL_2,
+            ONE_DIRECTORY_DOWN_SYMBOL,
+            ONE_DIRECTORY_DOWN_SYMBOL_2,
+            PERCENT_ENCODED_SLASH,
+            PERCENT_ENCODED_BACKSLASH,
+            DOUBLE_SLASH,
+            DOUBLE_BACKSLASH,
+        ];
 
-        // That is kinda shenanigans, we could just use the `contains` method.
-
-        for (idx, symbol) in request_target.chars().enumerate() {
-            let window_2 = request_target
-                .get(idx..idx + 2)
-                .unwrap_or_default()
-                .to_uppercase();
-            let window_3 = request_target
-                .get(idx..idx + 3)
-                .unwrap_or_default()
-                .to_uppercase();
-
-            if window_2 == RELATIVE_TO_PATH_SYMBOL
-                || window_2 == RELATIVE_TO_PATH_SYMBOL_2
-                || window_3 == ONE_DIRECTORY_DOWN_SYMBOL
-                || window_3 == ONE_DIRECTORY_DOWN_SYMBOL_2
-                || window_3 == PERCENT_ENCODED_BACKSLASH
-                || window_3 == PERCENT_ENCODED_SLASH
-                || ((symbol == '/' || symbol == '\\') && is_prev_slash)
-            {
-                return Err(HttpRequestError {
-                    status_code: 400,
-                    status_text: "Bad Request".into(),
-                    message: "Corrupted request target".to_string().into(),
-                    internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
-                        "Path contains file system traversal symbols or consecutive slashes {}",
-                        request_target
-                    ))),
-                    ..Default::default()
-                }
-                .into());
-            }
-
-            if symbol == '/' || symbol == '\\' {
-                is_prev_slash = true;
-            } else {
-                is_prev_slash = false;
-            }
+        if DISALLOWED_SYMBOLS
+            .iter()
+            .any(|symbol| request_target.contains(symbol))
+        {
+            return Err(Box::<dyn Error + Send + Sync>::from(format!(
+                "Path contains file system traversal symbols or consecutive slashes {}",
+                request_target
+            )));
         }
 
         Ok(())
@@ -672,7 +701,6 @@ impl<'a> HttpRequestHeaders<'a> {
                     Ok(normalized)
                 }
             }
-
             None => {
                 let mut dir = PathBuf::from(SpecialDirectories::Pages.to_string());
 
@@ -714,10 +742,6 @@ impl<'a> HttpRequestHeaders<'a> {
         // maybe we should opt out of that behavior as that would make some path names invalid
         // that contain the encoded slash, which they are technically valid.
         // HttpRequestHeaders::validate_request_target(decoded.to_string())?;
-
-        // NOTE: That may a breaking change so need to watch it closely, currently in the path
-        // there is leading slash and I want to remove it. Maybe that will no broke anything as
-        // we either way removing that slash when reading the resource.
 
         // I think we may safely convert it to path as that is not absolute path as it lacks the leading slash.
         let path = Path::new(decoded.as_ref());

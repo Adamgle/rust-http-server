@@ -8,13 +8,13 @@ use std::{
 };
 
 use strum::IntoEnumIterator;
-use tokio::sync::MutexGuard;
+use tokio::sync::Mutex;
 
 use crate::{
-    config::{Config, SpecialDirectories},
+    config::{database::Database, SpecialDirectories},
     http::{HttpRequestError, HttpRequestHeaders, HttpRequestMethod, HttpResponseHeaders},
     http_request::HttpRequest,
-    middleware::{Middleware, MiddlewareClosure, MiddlewareFunctionPointer, PATH_SEGMENT},
+    middleware::{Middleware, MiddlewareHandler, PATH_SEGMENT},
 };
 
 // NOTE: Route table does live for the duration of the program, but not the values it is referencing.
@@ -25,7 +25,22 @@ use crate::{
 // NOTE: Lifetimes are not practically even in this code, as the RouteTable does not have not tied
 // the request and response headers to the lifetime of struct, it is independent and those values lives shorter lifetime.
 
+// 'a is the struct related things, 'b is the context
 pub struct RouteTable(HashMap<RouteTableKey, Arc<RouteTableValue>>);
+
+impl std::fmt::Display for RouteTable {
+    // Writes just keys sorted by path and method.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Print just the keys of the route table, sorting by methods each path if
+        // the path is registered to use multiple methods.
+        let routes = self.get_routes().clone();
+        let mut keys = routes.keys().collect::<Vec<_>>();
+
+        keys.sort();
+
+        write!(f, "{keys:?}")
+    }
+}
 
 impl std::fmt::Debug for RouteTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -41,14 +56,11 @@ impl std::fmt::Debug for RouteTable {
                     .map(|(k, v)| {
                         let (handler, middleware) = (v.get_handler(), v.get_middleware());
 
-                        // (
-                        //     k,
-                        //     format!(
-                        //         "Handler at: {:?}, Middleware at: {:?}",
-                        //         handler.as_ref().map(|h| h.0 as *const ()),
-                        //         middleware.as_ref().map(|m| m.0 as *const ())
-                        //     ),
-                        // )
+                        (
+                            k,
+                            handler.and_then(|_| Some(())),
+                            middleware.and_then(|_| Some(())),
+                        )
                     })
                     .collect::<Vec<_>>(),
             )
@@ -87,9 +99,9 @@ impl RouteTableValue {
 /// Routing table lives for the whole lifetime of the server, since path is a `static` lifetime.
 ///
 /// Method is optional to support middleware paths that can be run with any method.
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct RouteTableKey(pub PathBuf, pub Option<HttpRequestMethod>);
+#[derive(Debug, Clone, Hash, Eq, PartialEq, PartialOrd, Ord)]
 
+pub struct RouteTableKey(pub PathBuf, pub Option<HttpRequestMethod>);
 impl RouteTableKey {
     /// Creates a new route table key with the given path and method.
 
@@ -99,9 +111,26 @@ impl RouteTableKey {
         // We would panic if path cannot be normalized, so we can change the static definition of the path
         // as this could be consider a typo in the code.
 
+        // First validate, then normalize.
+
+        // That would not be necessary if validate_request_target_path would operate on `Path` || `PathBuf` || impl AsRef<Path>.
+        let path_string = path
+            .as_ref()
+            .to_str()
+            .map(|s| s.to_string())
+            .expect("Path must be valid UTF-8");
+
+        if let Err(e) = HttpRequestHeaders::validate_request_target_path(path_string) {
+            panic!("Could not validate path: {:?}", e);
+        };
+
+        let path = path.as_ref();
+
         Self(
-            HttpRequestHeaders::normalize_path(path)
-                .expect("Could not normalize the path, possible typo in the path"),
+            HttpRequestHeaders::normalize_path(path).expect(&format!(
+                "Could not normalize path: {}, possible typo in the code!",
+                path.display()
+            )),
             method,
         )
     }
@@ -163,6 +192,12 @@ impl RouteTableKey {
     }
 }
 
+// impl Ord for RouteTableKey {
+//     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+//         todo!()
+//     }
+// }
+
 /// Context for the route handler that takes a reference `HttpRequest`, a mutable reference to `HttpResponseHeaders, and a
 /// reference to `RouteTableKey`.
 ///
@@ -171,24 +206,16 @@ impl RouteTableKey {
 /// as it is a reference to the key built in the `handle_client` entry point.
 
 #[derive(Debug)]
-// pub struct RouteHandlerContext<'a>(
-//     &'a HttpRequest<'a>,
-//     &'b mut HttpResponseHeaders<'a>,
-//     &'a RouteTableKey,
-//     // NOTE: Not sure about the lifetime down there.
-//     &'a MutexGuard<'a, Config>,
-//     // Option<&'a DatabaseConfigEntry>,
-//     // &'a Option<Arc<Mutex<Database>>>,
-// );
 
-pub struct RouteHandlerContext<'a>(
-    &'a HttpRequest<'a>,
-    &'a mut HttpResponseHeaders<'a>,
-    &'a RouteTableKey,
-    // NOTE: Not sure about the lifetime down there.
-    &'a MutexGuard<'a, Config>,
-    // Option<&'a DatabaseConfigEntry>,
-    // &'a Option<Arc<Mutex<Database>>>,
+pub struct RouteHandlerContext<'b>(
+    &'b HttpRequest<'b>,
+    &'b mut HttpResponseHeaders<'b>,
+    &'b RouteTableKey,
+    Result<Arc<Mutex<Database>>, Box<dyn Error + Send + Sync>>,
+    // Config cannot be used there Config itself contains the RouteTable, that would be a circular reference.
+    // Maybe we would no have issues with that as Config is in Arc<Mutex<_>>, but we won't do that.
+    // If we would access that filed we would have a problem.
+    // &'a MutexGuard<'a, Config>,
 );
 
 impl<'a> RouteHandlerContext<'a> {
@@ -196,9 +223,9 @@ impl<'a> RouteHandlerContext<'a> {
         request: &'a HttpRequest<'a>,
         response_headers: &'a mut HttpResponseHeaders<'a>,
         key: &'a RouteTableKey,
-        config: &'a MutexGuard<'a, Config>,
+        database: Result<Arc<Mutex<Database>>, Box<dyn Error + Send + Sync>>,
     ) -> Self {
-        Self(request, response_headers, key, config)
+        Self(request, response_headers, key, database)
     }
 
     pub fn get_request(&self) -> &HttpRequest<'a> {
@@ -216,35 +243,50 @@ impl<'a> RouteHandlerContext<'a> {
         &self.2
     }
 
-    pub fn get_config(&self) -> &MutexGuard<'a, Config> {
-        // Returns the config of the route handler context.
-        self.3
+    pub fn get_database(&self) -> &Result<Arc<Mutex<Database>>, Box<dyn Error + Send + Sync>> {
+        // Returns the database of the route handler context.
+        &self.3
     }
 }
+
+// A closure returns a Future that resolves to a function pointer that resolves to Result of a web request, request body.
 
 /// Result of the function pointer for the route handler.
 type RouteHandlerFunctionPointerResult = Result<String, Box<dyn Error + Send + Sync>>;
 
 // Function pointer for the route handler.
 type RouteHandlerFunctionPointer =
-    for<'a> fn(RouteHandlerContext<'a>) -> RouteHandlerFunctionPointerResult;
+    for<'b> fn(RouteHandlerContext<'b>) -> RouteHandlerFunctionPointerResult;
 
 // A boxed future that resolves to the Result of the route handler function pointer.
-type RouteHandlerClosureResult<'a> =
-    Pin<Box<dyn Future<Output = RouteHandlerFunctionPointerResult> + Send + 'a>>;
+// That is the callback of the closure, returns a Future that when awaited would resolve to function pointer.
+
+// A callback lives for 'static
+type RouteHandlerClosureResult<'b> =
+    Pin<Box<dyn Future<Output = RouteHandlerFunctionPointerResult> + Send + 'b>>;
+
+// (&self.0) => Reference counted pointer to trait object of Fn that takes RouteHandlerContext<'a>
+// with a lifetime 'a bounded by the RouteHandlerClosure itself, returning a Pinned Boxed Future
+// that when awaited resolved to a
+// (&self.0)(ctx)
 
 // TODO: The struct of RouteHandlerValue is already behind Arc, check how to avoid one of the Arc's.
 // A closure of the route handler
 // We could not make it work with the function pointer directly as we want to use async/await syntax,
-// Maybe if we closure is behind the Arc it would not take much memory.
-type RouteHandlerClosure =
-    Arc<dyn for<'a> Fn(RouteHandlerContext<'a>) -> RouteHandlerClosureResult<'a> + Send + Sync>;
 
-// Arc::new(|ctx| )
+// RouteHandlerContext does not live for 'a lifetime
+// NOTE: Check if that 'static fits there, as of my logic, closure is computed at runtime and lives for the duration of the program,
+// so it should be 'static, but maybe I am wrong.
+type RouteHandlerClosure = Arc<
+    dyn for<'b> Fn(RouteHandlerContext<'b>) -> RouteHandlerClosureResult<'b>
+        + Send
+        + Sync
+        + 'static,
+>;
 
-/// A function pointer that takes executed to handle specific route.
+/// A closure enclosing a function pointer that can be called with a `RouteHandlerContext`.
 ///
-/// The idea is that the `RouteHandler` being a function pointer stored in the `Arc` is valid for the duration of the program,
+/// The idea is that the `RouteHandler` being a function pointer inside a closure stored in the `Arc` is valid for the duration of the program,
 /// and can be referenced via multiple async tasks. Only the parameters `RouteHandlerContext` passed to the handler
 /// are changing with each request and we make sure to not store that references in the routing table.
 //
@@ -256,25 +298,30 @@ pub struct RouteHandler(RouteHandlerClosure);
 impl std::fmt::Debug for RouteHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Custom debug implementation to show the function pointer address.
-        f.debug_struct("RouteHandler")
-            // .field("function_pointer", &format!("{:p}", self.0 as *const ()))
+        f.debug_tuple("RouteHandler")
+            // That is impractical, it show the memory address of the dyn Trait
+            .field(&Arc::as_ptr(&self.0))
+            // .field(&Some(()))
             .finish()
     }
 }
 
-impl RouteHandler {
-    pub fn new<'a>(handler: RouteHandlerFunctionPointer) -> Self {
-        // RouteHandler::new(Arc::new(|ctx| RouteHandler::static_route_handler(ctx)))
+impl<'a> RouteHandler {
+    pub fn new(handler: RouteHandlerFunctionPointer) -> Self {
         Self(Self::wrap_handler(handler))
     }
 
-    fn wrap_handler<'a>(handler: RouteHandlerFunctionPointer) -> RouteHandlerClosure {
+    fn wrap_handler(handler: RouteHandlerFunctionPointer) -> RouteHandlerClosure {
         Arc::new(move |ctx| Box::pin(async move { handler(ctx) }))
     }
 
-    pub async fn callback<'a>(
+    /// NOTE: The function that is called inside the callback is not async itself, but when called with
+    /// callback it would be. This is due to how RouteHandler is initialized, that you can pass a function pointer
+    /// that would coerced to an async function.
+    pub async fn callback<'b>(
         &self,
-        ctx: RouteHandlerContext<'a>,
+        // 'a is not for RouteHandlerContext, that is a separate lifetime only to regard of RouteHandler.
+        ctx: RouteHandlerContext<'b>,
     ) -> Result<String, Box<dyn Error + Send + Sync>> {
         // Call the function pointer with the request, response headers, and key.
         // let a = self.0.as_ref();
@@ -283,48 +330,19 @@ impl RouteHandler {
     }
 
     /// A static route handler that reads the requested resource from the `/public` directory.
-    pub fn static_route_handler<'a>(
-        ctx: RouteHandlerContext<'a>,
-    ) -> RouteHandlerFunctionPointerResult {
+    pub fn static_route_handler<'b>(
+        ctx: RouteHandlerContext<'b>,
+    ) -> RouteHandlerFunctionPointerResult
+// where
+    //     'a: 'b,
+    {
         let RouteHandlerContext(req, res, key, _) = ctx;
 
         Ok(req.read_requested_resource(res, key.get_path())?)
     }
 }
 
-#[derive(Clone)]
-pub struct MiddlewareHandler(MiddlewareClosure);
-
-impl std::fmt::Debug for MiddlewareHandler {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Custom debug implementation to show the function pointer address.
-        f.debug_struct("MiddlewareHandler")
-            // .field("function_pointer", &format!("{:p}", self.0 as *const ()))
-            .finish()
-    }
-}
-
-impl MiddlewareHandler {
-    pub fn new(handler: MiddlewareFunctionPointer) -> Self {
-        Self(Self::wrap_handler(handler))
-    }
-
-    pub fn wrap_handler<'a>(handler: MiddlewareFunctionPointer) -> MiddlewareClosure {
-        // Wraps the function pointer in an Arc to allow shared ownership.
-        Arc::new(move |ctx| Box::pin(async move { handler(ctx) }))
-    }
-
-    pub async fn callback<'a>(
-        &self,
-        ctx: RouteHandlerContext<'a>,
-    ) -> Result<RouteHandlerContext<'a>, Box<dyn Error + Send + Sync>> {
-        // Call the middleware function pointer with the request, response headers, and key.
-
-        (self.0)(ctx).await
-    }
-}
-
-impl RouteTable {
+impl<'b> RouteTable {
     pub fn new() -> Self {
         // Creates a new empty route table.
         Self(HashMap::new())
@@ -346,7 +364,7 @@ impl RouteTable {
         let mut insert_handler_closure = |key: RouteTableKey, handler: RouteHandler| {
             match self
                 .get(&key)
-                .map(|v| (v.get_handler(), v.get_middleware()))
+                .map(|v| (v.get_handler().cloned(), v.get_middleware().cloned()))
             {
                 Some((Some(_), Some(_))) => {
                     // Route exists with both RouteHandler and MiddlewareHandler — panic duplicate
@@ -365,6 +383,7 @@ impl RouteTable {
                 // Middleware exists but no RouteHandler — insert new RouteHandler while preserving middleware
                 Some((None, Some(middleware))) => {
                     let middleware = middleware.clone();
+
                     self.get_routes_mut()
                         .insert(key, RouteTableValue::new(Some(handler), Some(middleware)));
                 }
@@ -427,10 +446,11 @@ impl RouteTable {
         //  -> As one would cover the other, of course we could just invoke both, but that is invalid, there cannot be 2 middleware handlers for the same path.
 
         let (method, path) = (key.get_method(), key.get_path());
+        // let (handler, middleware) = (handler.clone(), Some(handler.clone()));
 
         let mut insert_middleware_closure = |key, handler| match self
             .get(&key)
-            .map(|v| (v.get_handler(), v.get_middleware()))
+            .map(|v| (v.get_handler().cloned(), v.get_middleware().cloned()))
         {
             Some((Some(_), Some(_))) => {
                 // If the route already exists with both RouteHandler and MiddlewareHandler, we panic.
@@ -453,6 +473,7 @@ impl RouteTable {
                 // If the route exists with a RouteHandler but no MiddlewareHandler, we replace it with the new MiddlewareHandler.
                 // This is useful for routes that should have middleware applied to them.
                 let route = Some(route.clone());
+
                 self.get_routes_mut().insert(
                     key,
                     // Cloning a route is 8 bytes. We can afford that.
@@ -477,15 +498,15 @@ impl RouteTable {
         }
     }
 
-    pub fn get(&self, key: &RouteTableKey) -> Option<&Arc<RouteTableValue>> {
+    pub fn get(&self, key: &RouteTableKey) -> Option<Arc<RouteTableValue>> {
         // Get the route handler for the given key, if it exists.
-        self.get_routes().get(key)
+        self.get_routes().get(key).map(|v| Arc::clone(v))
     }
 
     /// Statically creates the routes based on the user definitions of the routes with appropriate handlers.
     ///
     /// Automatically collects the routes from the `SpecialDirectories` and inserts them into the route table.
-    pub fn create_routes() -> Result<RouteTable, Box<dyn Error + Send + Sync>> {
+    pub fn create_routes() -> Result<Self, Box<dyn Error + Send + Sync>> {
         // We have the routes cached in the file that is composed in runtime and parsed to some context at startup.
         // We check if the path exists the cached routes or is that a new route that we have defined in the code in that function.
 
@@ -506,15 +527,15 @@ impl RouteTable {
                 eprintln!("Failed to collect static routes: {}", e);
             })?
             .into_iter()
-            .for_each(|(path, method)| {
+            .for_each(|key| {
                 // This callback would be used to handle the request for the static route.
                 // The parameters should live for the duration of the request but the callback function
                 // should live for 'static
 
-                routes.insert_handler(
-                    RouteTableKey::new(path, Some(method)),
-                    RouteHandler::new(RouteHandler::static_route_handler),
-                );
+                // dyn dispatch => It generates a vtable for the function pointer, which is a bit slower than static dispatch,
+                // but allows us to use the same function pointer for different types of requests.
+
+                routes.insert_handler(key, RouteHandler::new(RouteHandler::static_route_handler));
             });
 
         // Populates the middleware paths with handlers
@@ -531,7 +552,7 @@ impl RouteTable {
             RouteHandler::new(|ctx: RouteHandlerContext| {
                 // Here we would handle the POST request to the tasks.json file.
                 // This is just a placeholder for the actual implementation.
-                println!("Creating a new task...");
+                println!("Creating a new task with context: {:?}", ctx);
                 // database always exists in the database/ segments.
                 Ok(String::from("Ok"))
             }),
@@ -578,15 +599,6 @@ impl RouteTable {
         //         Ok(String::from("Ok"))
         //     }),
         // );
-
-        println!(
-            "All routes: {:#?}",
-            routes
-                .get_routes()
-                .iter()
-                .map(|(key, _)| key.get_path())
-                .collect::<Vec<_>>()
-        );
 
         fn estimate_route_table_size(route_table: &RouteTable) -> usize {
             let mut total = 0;
@@ -638,17 +650,11 @@ impl RouteTable {
     /// Routes the request to the appropriate handler based on the key, if it exists.
     ///
     /// Returns the body of the response as a String if the route is found.
-    pub async fn route<'a>(
+    pub async fn route(
         &self,
-        mut ctx: RouteHandlerContext<'a>,
+        mut ctx: RouteHandlerContext<'b>,
     ) -> Result<String, Box<dyn Error + Send + Sync>> {
         // Look up the handler for the route key in the route table.
-
-        // println!(
-        //     "Routing request for path: {} and method: {:?}",
-        //     ctx.get_key().get_path().display(),
-        //     ctx.get_key().get_method()
-        // );
 
         // Check if the route path matches any of the middleware paths, but testing if the path
         // starts with the path of the middleware.
@@ -670,7 +676,7 @@ impl RouteTable {
 
                 let key = RouteTableKey::new(path, ctx.get_key().get_method().clone());
 
-                if let Some(middleware) = self.get(&key).and_then(|v| v.get_middleware()) {
+                if let Some(middleware) = self.get(&key).and_then(|v| v.get_middleware().cloned()) {
                     // Give back the context to the route handler.
                     ctx = middleware.callback(ctx).await?;
                 }

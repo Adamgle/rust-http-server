@@ -28,17 +28,7 @@ pub mod tcp_handlers {
     use tokio::sync::Mutex;
     use tokio::time::timeout;
 
-    // QUESTION: Why is the server you are about to make asynchronous, not multithreaded?
-    // => FOLLOW UP QUESTION:
-    //  -> Can certain tasks be handled in async manner and the other in threading manner. If any, which one should be handled in which way.
-    // ANSWER: Handling multiple connection, which spawn it's separate thread is computationally heavy, may include a system call to spawn a thread,
-    // otherwise in thread-pool.
-    // Actually the dispute is to use async or threaded approach for handling requests
-    // I will use async approach because sending a TCPStream is asynchronous task in time and the stream
-    // can come at different intervals of time. Thread approach would be great if you would like to parallelize bunch of requests
-    // that are independent of each other and this some sort of order of execution is not needed.
-
-    pub async fn connect<'a>(
+    pub async fn connect<'a, 'b>(
         config: MutexGuard<'_, Config>,
     ) -> Result<TcpListener, Box<dyn Error + Send + Sync>> {
         return TcpListener::bind(config.socket_address)
@@ -47,7 +37,7 @@ pub mod tcp_handlers {
     }
 
     /// Starts TCP server with provided `Config`, continuously listens for incoming request and propagates them further.
-    pub async fn run_tcp_server<'a>(
+    pub async fn run_tcp_server<'a, 'b>(
         config: Arc<Mutex<Config>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // This extra lock will only affect first load time of the server and it is also negligible
@@ -61,9 +51,7 @@ pub mod tcp_handlers {
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    // let mut buf = [0; 10];
-
-                    // That is the solution for the keep-alive packets that are sent to the server.
+                    // That is the solution for the keep-alive packets that are sent to the server, kind of.
 
                     // Wait for the stream to be readable before proceeding to parse it as http message
                     // to not trigger the http error.
@@ -79,22 +67,18 @@ pub mod tcp_handlers {
                         continue;
                     };
 
-                    // let n = stream.peek(&mut buf).await?;
-                    // println!("Received: {:?} | {}", buf, n);
-
-                    println!(
-                        "New connection established: {}",
-                        stream.peer_addr().unwrap()
-                    );
-
                     let (mut reader, writer) = stream.into_split();
+
+                    // I think writer is in Arc<Mutex<_>> because we want to also use it in case of the error
+                    // handling, but it gets moved into the task, since if we use the Arc for multiple owners
+                    // and Mutex as we need to write to writer and it should be mutable.
                     let writer = Arc::new(Mutex::new(writer));
 
                     let config = Arc::clone(&config);
                     let task_error_writer = Arc::clone(&writer);
 
                     let task = tokio::spawn(async move {
-                        let writer = Arc::clone(&writer);
+                        // let writer = Arc::clone(&writer);
 
                         if let Err(err) = self::handle_client(
                             &mut reader,
@@ -163,11 +147,9 @@ pub mod tcp_handlers {
     }
 
     /// Handles incoming request from the client.
-    async fn handle_client<'a>(
+    async fn handle_client<'a, 'b>(
         reader: &mut OwnedReadHalf,
         writer: Arc<Mutex<OwnedWriteHalf>>,
-        // writer: &mut OwnedWriteHalf,
-        // writer: &mut MutexGuard<'_, OwnedWriteHalf>,
         config: Arc<Mutex<Config>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let config = Arc::clone(&config);
@@ -176,31 +158,32 @@ pub mod tcp_handlers {
         let writer = Arc::clone(&writer);
         let mut writer = writer.lock().await;
 
-        let request: HttpRequest<'_> = HttpRequest::new(&config, reader, &mut writer).await?;
+        let request = HttpRequest::new(&config, reader, &mut writer).await?;
 
-        let mut headers: HttpResponseHeaders<'_> =
-            HttpResponseHeaders::new(HttpResponseStartLine::default());
-
-        // let mut headers = RefCell::new(HttpResponseHeaders::new(HttpResponseStartLine::default()));
+        let mut headers = HttpResponseHeaders::new(HttpResponseStartLine::default());
 
         let routes = config.get_routes();
 
-        let path = request.get_request_target_path()?;
         // If path is invalid and cannot be encoded, that should end the request
+        let path = request.get_request_target_path()?;
 
         let route_key = RouteTableKey::new(path, Some(request.get_method().clone()));
 
-        let ctx = RouteHandlerContext::new(&request, &mut headers, &route_key, &config);
+        println!("Requesting: {:?}", route_key);
 
+        let ctx =
+            RouteHandlerContext::new(&request, &mut headers, &route_key, config.get_database());
+
+        // Limit the mutable borrow of headers to this block
         let body = Some(routes.route(ctx).await?);
 
-        println!("Response body: {:?}", body);
+        println!("{body:?}");
 
-        // headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
+        headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
 
-        // let mut response = HttpResponse::new(&headers, body);
+        let mut response = HttpResponse::new(&headers, body);
 
-        // response.write(&config, &mut writer).await?;
+        response.write(&config, &mut writer).await?;
 
         Ok(())
 

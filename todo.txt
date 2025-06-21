@@ -222,7 +222,8 @@ ISSUES
     => the data that is given to us in the handle_client, that would means that we are working already on that UTF-8 decoded String. Currently if string is not 
     => valid UTF-8 we are throwing an error in the HttpRequestHeaders::get_request_target_path and of course in its alias HttpRequest::get_request_target_path.
     => I don't think we will refactor that, we will just keep the server UTF-8 compliant.
-    
+21. While adding the PathBuf in the RouteTableKey we should percent encode it, as paths like "asd/asd asd" would not match
+    -> because browser would encode the space.
     
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,

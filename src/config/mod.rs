@@ -2,7 +2,7 @@ pub mod database;
 
 use crate::http::HttpRequestMethod;
 use crate::logger::Logger;
-use crate::routes::RouteTable;
+use crate::routes::{RouteTable, RouteTableKey};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsStr;
@@ -16,6 +16,8 @@ use self::database::Database;
 
 #[derive(Debug)]
 /// `NOTE`: It would be good idea to document that
+/// 'a is the lifetime of the RouteTable, 'b is the lifetime of the context given to the callback
+/// of the handler, RouteHandlerContext<'b>.
 pub struct Config {
     pub socket_address: SocketAddrV4,
     /// `unimplemented!()`
@@ -41,7 +43,7 @@ pub struct AppConfig {
     pub routes: RouteTable,
 }
 
-impl<'a> AppConfig {
+impl AppConfig {
     /// Creates a new AppConfig
     // pub fn new(url: url::Url) -> Result<Self, Box<dyn Error + Send + Sync>> {
     //     Ok(AppConfig {
@@ -60,7 +62,7 @@ impl<'a> AppConfig {
 }
 
 // We will omit value of the routes HashMap to be printed as it is a function pointer
-impl<'a> std::fmt::Debug for AppConfig {
+impl std::fmt::Debug for AppConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppConfig")
             .field("url", &self.url)
@@ -254,7 +256,7 @@ impl SpecialDirectories {
     /// stripping the prefix of the `SERVER_PUBLIC` directory.
     fn walk_dir(
         path: &impl AsRef<Path>,
-        paths: &mut HashSet<(PathBuf, HttpRequestMethod)>,
+        paths: &mut HashSet<RouteTableKey>,
         prefix: &PathBuf,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if let Ok(entries) = std::fs::read_dir(path.as_ref()) {
@@ -266,6 +268,7 @@ impl SpecialDirectories {
                     Self::walk_dir(&sub_path, paths, prefix)?;
                 } else if file_type.is_file() {
                     // If the entry is a file, add it to the set of paths
+
                     let file_path = entry.path();
                     // println!("file_path: {:?} | prefix: {:?}", file_path, prefix);
 
@@ -273,11 +276,23 @@ impl SpecialDirectories {
                         eprintln!("File not under public directory: {:?}", e);
                     })?;
 
+                    // Replace windows separator "\\" with unix separator "/"
+                    // Non-UTF-8 paths are skipped because they are unsupported.
+                    let file_path = file_path.to_str().map(|s| s.replace('\\', "/").to_string());
+
                     // println!("Path collected: {:?}", file_path);
 
                     // Insert the file path into the set, converting it to PathBuf
                     // Every path can be accessed with GET method, nothing else is guaranteed.
-                    paths.insert((PathBuf::from(file_path), HttpRequestMethod::GET));
+                    if let Some(file_path) = file_path {
+                        // We are using PathBuf to store the path, and HttpRequestMethod::GET as the method
+                        // that can be used to access the file.
+
+                        paths.insert(RouteTableKey::new(
+                            PathBuf::from(file_path),
+                            Some(HttpRequestMethod::GET),
+                        ));
+                    }
                 }
             }
         }
@@ -291,17 +306,11 @@ impl SpecialDirectories {
     /// Any file under SpecialDirectories can be requested by the user with authentication,
     /// with a GET method.
     ///
-    /// NOTE: Normally that kind of functionality would be statically generated at build time,
-    /// because now we have to walk through the directories every time we are making a request.
-    /// That may diminish the performance of the server. We could implement a caching mechanism though,
-    /// but then if in dev time you add a new path, you would have to restart the server to see the changes.
-    /// Or we could just implement that as that is not so hard to do, some kind of file that will be created
-    /// at build time.
-    pub fn collect() -> Result<HashSet<(PathBuf, HttpRequestMethod)>, Box<dyn Error + Send + Sync>>
-    {
+    /// NOTE: Normally that kind of functionality would be statically generated at build time, and it is in routes table.
+    pub fn collect() -> Result<HashSet<RouteTableKey>, Box<dyn Error + Send + Sync>> {
         // We should walk through the directories and collect all files,
 
-        let mut paths = HashSet::<(PathBuf, HttpRequestMethod)>::new();
+        let mut paths = HashSet::<RouteTableKey>::new();
         let public = Config::get_server_public();
 
         for dir in SpecialDirectories::iter() {
@@ -322,11 +331,10 @@ impl SpecialDirectories {
         })
     }
 }
-impl<'a> Config {
+
+impl<'a, 'b> Config {
     /// Parses user defined args while executing the program
-    pub async fn new(
-        args: Vec<String>,
-    ) -> Result<Arc<Mutex<Config>>, Box<dyn Error + Send + Sync>> {
+    pub async fn new(args: Vec<String>) -> Result<Arc<Mutex<Self>>, Box<dyn Error + Send + Sync>> {
         if args.len() < 2 {
             return Err(format!("Usage: {} <address:port> [server_root_path]", args[0]).into());
         }
@@ -455,12 +463,12 @@ impl<'a> Config {
     /// Check if the database is initialized and return a clone of the Arc<Mutex<Database>> if it is.
     pub fn get_database(&self) -> Result<Arc<Mutex<Database>>, Box<dyn Error + Send + Sync>> {
         // Database config already checked in the Config constructor, no need to check it again.
-        // if let Some(_) = &self.config_file.database {
-        if let Some(database) = &self.database {
-            // If database is initialized, return a clone of the Arc<Mutex<Database>>
-            return Ok(Arc::clone(database));
+        if let Some(_) = &self.config_file.database {
+            if let Some(database) = &self.database {
+                // If database is initialized, return a clone of the Arc<Mutex<Database>>
+                return Ok(Arc::clone(database));
+            }
         }
-        // }
 
         return Err("Database not initialized".into());
     }
