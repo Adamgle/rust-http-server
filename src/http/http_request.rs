@@ -169,7 +169,7 @@ impl<'a> HttpRequest<'a> {
                             config,
                             &headers,
                             writer,
-                            &headers.get_request_target_path()?,
+                            headers.get_request_target_path()?,
                         )
                         .await?;
 
@@ -364,7 +364,7 @@ impl<'a> HttpRequest<'a> {
     /// Returns path of the requested resource without resolving "/" to "pages/index.html"
     ///
     /// Decoding the percent-encoded path to UTF-8
-    pub fn get_request_target_path(&self) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+    pub fn get_request_target_path(&self) -> Result<String, Box<dyn Error + Send + Sync>> {
         self.headers.get_request_target_path()
     }
     // Makes a GET request to the server, returning the requested resource as a String
@@ -377,9 +377,9 @@ impl<'a> HttpRequest<'a> {
     pub fn read_requested_resource(
         &'a self,
         headers: &mut HttpResponseHeaders<'a>,
-        relative_path: &PathBuf,
+        relative_path: impl AsRef<Path>,
     ) -> Result<String, Box<dyn Error + Send + Sync>> {
-        let resource_path: PathBuf = Config::get_server_public().join(relative_path);
+        let resource_path: PathBuf = Config::get_server_public().join(relative_path.as_ref());
 
         // Read the file
         let requested_resource = fs::read_to_string(resource_path)?;
@@ -391,14 +391,14 @@ impl<'a> HttpRequest<'a> {
 
         headers.add(
             Cow::from("Content-Type"),
-            Cow::from(self.detect_mime_type(relative_path)),
+            Cow::from(self.detect_mime_type(relative_path.as_ref())),
         );
 
         return Ok(requested_resource);
     }
 
     /// I hate this, should be typed
-    pub fn detect_mime_type(&self, request_target: &PathBuf) -> &str {
+    pub fn detect_mime_type(&self, request_target: impl AsRef<Path>) -> &str {
         match self.headers.get("Content-Type") {
             Some(content_type) => return content_type,
             None => {
@@ -408,6 +408,7 @@ impl<'a> HttpRequest<'a> {
                 // NOTE: There could be problem with the casing.
                 let actual_file = Path::new(
                     request_target
+                        .as_ref()
                         .file_name()
                         .expect("Request target does not point to a file."),
                 );
@@ -487,7 +488,7 @@ impl<'a> HttpRequest<'a> {
         headers: &HttpRequestHeaders<'a>,
         writer: &mut MutexGuard<'_, OwnedWriteHalf>,
         // writer: &mut MutexGuard<'_, OwnedWriteHalf>,
-        path: &PathBuf,
+        path: String,
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         // NOTE: Indentation in this function are f'ed up, should be fixed
 
@@ -533,7 +534,7 @@ impl<'a> HttpRequest<'a> {
                         )?;
 
                         // Could be problems if the path is not valid UTF-8
-                        let path = path.to_string_lossy();
+                        // let path = path.to_string_lossy();
 
                         println!("Redirecting from: {} | {}", domain.from, path);
                         println!("Redirecting to: {} | {}", location, path);

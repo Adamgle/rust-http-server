@@ -241,6 +241,7 @@ impl Database {
         Ok(())
     }
 
+    /// Creates a new collection for the given `DatabaseType` and inserts it into the `collections` HashMap.
     pub async fn create_collection(
         &mut self,
         config: &DatabaseConfigEntry,
@@ -253,10 +254,12 @@ impl Database {
         Ok(c_clone)
     }
 
+    /// Retrieves the collection for the given `DatabaseType`, if it exists, returns it.
     fn get_collection(&self, d_type: DatabaseType) -> Option<Arc<Mutex<DatabaseCollection>>> {
         self.collections.get(&d_type).map(|c| Arc::clone(c))
     }
 
+    /// Retrieves the collection for the given `DatabaseType`, if it does not exist, creates it.
     pub async fn get_create_collection(
         &mut self,
         config: &DatabaseConfigEntry,
@@ -312,8 +315,9 @@ impl Database {
         self.exec(DatabaseCommand::Delete(d_type, id)).await
     }
 
-    pub async fn select<'a>(
+    pub async fn select(
         &mut self,
+        config: &DatabaseConfigEntry,
         d_type: DatabaseType,
         id: String,
     ) -> Result<Box<dyn DatabaseEntryTrait>, Box<dyn Error + Send + Sync>> {
@@ -326,7 +330,9 @@ impl Database {
             self.execute_commands(WAL).await?;
         }
 
-        let collection = self.get_collection(d_type.clone()).unwrap();
+        // Collection could not have been created if WAL did not flush.
+        let d_type = d_type.clone();
+        let collection = self.get_create_collection(config, d_type).await?;
         let collection = collection.lock().await;
 
         let storage = collection.parse_collection().await?;
@@ -349,6 +355,7 @@ impl Database {
     pub async fn select_all(
         &mut self,
         d_type: DatabaseType,
+        config: &DatabaseConfigEntry,
     ) -> Result<DatabaseStorage<Box<dyn DatabaseEntryTrait>>, Box<dyn Error + Send + Sync>> {
         let WAL = self.get_wal();
         let WAL = WAL.lock().await;
@@ -359,7 +366,10 @@ impl Database {
             self.execute_commands(WAL).await?;
         }
 
-        let collection = self.get_collection(d_type.clone()).unwrap();
+        // Collection has to be created before we can parse it, but they are not initialized until the WAL file is flushed,
+        // so we need to explicitly initialize it if not initialized yet.
+        let d_type = d_type.clone();
+        let collection = self.get_create_collection(config, d_type).await?;
         let collection = collection.lock().await;
 
         let storage = collection.parse_collection().await?;
@@ -470,7 +480,6 @@ impl DatabaseCollection {
     ///
     /// Does not confirm the file existence.
     async fn create_path(config: &DatabaseConfigEntry, segment: &DatabaseType) -> PathBuf {
-        // Safe to unwrap based on previous check in the Config::new
         let database_root = &config.root;
 
         let mut path = Config::get_server_public()
@@ -515,17 +524,14 @@ impl DatabaseCollection {
         // d_type: &DatabaseType,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Hold entries as raw data instead of deserialized instances of `dyn DatabaseEntryTrait`
-        let mut obfuscated_data = serde_json::Map::new();
+        let data = serde_json::to_string(
+            &data
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.serialize()))
+                .collect::<std::collections::HashMap<_, _>>(),
+        )?;
 
-        for (k, v) in data.iter() {
-            let v = serde_json::to_value(v.serialize()).inspect_err(|e| {
-                eprintln!("Failed to persists one the entry in the database as there was an issue with serialization: {e}");
-            })?;
-
-            obfuscated_data.insert(k.to_string(), v);
-        }
-
-        let serialized = serde_json::to_vec(&obfuscated_data)?;
+        let serialized = serde_json::to_vec(&data)?;
 
         let handler = self.get_handler();
         let mut handler = handler.lock().await;

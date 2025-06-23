@@ -15,7 +15,9 @@ use crate::prelude::*;
 pub mod tcp_handlers {
     use super::http_request::HttpRequest;
     use crate::config::Config::{self};
-    use crate::http::{HttpHeaders, HttpResponseHeaders, HttpResponseStartLine};
+    use crate::http::{
+        HttpHeaders, HttpRequestHeaders, HttpResponseHeaders, HttpResponseStartLine,
+    };
     use crate::http_response::HttpResponse;
     use crate::routes::{RouteHandlerContext, RouteHandlerResult, RouteTableKey};
     use crate::*;
@@ -160,37 +162,36 @@ pub mod tcp_handlers {
 
         let request = HttpRequest::new(&config, reader, &mut writer).await?;
 
-        let mut headers = HttpResponseHeaders::new(HttpResponseStartLine::default());
+        // NOTE: We could just create those headers while doing route and then return the ownership.
+        // it would be the same actually, we would still return it from the route handler, but maybe more idiomatic.
+        let headers: HttpResponseHeaders<'_> =
+            HttpResponseHeaders::new(HttpResponseStartLine::default());
 
         let routes = config.get_routes();
 
-        // If path is invalid and cannot be encoded, that should end the request
-        let path = request.get_request_target_path()?;
+        let (path, method) = (request.get_request_target_path()?, request.get_method());
 
-        let route_key = RouteTableKey::new(path, Some(request.get_method().clone()));
+        let route_key = RouteTableKey::new_no_validate(path, Some(method.clone()));
 
         println!("Requesting: {:?}", route_key);
 
-        headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
-
-        println!(
-            "Size of type headers: {:?} | Size of value headers: {:?}",
-            std::mem::size_of::<HttpResponseHeaders>(),
-            std::mem::size_of_val(&headers)
-        );
-
         // To resolve the double mutable reference to headers we will move the ownership of headers
         // that is cheap operation, and hopefully solve the issue.
-        let ctx = RouteHandlerContext::new(&request, headers, &route_key, config.get_database());
+        let ctx = RouteHandlerContext::new(
+            &request,
+            headers,
+            &route_key,
+            config.app.get_database(),
+            // We are cloning the database config
+            config.get_database_config().cloned(),
+        );
 
         let RouteHandlerResult { mut headers, body } = routes.route(ctx).await?;
 
-        // Early propagate before writing to headers.
-        let body = Some(body?);
-
+        // Set default headers, if any.
         headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
 
-        let mut response = HttpResponse::new(&headers, body);
+        let mut response = HttpResponse::new(&headers, Some(body));
 
         response.write(&config, &mut writer).await?;
 

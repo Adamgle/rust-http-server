@@ -2,10 +2,12 @@ pub mod http_request;
 pub mod http_response;
 
 use crate::config::SpecialDirectories;
+use crate::middleware::Middleware;
 use crate::prelude::*;
 use crate::{config::Config, http_response::HttpResponse};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::{borrow::Cow, collections::HashMap, error::Error, fmt::Display, str::FromStr};
 use tokio::{net::tcp::OwnedWriteHalf, sync::MutexGuard};
 // use crate::prelude::*;
@@ -142,17 +144,15 @@ impl<'a> HttpRequestRequestLine {
         // We are working on non-percent-decoded request_target so save to assume that "?" is a separator for queries.
         let path = request_target.split('?').next().unwrap_or(request_target);
 
-        HttpRequestHeaders::validate_request_target_path(path.to_string()).map_err(
-            |internals| {
-                Box::<dyn Error + Send + Sync>::from(HttpRequestError {
-                    status_code: 400,
-                    status_text: "Bad Request".into(),
-                    message: "Corrupted request target".to_string().into(),
-                    internals: Some(internals),
-                    ..Default::default()
-                })
-            },
-        )?;
+        HttpRequestHeaders::validate_request_target_path(path).map_err(|internals| {
+            Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                status_code: 400,
+                status_text: "Bad Request".into(),
+                message: "Corrupted request target".to_string().into(),
+                internals: Some(internals),
+                ..Default::default()
+            })
+        })?;
 
         let mut request_target = base.join(request_target).map_err(|e| HttpRequestError {
             status_code: 400,
@@ -566,48 +566,27 @@ impl<'a> HttpRequestHeaders<'a> {
     /// `NOTE`: It converts the path to string, when we would want to support not UTF-8 paths that would be a problem.
     /// currently we are just parsing the encoded path to UTF-8 so does not matter.
     pub fn validate_request_target_path(
-        request_target: String,
+        request_target: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // MOTIVATION, as in motivation "motivation"?
-        // There is a request target coming to the server, it could contain encoded
-        // slashed, backslashes, relative paths symbols like "./" or "../". We now that
-        // the request target, after the normalization, is resolved to the Path that would look up
-        // the file system. For it to be valid and not breaking or insecure we need to remove
-        // consecutive slashes or backslashes, as well as the relative path symbols like "./" or "../".
-        // We know that we operate on the non-decoded request target path. We also know that
-        // the path should be decoded later, first to normalize, then casted to PathBuf and used
-        // potentially as a file system path (it could also be abstracted path that does not exist on the server
-        // but we know how to respond to that path programmatically, as there is a handler attached to every path)/
-
-        // UPDATE: We will allow consecutive slashes and any consecutive slash would be resolved to single slash.
+        // We will allow consecutive slashes and any consecutive slash would be resolved to single slash.
 
         // NOTE: Percent encoded slashes or any of the characters that could affect system path resolution,
         // should not affect the actual file system path resolution, user should not be able to encode
         // path characters, even thought after validation that would be valid if decoded.
 
-        // Can't I just use the request target as is?
-        // Path "asd/%2F/asd" would normalize to "asd/%2F/asd/index.html"
-        // The problem is that this: "asd/%2F/asd" would be correct if not decoded => "asd/%2F/asd/index.html".
-        // "asd/asd%20asd" => Invalid, as as we would have to resolve %20 to space => "asd/asd asd/index.html"
-        // "asd/asd%20/asd/%2F/asd" => Valid path, but only if we would decode %20 but not %2F
         // Conclusion: We need to stop decoding slashes and backslashes or disallow them in the request target
-
-        // Update: We will not allow encoded slashes or backslashes in the request target.
+        // We will not allow encoded slashes or backslashes in the request target.
         // We will not allow consecutive slashes, but because of the former we just need
         // to consider literal slashes not the encoded ones.
 
-        // One edge case I can think about is encoded slashes, like "%2F" or "%5C" as the filename
-        // "asd/%2F.index" | "asd/%5C.index" would be valid paths, but we do not want to allow
-        // But we cannot allow that as a valid path, consider: "asd/asd%20asd/%2F.html"
-        // We would need to decode the space but do not decode the slash, which is not possible with current
-        // crate I am using to parse it.
-        // We could also hit upon a directory name as encoded slash, but we will also invalidate that.
+        // Edge case: Encoded separators would also be invalid if given as a filename or directory name,
 
         // File system traversal symbols
         const RELATIVE_TO_PATH_SYMBOL: &str = "./";
         const RELATIVE_TO_PATH_SYMBOL_2: &str = ".\\";
         const ONE_DIRECTORY_DOWN_SYMBOL_2: &str = "..\\";
         const ONE_DIRECTORY_DOWN_SYMBOL: &str = "../";
+        const PERCENT_ENCODED_DOT: &str = "%2E";
 
         // Percent encoded slashes, that would be invalid in the request target
         const PERCENT_ENCODED_SLASH: &str = "%2F";
@@ -615,23 +594,27 @@ impl<'a> HttpRequestHeaders<'a> {
         const DOUBLE_SLASH: &str = "//";
         const DOUBLE_BACKSLASH: &str = "\\\\";
 
-        const DISALLOWED_SYMBOLS: [&str; 8] = [
+        const DISALLOWED_SYMBOLS: [&str; 9] = [
             RELATIVE_TO_PATH_SYMBOL,
             RELATIVE_TO_PATH_SYMBOL_2,
             ONE_DIRECTORY_DOWN_SYMBOL,
             ONE_DIRECTORY_DOWN_SYMBOL_2,
+            PERCENT_ENCODED_DOT,
             PERCENT_ENCODED_SLASH,
             PERCENT_ENCODED_BACKSLASH,
             DOUBLE_SLASH,
             DOUBLE_BACKSLASH,
         ];
 
-        if DISALLOWED_SYMBOLS
-            .iter()
-            .any(|symbol| request_target.contains(symbol))
-        {
+        // NOTE: In the future we could think about rewriting request if consecutive slashes are found.
+        // Behavior for encoded slashes will not change thought.
+        if DISALLOWED_SYMBOLS.iter().any(|symbol| {
+            request_target
+                .to_lowercase()
+                .contains(&symbol.to_lowercase())
+        }) {
             return Err(Box::<dyn Error + Send + Sync>::from(format!(
-                "Path contains file system traversal symbols or consecutive slashes {}",
+                "File system traversal symbols or consecutive slashes {}",
                 request_target
             )));
         }
@@ -654,77 +637,7 @@ impl<'a> HttpRequestHeaders<'a> {
         self.get_request_line().get_request_target()
     }
 
-    pub fn normalize_path(path: impl AsRef<Path>) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
-        // Rookie conversion.
-        let path = path
-            .as_ref()
-            .to_str()
-            .ok_or_else(|| {
-                Box::<dyn Error + Send + Sync>::from(format!(
-                    "Failed to convert path to string: {:?}",
-                    path.as_ref()
-                ))
-            })?
-            .replace('\\', "/");
-
-        let path = Path::new(&path);
-
-        if path != Path::new("/")
-            && (path.is_absolute()
-                || path.starts_with("/")
-                // || path.starts_with("\\")
-                || path.has_root())
-        {
-            return Err(Box::<dyn Error + Send + Sync>::from(format!(
-                "Request target path is absolute, should be relative: {:?}",
-                path
-            )));
-        }
-
-        let mut normalized = PathBuf::from(path);
-
-        match normalized.extension() {
-            Some(ext) => {
-                let dir_path = SpecialDirectories::resolve_path(ext)
-                    .and_then(|f| PathBuf::from_str(&f).ok().map(|p| (f, p)));
-
-                if let Some((dir, mut dir_path)) = dir_path {
-                    let filename =
-                        normalized
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .ok_or_else(|| {
-                                Box::<dyn Error + Send + Sync>::from(format!(
-                                    "Failed to extract file stem from path: {:?}",
-                                    path
-                                ))
-                            })?;
-
-                    if (normalized.starts_with(&dir) && filename == dir)
-                        || normalized.starts_with(&dir)
-                    {
-                        // Already prefixed, do nothing
-                        Ok(normalized)
-                    } else {
-                        dir_path.push(normalized);
-                        Ok(dir_path)
-                    }
-                } else {
-                    Ok(normalized)
-                }
-            }
-            None => {
-                let mut dir = PathBuf::from(SpecialDirectories::Pages.to_string());
-
-                normalized.push("index.html");
-                dir.push(normalized);
-                Ok(dir)
-            }
-        }
-    }
-
-    // `NOTE`: That method is also hoisted to `HttpRequest`
-    pub fn get_request_target_path(&self) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+    pub fn normalize_path(path: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
         // We will map specialized directories to the extension of the file requested, so if the file is requested with .html extension
         // we will look in the /public/pages directory, if the file is requested with .css extension we will look in the /public/styles directory
         // thought that solution cannot predict the requested path if it does not end with an extension that would resolve to appropriate directory
@@ -739,15 +652,64 @@ impl<'a> HttpRequestHeaders<'a> {
         // DESIGN NOTE: We will support default files of the directories in the path, only index.html as the default. Other specialized directories will not
         // try to resolve any paths when not given with full filename.
 
-        let path = self.get_request_target().path();
-        let path = match path.strip_prefix("/") {
-            // Case of the root requested: "/"
-            // Some(stripped_path) if stripped_path.is_empty() => path,
-            Some(stripped_path) => stripped_path,
-            None => path,
-        };
+        // No need to worry about backslashes.
+        let path = path.replace('\\', "/");
+        let path = path.strip_prefix("/").unwrap_or(&path);
 
-        let decoded = percent_encoding::percent_decode_str(path).decode_utf8()?;
+        // path can be "/" even thought it is consider absolute path as it would resolve programmatically to the root of the app.
+        if path != "/" && path.starts_with("/")
+        // || path.starts_with("\\")
+        {
+            return Err(Box::<dyn Error + Send + Sync>::from(format!(
+                "Request target path is absolute, should be relative: {:?}",
+                path
+            )));
+        }
+
+        let mut normalized = PathBuf::from(path);
+
+        match normalized.extension() {
+            Some(ext) => {
+                let dir_path = SpecialDirectories::resolve_path(ext);
+
+                match dir_path {
+                    Some(dir) => {
+                        let filename = normalized.file_stem().ok_or_else(|| {
+                            Box::<dyn Error + Send + Sync>::from(format!(
+                                "Failed to extract file stem from path: {:?}",
+                                normalized
+                            ))
+                        })?;
+                        if (normalized.starts_with(&dir) && filename == dir)
+                            || normalized.starts_with(&dir)
+                        {
+                            // Already prefixed, do nothing
+                            Ok(normalized)
+                        } else {
+                            Ok(dir.join(normalized))
+                        }
+                    }
+                    None => Ok(normalized),
+                }
+            }
+            None => {
+                let mut dir = PathBuf::from(SpecialDirectories::Pages.to_string());
+
+                normalized.push("index.html");
+                dir.push(normalized);
+                Ok(dir)
+            }
+        }
+    }
+
+    // `NOTE`: That method is also hoisted to `HttpRequest`
+    pub fn get_request_target_path(&self) -> Result<String, Box<dyn Error + Send + Sync>> {
+        let path = self.get_request_target().path();
+        let decoded = percent_encoding::percent_decode_str(path)
+            .decode_utf8()?
+            .to_string();
+
+        return Ok(decoded);
 
         // That would validate the decoded port of the path of the URL, leaving query parameters untouched.
         // This create an ambiguity as it would invalidate slashes given as literal, in percent encoded form,
@@ -756,18 +718,18 @@ impl<'a> HttpRequestHeaders<'a> {
         // HttpRequestHeaders::validate_request_target(decoded.to_string())?;
 
         // I think we may safely convert it to path as that is not absolute path as it lacks the leading slash.
-        let path = Path::new(decoded.as_ref());
+        // let path = Path::new(decoded.as_ref());
         // Single root path is acceptable, that would resolve the pages/index.html
 
-        return Ok(Self::normalize_path(path).map_err(|e| {
-            Box::<dyn Error + Send + Sync>::from(HttpRequestError {
-                status_code: 400,
-                status_text: "Bad Request".into(),
-                message: Some(format!("Invalid request target path: {}", path.display())),
-                internals: Some(Box::<dyn Error + Send + Sync>::from(e)),
-                ..Default::default()
-            })
-        })?);
+        // return Ok(Self::normalize_path(path).map_err(|e| {
+        //     Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+        //         status_code: 400,
+        //         status_text: "Bad Request".into(),
+        //         message: Some(format!("Invalid request target path: {}", path.display())),
+        //         internals: Some(Box::<dyn Error + Send + Sync>::from(e)),
+        //         ..Default::default()
+        //     })
+        // })?);
     }
 
     pub fn get_request_protocol(&self) -> &HttpProtocol {

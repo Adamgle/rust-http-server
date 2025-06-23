@@ -224,6 +224,9 @@ ISSUES
     => I don't think we will refactor that, we will just keep the server UTF-8 compliant.
 21. While adding the PathBuf in the RouteTableKey we should percent encode it, as paths like "asd/asd asd" would not match
     -> because browser would encode the space.
+22. Redirection does not work with new router, probably because the path that would be registered to redirect does not exists in the 
+    -> routes table and are throwing early without trying to parse the request when the redirection logic triggers.
+23. Refactor RouteHandlerContext to struct with fields not tuple struct as it become to ambiguous.
     
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,

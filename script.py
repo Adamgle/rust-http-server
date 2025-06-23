@@ -113,8 +113,8 @@ def send_custom(
 
     response_timestamps: Optional[List[float]] = kwargs.get("response_timestamps", None)
     path = quote(path)
-    match request:
 
+    match request:
         case HttpMethod.POST:
             if payload and kwargs.get("id") is None:
                 uid = uuid.uuid4()
@@ -152,6 +152,8 @@ def send_custom(
                 f"{payload if payload else ''}"
             )
 
+    print(headers)
+
     def create_socket(message: str) -> str:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
@@ -166,7 +168,6 @@ def send_custom(
                 print(f"Socket error: {e}")
                 return "500"
 
-    print(headers)
     response = create_socket(headers)
 
     if response:
@@ -414,10 +415,13 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
 def main():
     send_custom(
-        # request=HttpMethod.GET,
+        request=HttpMethod.GET,
         # path="/",
+        path=":database/",
+        # path="/%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+        # /%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd -> 
         # payload="test",
-        host="127.0.0.1",
+        host="localhost",
     )
 
     # run_benchmark(

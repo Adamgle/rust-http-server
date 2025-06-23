@@ -27,7 +27,7 @@ pub struct Config {
     pub config_file: config_file::ServerConfigFile,
     /// `unimplemented!()`
     pub logger: Logger,
-    pub database: Option<Arc<Mutex<Database>>>,
+    // pub database: Option<Arc<Mutex<Database>>>,
 }
 
 /// Contains information related to the application configuration, not the server configuration.
@@ -41,6 +41,7 @@ pub struct AppConfig {
     /// and value is a function that takes a mutable reference to HttpRequest and HttpResponseHeaders.
     /// We are evaluating the routes on startup and use it for the duration of the program.
     pub routes: RouteTable,
+    pub database: Option<Arc<Mutex<Database>>>,
 }
 
 impl AppConfig {
@@ -58,6 +59,11 @@ impl AppConfig {
     /// Since the function could get big, we will use a wrapper function to create the routes.
     pub fn create_routes() -> Result<RouteTable, Box<dyn Error + Send + Sync>> {
         crate::routes::RouteTable::create_routes()
+    }
+
+    pub fn get_database(&self) -> Option<Arc<Mutex<Database>>> {
+        // self.database.as_ref().map(Arc::clone)
+        self.database.clone()
     }
 }
 
@@ -127,8 +133,8 @@ pub mod config_file {
         pub paths: Option<Vec<RedirectPathsEntry>>,
     }
 
-    // `index_path` and `protocol` are not optional because they are required for server to work
-    // and they will be set to defaults if not supplied
+    // `protocol` is not optional because it is required for server to work
+    // and it will be set to defaults if not supplied
     #[derive(serde::Deserialize, Debug, Clone)]
     #[allow(non_snake_case)]
     pub struct DatabaseConfigEntry {
@@ -140,7 +146,6 @@ pub mod config_file {
 
     #[derive(serde::Deserialize, Debug, Clone)]
     pub struct ServerConfigFile {
-        pub index_path: PathBuf,
         // This probably should not be public and maybe the database should not even be in the /public dir
         pub database: Option<DatabaseConfigEntry>,
         pub redirect: Option<RedirectEntry>,
@@ -278,7 +283,8 @@ impl SpecialDirectories {
 
                     // Replace windows separator "\\" with unix separator "/"
                     // Non-UTF-8 paths are skipped because they are unsupported.
-                    let file_path = file_path.to_str().map(|s| s.replace('\\', "/").to_string());
+                    let file_path: Option<String> =
+                        file_path.to_str().map(|s| s.replace('\\', "/").to_string());
 
                     // println!("Path collected: {:?}", file_path);
 
@@ -288,10 +294,7 @@ impl SpecialDirectories {
                         // We are using PathBuf to store the path, and HttpRequestMethod::GET as the method
                         // that can be used to access the file.
 
-                        paths.insert(RouteTableKey::new(
-                            PathBuf::from(file_path),
-                            Some(HttpRequestMethod::GET),
-                        ));
+                        paths.insert(RouteTableKey::new(&file_path, Some(HttpRequestMethod::GET)));
                     }
                 }
             }
@@ -322,11 +325,11 @@ impl SpecialDirectories {
         return Ok(paths);
     }
 
-    pub fn resolve_path(ext: &OsStr) -> Option<String> {
+    pub fn resolve_path(ext: &OsStr) -> Option<PathBuf> {
         ext.to_str().and_then(|ext| match ext {
-            "html" => Some(Self::Pages.to_string()),
-            "css" => Some(Self::Styles.to_string()),
-            "js" => Some(Self::Client.to_string()),
+            "html" => Some(PathBuf::from(Self::Pages.to_string())),
+            "css" => Some(PathBuf::from(Self::Styles.to_string())),
+            "js" => Some(PathBuf::from(Self::Client.to_string())),
             _ => None,
         })
     }
@@ -380,11 +383,12 @@ impl Config {
         // This has to be done AFTER env's are set, as it may rely on them
         let config_file = config_file::ServerConfigFile::get_config()?;
 
-        // If database is configured in the config file, it would initialized on server startup.
+        // If database is configured in the config file, it would be initialized on server startup.
         let database = match config_file.database.as_ref() {
             Some(database_config) => Some(Arc::new(Mutex::new(
                 Database::new(database_config).await.inspect_err(|e| {
-                    eprintln!("Error initializing database: {}", e);
+                    // If database if configured, but could not be initialized, we panic
+                    panic!("Error initializing database: {}", e);
                 })?,
             ))),
             None => {
@@ -393,26 +397,23 @@ impl Config {
             }
         };
 
-        let domain = config_file.domain.clone();
-
         // As the url::Url does not allow relative url parsing, we are initializing one to default url,
         // though only the path segment is the important part
 
-        let app_config = AppConfig {
+        let app = AppConfig {
             url: config_file
-                .domain_to_url(&domain, &socket_address.port())
+                .domain_to_url(&config_file.domain, &socket_address.port())
                 .inspect_err(|e| eprintln!("Error parsing domain to URL: {}", e))?,
             routes: AppConfig::create_routes()?,
+            database,
         };
 
         Ok(Arc::new(Mutex::new(Config {
-            socket_address,
-            options,
-            // server_root,
-            config_file,
             logger: Logger {},
-            app: app_config,
-            database,
+            socket_address,
+            config_file,
+            options,
+            app,
         })))
     }
 
@@ -452,26 +453,22 @@ impl Config {
         std::env::var("SERVER_PORT").expect("server_port not set in the SERVER_PORT env")
     }
 
-    pub fn get_index_path(&self) -> PathBuf {
-        self.config_file.index_path.clone()
-    }
-
     pub fn get_database_config(&self) -> Option<&config_file::DatabaseConfigEntry> {
         self.config_file.database.as_ref()
     }
 
-    /// Check if the database is initialized and return a clone of the Arc<Mutex<Database>> if it is.
-    pub fn get_database(&self) -> Result<Arc<Mutex<Database>>, Box<dyn Error + Send + Sync>> {
-        // Database config already checked in the Config constructor, no need to check it again.
-        if let Some(_) = &self.config_file.database {
-            if let Some(database) = &self.database {
-                // If database is initialized, return a clone of the Arc<Mutex<Database>>
-                return Ok(Arc::clone(database));
-            }
-        }
+    // /// Check if the database is initialized and return a clone of the Arc<Mutex<Database>> if it is.
+    // pub fn get_database(&self) -> Result<Arc<Mutex<Database>>, Box<dyn Error + Send + Sync>> {
+    //     // Database config already checked in the Config constructor, no need to check it again.
+    //     if let Some(_) = &self.config_file.database {
+    //         if let Some(database) = &self.database {
+    //             // If database is initialized, return a clone of the Arc<Mutex<Database>>
+    //             return Ok(Arc::clone(database));
+    //         }
+    //     }
 
-        return Err("Database not initialized".into());
-    }
+    //     return Err("Database not initialized".into());
+    // }
 
     pub fn get_routes(&self) -> &RouteTable {
         &self.app.routes
