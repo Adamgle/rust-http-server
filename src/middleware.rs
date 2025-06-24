@@ -1,8 +1,8 @@
-use std::{any::Any, error::Error, future::Future, path::PathBuf, pin::Pin, sync::Arc};
+use std::{error::Error, future::Future, pin::Pin, sync::Arc};
 
 use crate::{
     http::HttpRequestError,
-    routes::{RouteHandlerContext, RouteResult, RouteTable, RouteTableKey},
+    routes::{RouteHandlerContext, RouteTable, RouteTableKey},
 };
 
 use crate::http::HttpHeaders;
@@ -17,20 +17,19 @@ pub struct Middleware;
 /// Middleware handlers will not give back the headers ownership as they are returning the context
 /// that is passed further to the route handler.
 ///
-/// Every change on the headers can be done by a mutable reference, as the context \
+/// Every change on the headers can be done by a mutable reference, as the context
 /// is owned by value with headers also owned by value.
-///
 // `NOTE`: This could be type alias.
 pub struct MiddlewareHandlerResult<'ctx> {
     // headers: HttpResponseHeaders<'b>,
     pub ctx: RouteHandlerContext<'ctx>,
 }
 
-impl<'ctx> RouteResult<'ctx> for MiddlewareHandlerResult<'ctx> {
-    fn as_any(&self) -> &(dyn Any + 'ctx) {
-        self
-    }
-}
+// impl<'ctx> RouteResult<'ctx> for MiddlewareHandlerResult<'ctx> {
+//     fn as_any(&self) -> &(dyn Any + 'ctx) {
+//         self
+//     }
+// }
 
 /// The result of executing a middleware function.
 // pub type MiddlewareFunctionPointerResult<'ctx> =

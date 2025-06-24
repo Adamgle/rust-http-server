@@ -107,12 +107,11 @@ def send_custom(
     inject_size: int = 1,
     **kwargs,
 ) -> SendResult:
-    from urllib.parse import quote
 
     injected_header = f"malicious-value{'x' * inject_size}"
 
     response_timestamps: Optional[List[float]] = kwargs.get("response_timestamps", None)
-    path = quote(path)
+    # path = quote(path)
 
     match request:
         case HttpMethod.POST:
@@ -284,7 +283,7 @@ def run_benchmark(
         file_size = os.path.getsize(file_path)
     except FileNotFoundError:
         file_size = -1
-        raise FileNotFoundError("File not found. Please check the path.")
+        # raise FileNotFoundError("File not found. Please check the path.")
 
     log_entry.append(f"File path: {file_path} (Size: {file_size} bytes)")
 
@@ -414,12 +413,16 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
 
 def main():
+    from urllib.parse import quote
+
+    # path = quote(f"/%2F")
+    
     send_custom(
         request=HttpMethod.GET,
-        # path="/",
-        path=":database/",
+        path=quote(":asd/data/asd asd"),
+        # NOTE: You can't check that as this double encodes that as that is f'ed up
         # path="/%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
-        # /%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd -> 
+        # /%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd ->
         # payload="test",
         host="localhost",
     )
@@ -429,11 +432,11 @@ def main():
     #         run_multithreaded,
     #         callback=send_custom,
     #         threads_count=10,
-    #         requests_count=100,
+    #         requests_count=1000,
     #         payload="test",
     #     ),
-    #     request=HttpMethod.POST,
-    #     path="/database/tasks.json",
+    #     request=HttpMethod.GET,
+    #     path="/message",
     #     count=1,
     # )
 

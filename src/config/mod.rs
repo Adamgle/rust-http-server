@@ -262,7 +262,8 @@ impl SpecialDirectories {
     fn walk_dir(
         path: &impl AsRef<Path>,
         paths: &mut HashSet<RouteTableKey>,
-        prefix: &PathBuf,
+        dir_path: &Path,
+        dir: &SpecialDirectories,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if let Ok(entries) = std::fs::read_dir(path.as_ref()) {
             for entry in entries.flatten() {
@@ -270,32 +271,58 @@ impl SpecialDirectories {
                 if file_type.is_dir() {
                     // If the entry is a directory, recursively walk through it
                     let sub_path = entry.path();
-                    Self::walk_dir(&sub_path, paths, prefix)?;
+                    Self::walk_dir(&sub_path, paths, dir_path, dir)?;
                 } else if file_type.is_file() {
                     // If the entry is a file, add it to the set of paths
 
                     let file_path = entry.path();
-                    // println!("file_path: {:?} | prefix: {:?}", file_path, prefix);
+                    println!(
+                        "file_path: {:?} | dir_path: {:?} | dir: {:?}",
+                        file_path,
+                        dir_path,
+                        dir.to_string()
+                    );
 
-                    let file_path = file_path.strip_prefix(prefix).inspect_err(|e| {
-                        eprintln!("File not under public directory: {:?}", e);
+                    let mut file_path = match dir {
+                        // We are not stripping the prefix for assets are there is no mapping of extension that links to that directory.
+                        SpecialDirectories::Assets => {
+                            let public = Config::get_server_public();
+
+                            file_path.strip_prefix(public).map(|p| p.to_path_buf())
+                        }
+                        // We are stripping the prefix for other directories, as they have mapping of extensions to the directory.
+                        _ => file_path
+                            .strip_prefix(Path::new(&dir_path))
+                            .map(|p| p.to_path_buf()),
+                    }
+                    .map_err(|e| {
+                        Box::<dyn Error + Send + Sync>::from(format!(
+                            "Unexpected error: File not under public directory: {:?}",
+                            e
+                        ))
                     })?;
+
+                    println!("file_path after stripping: {:?}", file_path);
+
+                    // If the file is the index file, we will replace it with "/"
+                    if file_path == Path::new(Config::SERVER_INDEX_PATH) {
+                        file_path = PathBuf::from("/");
+                    };
 
                     // Replace windows separator "\\" with unix separator "/"
                     // Non-UTF-8 paths are skipped because they are unsupported.
-                    let file_path: Option<String> =
-                        file_path.to_str().map(|s| s.replace('\\', "/").to_string());
+                    let file_path = file_path
+                        .to_str()
+                        .ok_or_else(|| format!("Path of the file under /public directory is not UTF-8 compatible: {:?}", file_path))
+                        .map(|s| s.replace('\\', "/").to_string())?;
 
-                    // println!("Path collected: {:?}", file_path);
+                    paths.insert(RouteTableKey::new(file_path, Some(HttpRequestMethod::GET)));
 
                     // Insert the file path into the set, converting it to PathBuf
                     // Every path can be accessed with GET method, nothing else is guaranteed.
-                    if let Some(file_path) = file_path {
-                        // We are using PathBuf to store the path, and HttpRequestMethod::GET as the method
-                        // that can be used to access the file.
 
-                        paths.insert(RouteTableKey::new(&file_path, Some(HttpRequestMethod::GET)));
-                    }
+                    // We are using PathBuf to store the path, and HttpRequestMethod::GET as the method
+                    // that can be used to access the file.
                 }
             }
         }
@@ -318,9 +345,12 @@ impl SpecialDirectories {
 
         for dir in SpecialDirectories::iter() {
             let path = dir.get_path();
-            Self::walk_dir(&path, &mut paths, &public)
+            let dir_path = public.join(&path);
+            Self::walk_dir(&path, &mut paths, &dir_path, &dir)
                 .inspect_err(|e| eprintln!("Error walking through directory {:?}: {}", path, e))?;
         }
+
+        println!("Collected paths: {:?}", paths);
 
         return Ok(paths);
     }
@@ -336,6 +366,10 @@ impl SpecialDirectories {
 }
 
 impl Config {
+    // Relative to public/pages
+    // NOTE: Make sure the .html, .css, and .js cannot be declared outside SpecialDirectories,
+    pub const SERVER_INDEX_PATH: &'static str = "index.html";
+
     /// Parses user defined args while executing the program
     pub async fn new(args: Vec<String>) -> Result<Arc<Mutex<Self>>, Box<dyn Error + Send + Sync>> {
         if args.len() < 2 {

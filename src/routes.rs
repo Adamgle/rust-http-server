@@ -1,5 +1,4 @@
 use std::{
-    any::Any,
     borrow::Cow,
     collections::{HashMap, HashSet},
     error::Error,
@@ -16,14 +15,14 @@ use tokio::sync::Mutex;
 use crate::{
     config::{
         config_file::DatabaseConfigEntry,
-        database::{self, Database, DatabaseTask, DatabaseType},
+        database::{Database, DatabaseType},
         SpecialDirectories,
     },
     http::{
         HttpHeaders, HttpRequestError, HttpRequestHeaders, HttpRequestMethod, HttpResponseHeaders,
     },
     http_request::HttpRequest,
-    middleware::{self, Middleware, MiddlewareHandler, PATH_SEGMENT},
+    middleware::{Middleware, MiddlewareHandler, MiddlewareHandlerResult, PATH_SEGMENT},
 };
 
 // NOTE: Route table does live for the duration of the program, but not the values it is referencing.
@@ -129,47 +128,42 @@ pub struct RouteTableKey(pub PathBuf, pub Option<HttpRequestMethod>);
 
 impl RouteTableKey {
     /// Creates a new route table key with the given path and method.
-
-    /// Creates a new route table key with the given path and method.
-    /// Operate on the decoded path, un-normalized and un-validated. Validates and normalizes the path.
+    ///
+    /// Operate on the decoded path, un-normalized and un-validated. Validates the path.
     ///
     /// `panic!` if path cannot be normalized, so we can change the static definition of the path
     /// as this could be consider a typo in the code.
     pub fn new(path: impl AsRef<Path>, method: Option<HttpRequestMethod>) -> Self {
         // First validate, then normalize.
 
-        // Since path is not encoded in the construct, paths like %3Adatabase/ would not work
-        // Paths like :database/ would work,
-        // Path are treated as a literal strings there, no encoding is applied to them.
-
         // That would not be necessary if validate_request_target_path would operate on `Path` || `PathBuf` || impl AsRef<Path>.
-        let path_str = path.as_ref().to_str().expect("Path must be valid UTF-8");
+        let path_str = path
+            .as_ref()
+            .to_str()
+            .expect("Path must be valid UTF-8")
+            .to_lowercase();
 
-        // When this construct run from the `handle_client` it would try to validate the path that was already decoded
-        // so that is technically useless. But when it runs from the `RouteTable::create_routes` || `Middleware::create_middleware`
-        // we would need that.
-        if let Err(e) = HttpRequestHeaders::validate_request_target_path(path_str) {
+        if let Err(e) = HttpRequestHeaders::validate_request_target_path(&path_str) {
             panic!("Could not validate path: {:?}", e);
         };
 
         // Validation to how router works, specifically for the middleware paths that has some special characters.
-        // decoding special meaning, triggering special behavior\.
-
-        // %3Adatabase/ => :database/ => Paths like that given from the client should be treated as normal paths
-        // segment recognition should only work on the paths that are defined in the code.
-        // This paths would end up being: pages/:database/index.html, and that is correct, as the path would resolve to error
-        // because there is no such path. And the segment analysis in only done
-
-        // Middleware :database/tasks
-        // Path: database/tasks/slaves.json
+        // decoding special meaning, triggering special behavior.
 
         // Technically that should only work on middleware paths, when middleware is inserted.
-        if let Err(e) = Middleware::validate_middleware_path(path_str) {
-            panic!("Could not validate middleware path: {:?}", e)
+        if let Err(e) = Middleware::validate_middleware_path(&path_str) {
+            panic!("Could not validate for middleware path: {:?}", e)
         };
 
-        // %3Adatabase/
-        // :database/
+        match HttpRequestHeaders::normalize_path(&path_str) {
+            Ok(path) => Self(PathBuf::from(path), method),
+            Err(message) => {
+                panic!(
+                    "Could not normalize path: {:?}, error: {}",
+                    path_str, message
+                );
+            }
+        }
 
         // If we get the abstracted path that does not exist in the file system, how would we handle normalization?
         //  -> abstracted paths should not be normalized, as they are not real paths, but here we are normalizing everything.
@@ -189,15 +183,6 @@ impl RouteTableKey {
         // because they are semantically the same, a path without extension without a file portion, currently we assume
         // that it is a directory and try to find the index.html in that directory under /pages
         // We need to first try to resolve the path literally in the router and then try to normalize it if not found and lookup again.
-
-        Self(
-            path.as_ref().to_path_buf(),
-            // HttpRequestHeaders::normalize_path(&path_str).expect(&format!(
-            //     "Could not normalize path: {}, possible typo in the code!",
-            //     path_str
-            // )),
-            method,
-        )
     }
 
     /// Omits the validation of the `path` as it already is validated while parsing http request.
@@ -207,21 +192,22 @@ impl RouteTableKey {
     /// Validation runs under `HttpRequestRequestLine::new`, path is decoded in `HttpRequestHeaders::get_request_target_path`.
     ///
     pub fn new_no_validate(path: impl AsRef<Path>, method: Option<HttpRequestMethod>) -> Self {
-        // let path_str = path.as_ref().to_str().expect("Path must be valid UTF-8");
-
-        Self(
-            // HttpRequestHeaders::normalize_path(&path_str).expect(&format!(
-            //     "Could not normalize path: {}, possible typo in the code!",
-            //     path_str
-            // )),
-            path.as_ref().to_path_buf(),
-            method,
-        )
+        Self(path.as_ref().to_path_buf(), method)
     }
 
     pub fn get_path(&self) -> &Path {
         // Returns the path of the route table key.
         &self.0
+    }
+
+    /// Path on the instance are already normalized, this is used to obtain the relative
+    /// path to the resource on the server relative to the `/public` directory.
+    pub fn get_prefixed_path(&self) -> PathBuf {
+        let path_str = self.get_path().to_str().expect("Path must be valid UTF-8");
+        let prefixed_path =
+            HttpRequestHeaders::prefix_path(path_str).expect("Could not normalize path");
+
+        PathBuf::from(prefixed_path)
     }
 
     pub fn get_method(&self) -> &Option<HttpRequestMethod> {
@@ -288,11 +274,11 @@ pub struct RouteHandlerContext<'ctx> {
                                                       // If we would access that field we would have a problem.
 }
 
-impl<'ctx> RouteResult<'ctx> for RouteHandlerContext<'ctx> {
-    fn as_any(&self) -> &(dyn Any + 'ctx) {
-        self
-    }
-}
+// impl<'ctx> RouteResult<'ctx> for RouteHandlerContext<'ctx> {
+//     fn as_any(&self) -> &(dyn Any + 'ctx) {
+//         self
+//     }
+// }
 
 impl<'ctx> RouteHandlerContext<'ctx> {
     pub fn new(
@@ -345,8 +331,13 @@ impl<'ctx> RouteHandlerContext<'ctx> {
     }
 }
 
-pub trait RouteResult<'ctx>: 'ctx {
-    fn as_any(&self) -> &(dyn Any + 'ctx);
+// pub trait RouteResult<'ctx>: 'ctx {
+//     fn as_any(&self) -> &(dyn Any + 'ctx);
+// }
+
+pub enum RouteResult<'ctx> {
+    RouteResult(RouteHandlerResult<'ctx>),
+    MiddlewareResult(MiddlewareHandlerResult<'ctx>),
 }
 
 /// Take an owned version of headers that was previously moved from `handle_client` and the result of the
@@ -357,15 +348,6 @@ pub struct RouteHandlerResult<'ctx> {
     pub headers: HttpResponseHeaders<'ctx>,
     pub body: String,
 }
-
-impl<'ctx> RouteResult<'ctx> for RouteHandlerResult<'ctx> {
-    fn as_any(&self) -> &(dyn Any + 'ctx) {
-        self
-    }
-}
-
-// We don't implement RouteResult for RouteHandlerResult with lifetimes
-// as it would require 'static which contradicts the lifetime parameter
 
 // UPDATE: Callback cannot live for 'static as the Context gets moved in to a closure
 // and then lifetime it utilizes would become invariant. That means a lifetime of context
@@ -388,8 +370,6 @@ type RouteHandlerClosure = Arc<
     dyn for<'ctx> Fn(RouteHandlerContext<'ctx>) -> RouteHandlerFuture<'ctx> + Send + Sync + 'static,
 >;
 
-// Route table: key -> (route -> callback, middleware -> callback)
-
 /// A closure enclosing a function pointer that can be called with a `RouteHandlerContext`.
 ///
 /// The idea is that the `RouteHandler` being a function pointer inside a closure stored in the `Arc` is valid for the duration of the program,
@@ -408,10 +388,6 @@ impl RouteHandler {
 
         Self(c)
     }
-
-    // fn wrap_handler(handler: RouteHandlerFunctionPointer) -> RouteHandlerClosure {
-    //     Arc::new(move |ctx| Box::pin(async move { handler(ctx) }))
-    // }
 
     /// NOTE: The function that is called inside the callback is not async itself, but when called with
     /// callback it would be. This is due to how RouteHandler is initialized, that you can pass a function pointer
@@ -439,7 +415,8 @@ impl RouteHandler {
                 ..
             } = ctx;
 
-            let body = request.read_requested_resource(&mut response_headers, &key.get_path())?;
+            let body =
+                request.read_requested_resource(&mut response_headers, &key.get_prefixed_path())?;
 
             return Ok(RouteHandlerResult {
                 headers: response_headers,
@@ -467,6 +444,14 @@ impl RouteTable {
 
     pub fn insert_handler(&mut self, key: RouteTableKey, handler: RouteHandler) {
         let (method, path) = (key.get_method(), key.0.clone());
+
+        if let None = method {
+            // If the method is ANY, we panic as that is not allowed.
+            panic!(
+                "Cannot insert a route with ANY method for path: {:?}, please specify a method.",
+                path
+            );
+        }
 
         // let mut insert_handler_closure = |key: RouteTableKey, handler: RouteHandler| {
         match self
@@ -505,10 +490,10 @@ impl RouteTable {
             .fold(HashSet::new(), |mut acc, (key, value)| {
                 // We are working on normalized paths, one prefixed with SpecialDirectories. Segment cannot be set on SpecialDirectories.
 
-                // Try to strip the prefix.
-                let path = key
-                    .get_path()
-                    .strip_prefix(SpecialDirectories::Pages.to_string());
+                // // Try to strip the prefix.
+                // let path = key
+                //     .get_path()
+                //     .strip_prefix(SpecialDirectories::Pages.to_string());
 
                 // Would resolve :database/ => pages/:database/index.html
                 // Invalid segment: database/tasks.json => False
@@ -537,16 +522,6 @@ impl RouteTable {
     /// to match the middleware paths.
     pub fn insert_middleware(&mut self, key: RouteTableKey, handler: MiddlewareHandler) {
         // Insert the route into the table, replacing any existing route with the same key.
-
-        // If the path has a segment that starts with `:`, it is a middleware path.
-        // 1. Check if it is not a file path, if it is, we panic.
-        // 2. Segment paths should resolve to the normal paths, we need some parser for that for MiddlewarePath.
-        //  -> Of course currently that just mean we need to strip the ":" from the path, but in the future we might want to support more complex paths.
-        // 3. After the segment path resolves direct => pages/direct/index.html, the path should get normalized
-        //  -> We would have to choose use the one declared directly on the path, or the one that is parsed to the path from the segment.
-        // 4. If after parsing the path we already have the key for that path, we panic, as that is a duplicate path.
-        //  -> Meaning `:database/routes` => `database/routes` and "database/routes", if both have middleware defined we would have to panic
-        //  -> As one would cover the other, of course we could just invoke both, but that is invalid, there cannot be 2 middleware handlers for the same path.
 
         let (method, path) = (key.get_method(), key.get_path());
         // let (handler, middleware) = (handler.clone(), Some(handler.clone()));
@@ -598,37 +573,17 @@ impl RouteTable {
         key: &RouteTableKey,
     ) -> Result<Arc<RouteTableValue>, Box<dyn Error + Send + Sync>> {
         // Get the route handler for the given key, if it exists.
-        let routes = self.get_routes();
-
-        return match routes.get(&key) {
-            Some(route) => Ok(Arc::clone(route)),
-            None => {
-                // If the route is not found, try to normalize the path and look it up again.
-
-                // We are not return HttpRequestError since that could also be used in the code
-                // not yet from the HTTP request, like in the `create_routes` function which contains static definition for routes.
-                let path = key.get_path().to_str().ok_or_else(|| {
-                    Box::<dyn Error + Send + Sync>::from("Path must be valid UTF-8")
-                })?;
-
-                let key = RouteTableKey::new_no_validate(
-                    HttpRequestHeaders::normalize_path(path).expect("Could not normalize path"),
-                    key.get_method().clone(),
-                );
-
-                println!("Normalized {:?} to {:?}", path, key.get_path());
-
-                routes.get(&key).map(|v| Ok(Arc::clone(v))).ok_or_else(|| {
-                    Box::<dyn Error + Send + Sync>::from(format!(
-                        "Route not found for path: {:?} with method: {:?}",
-                        path,
-                        key.get_method()
-                    ))
-                })?
-            }
-        };
-
-        // self.get_routes().get(key).map(|v| Arc::clone(v))
+        return self
+            .get_routes()
+            .get(&key)
+            .map(|v| Arc::clone(v))
+            .ok_or_else(|| {
+                Box::<dyn Error + Send + Sync>::from(format!(
+                    "Route not found for path: {:?} with method: {:?}",
+                    key.get_path(),
+                    key.get_method()
+                ))
+            });
     }
 
     /// Statically creates the routes based on the user definitions of the routes with appropriate handlers.
@@ -683,8 +638,8 @@ impl RouteTable {
 
                     // If we would want to lay some abstraction on the database we would have "select_all" from the database
                     // and then parse it to the JSON format. Currently we just read the file from the disk.
-                    let body =
-                        request.read_requested_resource(&mut response_headers, key.get_path())?;
+                    let body = request
+                        .read_requested_resource(&mut response_headers, key.get_prefixed_path())?;
 
                     return Ok(RouteHandlerResult {
                         headers: response_headers,
@@ -697,7 +652,7 @@ impl RouteTable {
         // Abstracted route handler that does not exists in the file system.
         // Abstracted path is a path that do not resole to file system if normalized.
         routes.insert_handler(
-            RouteTableKey::new("/message", None),
+            RouteTableKey::new("/message", Some(HttpRequestMethod::GET)),
             RouteHandler::new(|ctx| {
                 Box::pin(async move {
                     // First borrow immutably
@@ -740,18 +695,23 @@ impl RouteTable {
 
         // #####
 
-        println!(
-            "GET /: {:?}",
-            routes.get(&RouteTableKey::new("/", Some(HttpRequestMethod::GET)))
-        );
+        println!("{:#?}", routes);
+
         Ok(routes)
     }
 
+    /// `NOTE`: I am a mistake implementing the RouteResult as an enum that could return standalone the result of the middleware handler.
+    /// That is not the case as middleware does not produce the body and if the handler does not exists, but cannot respond with data.
+    /// We will keep the functionality, maybe we will utilize it as it is not a big deal to keep it in the code. But keep in mind
+    /// That currently the function returns only the `RouteResult::RouteResult` of type `RouteHandlerResult<'ctx>`,
+    ///
+    /// `NOTE`: Route with defined middleware and undefined handler could only be valid if the middleware is a segment, given that special case
+    /// we need to keep the `RouteHandler` as `Option<RouteHandler>` in the `RouteTableValue` struct.
     pub async fn route<'ctx>(
         &self,
         mut ctx: RouteHandlerContext<'ctx>,
         // RouteHandlerResult<'ctx>
-    ) -> Result<Box<dyn RouteResult<'ctx>>, Box<dyn Error + Send + Sync>> {
+    ) -> Result<RouteResult<'ctx>, Box<dyn Error + Send + Sync>> {
         // Check if the path matches any of the middleware segments.
 
         // Route has to exist for middleware segment to run, as if not, if path is given as invalid there, that would just return an error,
@@ -765,8 +725,12 @@ impl RouteTable {
             })
         })?;
 
-        // This function could run middleware for the segment, run the handler for the path,
-        // and run the middleware for the path. That means we could have 2^3 possible combinations
+        // Router {
+        // RouteTable => (RouteHandler, MiddlewareHandler)
+        // Middleware => {
+        //    segments: {},
+        // }
+        // }
 
         // Segments should be resolved in the order of their strength, so the more specific segment would run on the path.
         // :database/ => database/*
@@ -795,7 +759,7 @@ impl RouteTable {
                 }
 
                 println!(
-                    "Running segment {:?} middleware for path: {:?}",
+                    "Running middleware segment {:?} for path: {:?}",
                     middleware_key.get_path(),
                     ctx.get_key().get_path()
                 );
@@ -806,11 +770,12 @@ impl RouteTable {
 
         match (handler, middleware) {
             // Middleware but no handler, we run the middleware return the ctx.
-            (None, Some(middleware)) => {
-                let result = middleware.callback(ctx).await?;
-
-                return Ok(Box::new(result.ctx) as Box<dyn RouteResult<'ctx>>);
-            }
+            // UPDATE: That is not a valid state, as we should always have a handler for the path.
+            // (None, Some(middleware)) => {
+            //     let result = middleware.callback(ctx).await?;
+            //
+            //     return Ok(RouteResult::MiddlewareResult(result));
+            // }
 
             // Handle exists, despite the middleware, return the result of the handler.
             (Some(handler), middleware) => {
@@ -820,56 +785,25 @@ impl RouteTable {
                     ctx = middleware.callback(ctx).await?.ctx;
                 }
 
-                println!(
-                    "Evaluating handler for path: {:?}",
-                    ctx.get_key().get_path()
-                );
                 // If the handler exists, we call it with the context and return the result.
 
-                return Ok(Box::new(handler.callback(ctx).await?) as Box<dyn RouteResult<'ctx>>);
+                return Ok(RouteResult::RouteResult(handler.callback(ctx).await?));
 
                 // Run the handler for the path.
             }
-            _ => panic!("Unexpected state: both handler and middleware are None."),
+            _ => {
+                return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                    status_code: 404,
+                    status_text: "Not Found".to_string(),
+                    message: Some(format!(
+                        "Route not found for path: {:?} with method: {:?}",
+                        ctx.get_key().get_path(),
+                        ctx.get_key().get_method()
+                    )),
+                    ..Default::default()
+                }))
+            }
         };
-
-        if let Some(middleware) = middleware {
-            println!(
-                "Running middleware for path: {:?}",
-                ctx.get_key().get_path()
-            );
-
-            // If the middleware exists, we call it with the context and return the result.
-            // If middleware fails, we return an error, without evaluating the path it is attached to, if any path given.
-
-            // This runs the middleware on the actual path, not the segment of that path.
-            ctx = middleware.callback(ctx).await?.ctx;
-        }
-
-        if let Some(handler) = handler {
-            println!(
-                "Evaluating handler for path: {:?}",
-                ctx.get_key().get_path()
-            );
-            // If the handler exists, we call it with the context and return the result.
-
-            return Ok(Box::new(handler.callback(ctx).await?) as Box<dyn RouteResult<'ctx>>);
-        } else {
-            todo!()
-        }
-
-        // return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
-        //     status_code: 404,
-        //     status_text: "Not Found".to_string(),
-        //     message: Some(format!(
-        //         "Route not found for path: {:?} with method: {:?}",
-        //         ctx.get_key().get_path(),
-        //         ctx.get_key().get_method()
-        //     )),
-        //     ..Default::default()
-        // }));
-
-        // If no route is found, return an error.
 
         // TODO: I think we should redirect to a 404 page or something like that.
         // But we need the functionality for that.

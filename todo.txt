@@ -227,6 +227,7 @@ ISSUES
 22. Redirection does not work with new router, probably because the path that would be registered to redirect does not exists in the 
     -> routes table and are throwing early without trying to parse the request when the redirection logic triggers.
 23. Refactor RouteHandlerContext to struct with fields not tuple struct as it become to ambiguous.
+24. Make sure the .html, .css, and .js cannot be declared outside SpecialDirectories,
     
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,

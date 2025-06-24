@@ -381,6 +381,12 @@ impl<'a> HttpRequest<'a> {
     ) -> Result<String, Box<dyn Error + Send + Sync>> {
         let resource_path: PathBuf = Config::get_server_public().join(relative_path.as_ref());
 
+        println!(
+            "Reading requested resource: {:?} | {:?}",
+            relative_path.as_ref(),
+            resource_path
+        );
+
         // Read the file
         let requested_resource = fs::read_to_string(resource_path)?;
 
