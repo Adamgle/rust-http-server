@@ -17,7 +17,6 @@ pub mod tcp_handlers {
     use crate::config::Config::{self};
     use crate::http::{HttpHeaders, HttpResponseHeaders, HttpResponseStartLine};
     use crate::http_response::HttpResponse;
-    use crate::middleware::Middleware;
     use crate::routes::{RouteHandlerContext, RouteHandlerResult, RouteResult, RouteTableKey};
     use crate::*;
     use http::HttpRequestError;
@@ -163,37 +162,12 @@ pub mod tcp_handlers {
 
         let (path, method) = (request.get_request_target_path()?, request.get_method());
 
-        // Reason while we are doing the validation of the middleware paths here, is because we do not want to
-        // embed the app layer into the library layer in the HttpRequestHeaders::validate_request_target.
-        // Trying to pretend that this code has actually some structure.
-
-        // Routes: [:database/, ] => database/
-        // :database/
-
-        // NOTE: That is idiotic, even thought the segments are prefixed with ":", for evaluation they are not
-        // resolved as is, the ":" is just a prefix to indicate that it is a segment path, and the actual match happens what is after.
-        // if let Err(mut message) = Middleware::validate_middleware_path(&path) {
-        //     if Middleware::is_path_segment(&path) {
-        //         message = Box::from(format!(
-        //             "Segment paths as literals are not allowed in the request path: {:?}",
-        //             path
-        //         ));
-        //     }
-
-        //     return Err(Box::from(HttpRequestError {
-        //         status_code: 400,
-        //         status_text: "Bad Request".into(),
-        //         internals: Some(message),
-        //         ..Default::default()
-        //     }));
-        // }
-
         // NOTE: We could just create those headers while doing route and then return the ownership.
         // it would be the same actually, we would still return it from the route handler, but maybe more idiomatic.
         let headers: HttpResponseHeaders<'_> =
             HttpResponseHeaders::new(HttpResponseStartLine::default());
 
-        let routes = config.get_routes();
+        let router = config.get_router();
 
         let route_key = RouteTableKey::new_no_validate(path, Some(method.clone()));
 
@@ -214,7 +188,7 @@ pub mod tcp_handlers {
         // but that does not make any sense, as it is no producing body, we will keep the code because it does not hurt.
         // IDEA: Maybe the return type of the middleware could be used a redirect, as that does not require route handler.
         if let RouteResult::RouteResult(RouteHandlerResult { mut headers, body }) =
-            routes.route(ctx).await?
+            router.route(ctx).await?
         {
             // Set default headers, if any.
             headers.add(Cow::from("Connection"), Cow::from("keep-alive"));

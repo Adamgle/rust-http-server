@@ -2,7 +2,7 @@ pub mod database;
 
 use crate::http::HttpRequestMethod;
 use crate::logger::Logger;
-use crate::routes::{RouteTable, RouteTableKey};
+use crate::routes::{RouteTableKey, Router};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsStr;
@@ -40,7 +40,7 @@ pub struct AppConfig {
     /// `routes` is a HashMap of routes, where key is a tuple of path and method,
     /// and value is a function that takes a mutable reference to HttpRequest and HttpResponseHeaders.
     /// We are evaluating the routes on startup and use it for the duration of the program.
-    pub routes: RouteTable,
+    pub router: Router,
     pub database: Option<Arc<Mutex<Database>>>,
 }
 
@@ -57,9 +57,9 @@ impl AppConfig {
     /// Routes are defined statically in the code, and are evaluated on startup.
     ///
     /// Since the function could get big, we will use a wrapper function to create the routes.
-    pub fn create_routes() -> Result<RouteTable, Box<dyn Error + Send + Sync>> {
-        crate::routes::RouteTable::create_routes()
-    }
+    // pub fn create_routes() -> Result<RouteTable, Box<dyn Error + Send + Sync>> {
+    //     crate::routes::RouteTable::create_routes()
+    // }
 
     pub fn get_database(&self) -> Option<Arc<Mutex<Database>>> {
         // self.database.as_ref().map(Arc::clone)
@@ -72,7 +72,7 @@ impl std::fmt::Debug for AppConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppConfig")
             .field("url", &self.url)
-            .field("routes", &self.routes)
+            .field("routes", &self.router.get_routes())
             // .field("routes", &self.routes.0.keys().collect::<Vec<_>>())
             .finish()
     }
@@ -276,19 +276,13 @@ impl SpecialDirectories {
                     // If the entry is a file, add it to the set of paths
 
                     let file_path = entry.path();
-                    println!(
-                        "file_path: {:?} | dir_path: {:?} | dir: {:?}",
-                        file_path,
-                        dir_path,
-                        dir.to_string()
-                    );
 
                     let mut file_path = match dir {
                         // We are not stripping the prefix for assets are there is no mapping of extension that links to that directory.
                         SpecialDirectories::Assets => {
                             let public = Config::get_server_public();
 
-                            file_path.strip_prefix(public).map(|p| p.to_path_buf())
+                            file_path.strip_prefix(&public).map(|p| p.to_path_buf())
                         }
                         // We are stripping the prefix for other directories, as they have mapping of extensions to the directory.
                         _ => file_path
@@ -301,8 +295,6 @@ impl SpecialDirectories {
                             e
                         ))
                     })?;
-
-                    println!("file_path after stripping: {:?}", file_path);
 
                     // If the file is the index file, we will replace it with "/"
                     if file_path == Path::new(Config::SERVER_INDEX_PATH) {
@@ -341,16 +333,13 @@ impl SpecialDirectories {
         // We should walk through the directories and collect all files,
 
         let mut paths = HashSet::<RouteTableKey>::new();
-        let public = Config::get_server_public();
 
         for dir in SpecialDirectories::iter() {
             let path = dir.get_path();
-            let dir_path = public.join(&path);
-            Self::walk_dir(&path, &mut paths, &dir_path, &dir)
+
+            Self::walk_dir(&path, &mut paths, &path, &dir)
                 .inspect_err(|e| eprintln!("Error walking through directory {:?}: {}", path, e))?;
         }
-
-        println!("Collected paths: {:?}", paths);
 
         return Ok(paths);
     }
@@ -438,7 +427,7 @@ impl Config {
             url: config_file
                 .domain_to_url(&config_file.domain, &socket_address.port())
                 .inspect_err(|e| eprintln!("Error parsing domain to URL: {}", e))?,
-            routes: AppConfig::create_routes()?,
+            router: Router::new()?,
             database,
         };
 
@@ -504,11 +493,15 @@ impl Config {
     //     return Err("Database not initialized".into());
     // }
 
-    pub fn get_routes(&self) -> &RouteTable {
-        &self.app.routes
+    pub fn get_router(&self) -> &Router {
+        &self.app.router
     }
 
-    pub fn get_routes_mut(&mut self) -> &mut RouteTable {
-        &mut self.app.routes
-    }
+    // pub fn get_routes(&self) -> &RouteTable {
+    //     &self.app.router.get_routes()
+    // }
+
+    // pub fn get_routes_mut(&mut self) -> &mut RouteTable {
+    //     self.app.router.get_routes_mut()
+    // }
 }

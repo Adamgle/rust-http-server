@@ -3,12 +3,12 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     future::Future,
+    hash::Hash,
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
 };
 
-use percent_encoding::{AsciiSet, CONTROLS};
 use strum::IntoEnumIterator;
 use tokio::sync::Mutex;
 
@@ -16,41 +16,32 @@ use crate::{
     config::{
         config_file::DatabaseConfigEntry,
         database::{Database, DatabaseType},
-        SpecialDirectories,
+        Config, SpecialDirectories,
     },
     http::{
         HttpHeaders, HttpRequestError, HttpRequestHeaders, HttpRequestMethod, HttpResponseHeaders,
     },
     http_request::HttpRequest,
-    middleware::{Middleware, MiddlewareHandler, MiddlewareHandlerResult, PATH_SEGMENT},
+    middleware::{Middleware, MiddlewareHandler, MiddlewareHandlerResult},
 };
 
 // NOTE: Route table does live for the duration of the program, but not the values it is referencing.
-// whatever we put in the route table is valid for static, but not the values it is referencing.
 // We need to copy that values to put it in the route table because values it is referencing are not
 // static and will be wasted from memory after request is done.
 
 // NOTE: Lifetimes are not practically even in this code, as the RouteTable does not have not tied
 // the request and response headers to the lifetime of struct, it is independent and those values lives shorter lifetime.
 
-// const FRAGMENT: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`');
-
-pub const PATH_ENCODING_SET: &AsciiSet = &CONTROLS
-    .add(b' ') // space
-    .add(b'"')
-    .add(b'#')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'?')
-    .add(b'[')
-    .add(b'\\')
-    .add(b']')
-    .add(b'^')
-    .add(b'`')
-    .add(b'{')
-    .add(b'|')
-    .add(b'}');
+/// The route table is a hash map that maps the route key to the route value.
+///
+/// We are keeping MiddlewareHandler there as we are considering that just the special case of the RouteHandler,
+/// Keeping in the separate struct we would need to allocate a separate
+///
+#[derive(Debug)]
+pub struct Router {
+    routes: RouteTable,
+    middleware: Middleware,
+}
 
 pub struct RouteTable(HashMap<RouteTableKey, Arc<RouteTableValue>>);
 
@@ -185,14 +176,23 @@ impl RouteTableKey {
         // We need to first try to resolve the path literally in the router and then try to normalize it if not found and lookup again.
     }
 
-    /// Omits the validation of the `path` as it already is validated while parsing http request.
+    /// Normalizes the path, omits the validation of the `path`.
     ///
     /// Path is validated and decoded, but not normalized.
     ///
     /// Validation runs under `HttpRequestRequestLine::new`, path is decoded in `HttpRequestHeaders::get_request_target_path`.
     ///
     pub fn new_no_validate(path: impl AsRef<Path>, method: Option<HttpRequestMethod>) -> Self {
-        Self(path.as_ref().to_path_buf(), method)
+        // let path = HttpRequestHeaders::normalize_path(
+        //     &path
+        //         .as_ref()
+        //         .to_str()
+        //         .ok_or("Path must be valid UTF-8")?
+        //         .to_lowercase(),
+        // )?;
+
+        // Ok(Self(PathBuf::from(path), method))
+        Self(PathBuf::from(path.as_ref()), method)
     }
 
     pub fn get_path(&self) -> &Path {
@@ -218,26 +218,6 @@ impl RouteTableKey {
     pub fn get_path_mut(&mut self) -> &mut PathBuf {
         // Returns a mutable reference to the path of the route table key.
         &mut self.0
-    }
-
-    /// Middleware paths could have can have special characters that are used when resolving a path.
-    ///
-    // NOTE:  Functionality can grow so we are implementing a method for that.
-    pub fn parse_middleware_path(&self) -> &Path {
-        // Parses the middleware path by removing the leading `:` segment if it exists.
-        // This is used to normalize the path for middleware handling.
-
-        let path = self.get_path().to_str().expect("Path must be valid UTF-8");
-
-        // That is stupid, but I want to use the same piece of code that does the same logic
-        // because if we would change the segment recognition logic, we would have to change it in two places.
-
-        if Middleware::is_path_segment(&path) {
-            // safe to unwrap as we checked if the path starts with `:`
-            return Path::new(path.strip_prefix(PATH_SEGMENT).unwrap());
-        }
-
-        return Path::new(path);
     }
 }
 impl std::fmt::Debug for RouteTableKey {
@@ -426,10 +406,122 @@ impl RouteHandler {
     }
 }
 
+impl Router {
+    pub fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
+        // Creates a new router with the given routes and middleware.
+        let routes = RouteTable::create_routes()?;
+
+        Ok(Self {
+            middleware: Middleware::new(&routes)?,
+            routes,
+        })
+    }
+
+    pub fn get_routes(&self) -> &RouteTable {
+        // Returns the routes of the router.
+        &self.routes
+    }
+
+    pub fn get_routes_mut(&mut self) -> &mut RouteTable {
+        // Returns the mutable routes of the router.
+        &mut self.routes
+    }
+
+    pub fn get_middleware(&self) -> &Middleware {
+        // Returns the middleware of the router.
+        &self.middleware
+    }
+
+    pub fn get_middleware_segments(&self) -> &HashSet<RouteTableKey> {
+        // Returns the middleware segments of the router.
+        self.middleware.get_segments()
+    }
+
+    /// `NOTE`: I am a mistake implementing the RouteResult as an enum that could return standalone the result of the middleware handler.
+    /// That is not the case as middleware does not produce the body and if the handler does not exists, but cannot respond with data.
+    /// We will keep the functionality, maybe we will utilize it as it is not a big deal to keep it in the code. But keep in mind
+    /// That currently the function returns only the `RouteResult::RouteResult` of type `RouteHandlerResult<'ctx>`,
+    ///
+    /// `NOTE`: Route with defined middleware and undefined handler could only be valid if the middleware is a segment, given that special case
+    /// we need to keep the `RouteHandler` as `Option<RouteHandler>` in the `RouteTableValue` struct.
+    pub async fn route<'ctx>(
+        &self,
+        mut ctx: RouteHandlerContext<'ctx>,
+        // RouteHandlerResult<'ctx>
+    ) -> Result<RouteResult<'ctx>, Box<dyn Error + Send + Sync>> {
+        // Check if the path matches any of the middleware segments.
+
+        // Route has to exist for middleware segment to run, as if not, if path is given as invalid there, that would just return an error,
+        // but despite that middleware segment could run.
+        let route = self.routes.get(ctx.get_key()).map_err(|message| {
+            Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                status_code: 404,
+                status_text: "Not Found".to_string(),
+                message: Some(message.to_string()),
+                ..Default::default()
+            })
+        })?;
+
+        if let Some(segment) = self.middleware.is_segment(&ctx.get_key())? {
+            if let Ok(Some(middleware)) = self
+                .routes
+                .get(&segment)
+                .map(|v| v.get_middleware().cloned())
+            {
+                // Give back the context to the route handler.
+                ctx = middleware.callback(ctx).await?.ctx;
+            }
+        };
+
+        let (handler, middleware) = (route.get_handler(), route.get_middleware());
+
+        match (handler, middleware) {
+            // Middleware but no handler, we run the middleware return the ctx.
+            // UPDATE: That is not a valid state, as we should always have a handler for the path.
+            // (None, Some(middleware)) => {
+            //     let result = middleware.callback(ctx).await?;
+            //
+            //     return Ok(RouteResult::MiddlewareResult(result));
+            // }
+
+            // Handle exists, despite the middleware, return the result of the handler.
+            (Some(handler), middleware) => {
+                // Check if the middleware exists, if it does, we run it, update the ctx.
+
+                if let Some(middleware) = middleware {
+                    ctx = middleware.callback(ctx).await?.ctx;
+                }
+
+                // If the handler exists, we call it with the context and return the result.
+
+                return Ok(RouteResult::RouteResult(handler.callback(ctx).await?));
+
+                // Run the handler for the path.
+            }
+            _ => {
+                return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                    status_code: 404,
+                    status_text: "Not Found".to_string(),
+                    message: Some(format!(
+                        "Route not found for path: {:?} with method: {:?}",
+                        ctx.get_key().get_path(),
+                        ctx.get_key().get_method()
+                    )),
+                    ..Default::default()
+                }))
+            }
+        };
+
+        // TODO: I think we should redirect to a 404 page or something like that.
+        // But we need the functionality for that.
+    }
+}
+
 impl RouteTable {
     pub fn new() -> Self {
-        // Creates a new empty route table.
-        Self(HashMap::new())
+        // Creates a new route table.
+        // Ok(Self::create_
+        Self(HashMap::<RouteTableKey, Arc<RouteTableValue>>::new())
     }
 
     pub fn get_routes(&self) -> &HashMap<RouteTableKey, Arc<RouteTableValue>> {
@@ -479,38 +571,6 @@ impl RouteTable {
                     .insert(key, RouteTableValue::new(Some(handler), None));
             }
         }
-    }
-
-    // Middleware segments collected from the route table.
-    pub fn get_middleware_segments(&self) -> HashSet<&RouteTableKey> {
-        // Returns the paths that are used for middleware.
-
-        self.get_routes()
-            .iter()
-            .fold(HashSet::new(), |mut acc, (key, value)| {
-                // We are working on normalized paths, one prefixed with SpecialDirectories. Segment cannot be set on SpecialDirectories.
-
-                // // Try to strip the prefix.
-                // let path = key
-                //     .get_path()
-                //     .strip_prefix(SpecialDirectories::Pages.to_string());
-
-                // Would resolve :database/ => pages/:database/index.html
-                // Invalid segment: database/tasks.json => False
-
-                // Should work like
-                // :database/tasks/ => database/tasks/slaves.json, etc.
-                // :database/ => database/tasks.json, database/users.json, etc.
-
-                // That works on normalized paths, since it does not work and the paths starts with SpecialDirectories
-                // as the segment would resolve to directories when no direct mapping to the file exists as segments do not contain files
-                // and are treated as directories in normalization.
-                if value.get_middleware().is_some() && key.get_path().starts_with(PATH_SEGMENT) {
-                    acc.insert(key);
-                }
-
-                acc
-            })
     }
 
     /// Inserts a MiddlewareHandler into the route table for the given key,
@@ -565,7 +625,7 @@ impl RouteTable {
     }
 
     /// Searches for a route with given key, it will try to look up the path as is
-    /// and if not found, it will try to normalize the path and look it up again. Path is already validated.
+    /// and if not found, it will try to suffix with index.html and look it up again. Path is already validated.
     /// Validation takes place in the `HttpRequestHeaders::validate_request_target_path` in `RouteTableKey::new`
     /// and when request from the client in `HttpRequestRequestLine::new`.
     pub fn get(
@@ -573,33 +633,48 @@ impl RouteTable {
         key: &RouteTableKey,
     ) -> Result<Arc<RouteTableValue>, Box<dyn Error + Send + Sync>> {
         // Get the route handler for the given key, if it exists.
-        return self
-            .get_routes()
-            .get(&key)
-            .map(|v| Arc::clone(v))
-            .ok_or_else(|| {
-                Box::<dyn Error + Send + Sync>::from(format!(
-                    "Route not found for path: {:?} with method: {:?}",
-                    key.get_path(),
-                    key.get_method()
-                ))
-            });
+
+        let routes = self.get_routes();
+
+        // First match the key as is, we are not prefixing write away as abstracted paths should not be prefixed
+        if let Some(value) = routes.get(key) {
+            return Ok(Arc::clone(value));
+        }
+
+        let path = key.get_path().to_str().ok_or_else(|| {
+            Box::<dyn Error + Send + Sync>::from(format!(
+                "Path {:?} is not valid UTF-8",
+                key.get_path()
+            ))
+        })?;
+
+        // We are not using `prefix_path` as it would prefix with SpecialDirectories::Pages and suffix with `index.html`,
+        // but we just want to suffix with the root file.
+        // Prefix with INDEX_PATH => index.html
+        let mut path = PathBuf::from(path);
+        path.push(Config::SERVER_INDEX_PATH);
+
+        let suffixed_path = RouteTableKey::new_no_validate(path, key.get_method().clone());
+
+        // Try to match the prefixed key, if the former did not match. This is done for paths
+        // pointing to directory in the /public directory resolving to the index.html file in that directory.
+        match routes.get(&suffixed_path) {
+            Some(value) => Ok(Arc::clone(value)),
+            None => Err(Box::<dyn Error + Send + Sync>::from(format!(
+                "Route not found for path: {:?} with method: {:?}",
+                key.get_path(),
+                key.get_method()
+            ))),
+        }
     }
 
-    /// Statically creates the routes based on the user definitions of the routes with appropriate handlers.
+    /// Statically creates the routes based on the user definitions of the routes with appropriate handlers
+    /// for routes and middleware.
     ///
     /// Automatically collects the routes from the `SpecialDirectories` and inserts them into the route table.
     pub fn create_routes() -> Result<Self, Box<dyn Error + Send + Sync>> {
         // We have the routes cached in the file that is composed in runtime and parsed to some context at startup.
         // We check if the path exists the cached routes or is that a new route that we have defined in the code in that function.
-
-        // 1. We did not found the path => We have to evaluate every path also by instantiating the handler function
-        //  -> which is a closure and that would capture it's environment occupying some memory. That would be a O(n) operation to search for route. We can't allow that.
-        // 2. We did found the path => ACTUALLY: As I am thinking about that, we either way would have to evaluate each handler function making that design.
-        //  -> only way we would not is a match statement that would be a O(1) operation.
-
-        // We will not store the closures in the routes as that would waste memory as we have to evaluate the whole table of routes
-        // on startup or when the first request comes in. We would use function pointers, that would be only 8 bits per function on x64 architecture.
 
         let mut routes = RouteTable::new();
 
@@ -693,119 +768,40 @@ impl RouteTable {
             }),
         );
 
+        routes.insert_handler(
+            RouteTableKey::new("database/tasks.json", Some(HttpRequestMethod::POST)),
+            RouteHandler::new(|ctx| {
+                Box::pin(async move {
+                    // First borrow immutably
+                    let database = ctx.get_database()?;
+
+                    // Then destructure for owned values.
+                    let RouteHandlerContext {
+                        request,
+                        response_headers,
+                        ..
+                    } = ctx;
+
+                    let mut database = database.lock().await;
+
+                    if let Some(body) = request.get_body() {
+                        database.insert(DatabaseType::Tasks, body).await?;
+                    } else {
+                        return Err(Box::<dyn Error + Send + Sync>::from("Task cannot be empty"));
+                    }
+
+                    return Ok(RouteHandlerResult {
+                        headers: response_headers,
+                        body: String::from("Ok"),
+                    });
+                })
+            }),
+        );
+
         // #####
 
         println!("{:#?}", routes);
 
         Ok(routes)
-    }
-
-    /// `NOTE`: I am a mistake implementing the RouteResult as an enum that could return standalone the result of the middleware handler.
-    /// That is not the case as middleware does not produce the body and if the handler does not exists, but cannot respond with data.
-    /// We will keep the functionality, maybe we will utilize it as it is not a big deal to keep it in the code. But keep in mind
-    /// That currently the function returns only the `RouteResult::RouteResult` of type `RouteHandlerResult<'ctx>`,
-    ///
-    /// `NOTE`: Route with defined middleware and undefined handler could only be valid if the middleware is a segment, given that special case
-    /// we need to keep the `RouteHandler` as `Option<RouteHandler>` in the `RouteTableValue` struct.
-    pub async fn route<'ctx>(
-        &self,
-        mut ctx: RouteHandlerContext<'ctx>,
-        // RouteHandlerResult<'ctx>
-    ) -> Result<RouteResult<'ctx>, Box<dyn Error + Send + Sync>> {
-        // Check if the path matches any of the middleware segments.
-
-        // Route has to exist for middleware segment to run, as if not, if path is given as invalid there, that would just return an error,
-        // but despite that middleware segment could run.
-        let route = self.get(ctx.get_key()).map_err(|message| {
-            Box::<dyn Error + Send + Sync>::from(HttpRequestError {
-                status_code: 404,
-                status_text: "Not Found".to_string(),
-                message: Some(message.to_string()),
-                ..Default::default()
-            })
-        })?;
-
-        // Router {
-        // RouteTable => (RouteHandler, MiddlewareHandler)
-        // Middleware => {
-        //    segments: {},
-        // }
-        // }
-
-        // Segments should be resolved in the order of their strength, so the more specific segment would run on the path.
-        // :database/ => database/*
-        // :database/tasks/ => This segment is stronger, so it should run on the paths containing database/tasks, :database should not run.
-
-        for middleware_key in self.get_middleware_segments() {
-            // Check if the path given in the key matches some middleware segment.
-            // Consider the strength of the segment, see above.
-            if true
-            // if ctx
-            //     .get_key()
-            //     .get_path()
-            //     .components()
-            //     .any(|c| c.as_os_str() == middleware_key.get_path())
-            //     && ctx.get_key().get_method() == middleware_key.get_method()
-            {
-                // Parse the path to remove the leading `:`.
-                let path = middleware_key.parse_middleware_path();
-
-                let key = RouteTableKey::new(path, ctx.get_key().get_method().clone());
-
-                // We don't want to propagate the error if the middleware is not found, just keep searching.
-                if let Ok(Some(middleware)) = self.get(&key).map(|v| v.get_middleware().cloned()) {
-                    // Give back the context to the route handler.
-                    ctx = middleware.callback(ctx).await?.ctx;
-                }
-
-                println!(
-                    "Running middleware segment {:?} for path: {:?}",
-                    middleware_key.get_path(),
-                    ctx.get_key().get_path()
-                );
-            }
-        }
-
-        let (handler, middleware) = (route.get_handler(), route.get_middleware());
-
-        match (handler, middleware) {
-            // Middleware but no handler, we run the middleware return the ctx.
-            // UPDATE: That is not a valid state, as we should always have a handler for the path.
-            // (None, Some(middleware)) => {
-            //     let result = middleware.callback(ctx).await?;
-            //
-            //     return Ok(RouteResult::MiddlewareResult(result));
-            // }
-
-            // Handle exists, despite the middleware, return the result of the handler.
-            (Some(handler), middleware) => {
-                // Check if the middleware exists, if it does, we run it, update the ctx.
-
-                if let Some(middleware) = middleware {
-                    ctx = middleware.callback(ctx).await?.ctx;
-                }
-
-                // If the handler exists, we call it with the context and return the result.
-
-                return Ok(RouteResult::RouteResult(handler.callback(ctx).await?));
-
-                // Run the handler for the path.
-            }
-            _ => {
-                return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
-                    status_code: 404,
-                    status_text: "Not Found".to_string(),
-                    message: Some(format!(
-                        "Route not found for path: {:?} with method: {:?}",
-                        ctx.get_key().get_path(),
-                        ctx.get_key().get_method()
-                    )),
-                    ..Default::default()
-                }))
-            }
-        };
-
-        // TODO: I think we should redirect to a 404 page or something like that.
-        // But we need the functionality for that.
     }
 }

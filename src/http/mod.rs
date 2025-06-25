@@ -639,7 +639,6 @@ impl<'a> HttpRequestHeaders<'a> {
     }
 
     pub fn normalize_path(path: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
-        // \\pages/index.html
         let path = path.replace('\\', "/");
 
         let mut path = if path != "/" {
@@ -651,6 +650,11 @@ impl<'a> HttpRequestHeaders<'a> {
         for dir in SpecialDirectories::iter() {
             let dir = dir.to_string();
 
+            // We are not stripping the assets as files in that directory do not map to the specific extension.
+            if dir == SpecialDirectories::Assets.to_string() {
+                continue;
+            }
+
             // Path cannot be of special directory
             if path == dir {
                 return Err(Box::<dyn Error + Send + Sync>::from(format!(
@@ -658,12 +662,8 @@ impl<'a> HttpRequestHeaders<'a> {
                     dir
                 )));
             }
-            // We are not stripping the assets as files in that directory do not map to the specific extension.
-            else if path == SpecialDirectories::Assets.to_string() {
-                continue;
-            }
             // If the path starts with the special directory, we strip it
-            else if let Some(p) = path.strip_prefix(format!("{}/", dir.to_string()).as_str()) {
+            else if let Some(p) = path.strip_prefix(&format!("{}/", dir.to_string())) {
                 path = p;
                 break;
             }
