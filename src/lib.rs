@@ -17,7 +17,7 @@ pub mod tcp_handlers {
     use crate::config::Config::{self};
     use crate::http::{HttpHeaders, HttpResponseHeaders, HttpResponseStartLine};
     use crate::http_response::HttpResponse;
-    use crate::routes::{RouteHandlerContext, RouteHandlerResult, RouteResult, RouteTableKey};
+    use crate::routes::{RouteContext, RouteHandlerResult, RouteResult, RouteTableKey};
     use crate::*;
     use http::HttpRequestError;
     use std::borrow::Cow;
@@ -48,6 +48,14 @@ pub mod tcp_handlers {
             listener.local_addr().unwrap()
         );
 
+        let logs = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open("logs/log.txt")
+            .await?;
+
+        let logs = Arc::new(Mutex::new(logs));
+
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
@@ -77,6 +85,8 @@ pub mod tcp_handlers {
                     let config = Arc::clone(&config);
                     let task_error_writer = Arc::clone(&writer);
 
+                    let logs = Arc::clone(&logs);
+
                     let task = tokio::spawn(async move {
                         // let writer = Arc::clone(&writer);
 
@@ -87,6 +97,12 @@ pub mod tcp_handlers {
                         )
                         .await
                         {
+                            logs.lock()
+                                .await
+                                .write_all(format!("Error handling request: {}\n", err).as_bytes())
+                                .await
+                                .unwrap();
+
                             // This is error that occurs while handling the error.
                             if let Err(err) = HttpRequestError::send_error_response(
                                 Arc::clone(&config),
@@ -169,13 +185,14 @@ pub mod tcp_handlers {
 
         let router = config.get_router();
 
-        let route_key = RouteTableKey::new_no_validate(path, Some(method.clone()));
+        let route_key =
+            RouteTableKey::new_no_validate(path, Some(method.clone()), routes::RouteKeyKind::Route);
 
         println!("Requesting: {:?}", route_key);
 
         // To resolve the double mutable reference to headers we will move the ownership of headers
         // that is cheap operation.
-        let ctx = RouteHandlerContext::new(
+        let ctx = RouteContext::new(
             &request,
             headers,
             &route_key,
@@ -187,7 +204,7 @@ pub mod tcp_handlers {
         // I know that is very stupid, but I have thought that middleware could also be run standalone,
         // but that does not make any sense, as it is no producing body, we will keep the code because it does not hurt.
         // IDEA: Maybe the return type of the middleware could be used a redirect, as that does not require route handler.
-        if let RouteResult::RouteResult(RouteHandlerResult { mut headers, body }) =
+        if let RouteResult::Route(RouteHandlerResult { mut headers, body }) =
             router.route(ctx).await?
         {
             // Set default headers, if any.

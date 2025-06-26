@@ -22,6 +22,7 @@ pub struct DatabaseTask {
     id: String,
     /// Primary key.
     value: String,
+    // user_id: String,
 }
 
 impl DatabaseEntryTrait for DatabaseTask {
@@ -48,6 +49,30 @@ pub struct DatabaseUser {
     password: String,
     /// User can utilize this API key to access the API. This should be created on user registration.
     API_key: String,
+}
+
+#[derive(serde::Deserialize)]
+/// User type that is return from the route handlers while creating a user. It represents the data that defines the user from the client perspective.
+/// We need to do some server logic on the type, so we cannot use the `DatabaseUser` type directly as those fields are not client defined.
+pub struct ClientUser {
+    /// Arbitrary String, we won't even validate it.
+    email: String,
+    /// We could hash the password before storing it in the database, but for simplicity we will store it as plain text.
+    password: String,
+}
+
+// NOTE: If that would end up fallible we would implement `TryFrom` trait instead of `From` trait.
+impl From<ClientUser> for DatabaseUser {
+    fn from(value: ClientUser) -> Self {
+        Self {
+            email: value.email,
+            password: value.password,
+            // TODO: Generate a new API key for the user.
+            API_key: String::new(),
+            // TODO: Generate a new UUID for the user ID.
+            id: String::from("1348129S"),
+        }
+    }
 }
 
 // #[typetag::serde]

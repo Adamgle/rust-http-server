@@ -2,7 +2,7 @@ pub mod database;
 
 use crate::http::HttpRequestMethod;
 use crate::logger::Logger;
-use crate::routes::{RouteTableKey, Router};
+use crate::routes::{RouteKeyKind, RouteTableKey, Router};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsStr;
@@ -308,7 +308,11 @@ impl SpecialDirectories {
                         .ok_or_else(|| format!("Path of the file under /public directory is not UTF-8 compatible: {:?}", file_path))
                         .map(|s| s.replace('\\', "/").to_string())?;
 
-                    paths.insert(RouteTableKey::new(file_path, Some(HttpRequestMethod::GET)));
+                    paths.insert(RouteTableKey::new(
+                        file_path,
+                        Some(HttpRequestMethod::GET),
+                        RouteKeyKind::Route,
+                    ));
 
                     // Insert the file path into the set, converting it to PathBuf
                     // Every path can be accessed with GET method, nothing else is guaranteed.

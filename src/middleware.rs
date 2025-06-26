@@ -1,15 +1,15 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     error::Error,
-    future::Future,
     path::{Path, PathBuf},
-    pin::Pin,
-    sync::Arc,
 };
 
 use crate::{
     http::HttpRequestError,
-    routes::{RouteHandlerContext, RouteTable, RouteTableKey},
+    routes::{
+        RouteContext, RouteEntry, RouteHandler, RouteHandlerFuture, RouteKeyKind, RouteResult,
+        RouteTable, RouteTableKey,
+    },
 };
 
 use crate::http::HttpHeaders;
@@ -22,7 +22,12 @@ use crate::http::HttpHeaders;
 #[derive(Debug)]
 pub struct Middleware {
     // NOTE: Make sure that static is valid, seems valid.
-    segments: HashSet<RouteTableKey>,
+    pub routes: RouteTable,
+    // We could statically generate those segments to every single path
+    // that would evaluate to particular segment handler,
+    // HashMap<RouteTableKey, RouteHandler>,
+    /// NOTE: Route entry should be of RouteEntry::Middleware variant.
+    pub segments: HashMap<RouteTableKey, RouteEntry>,
 }
 
 /// Middleware handlers will not give back the headers ownership as they are returning the context
@@ -33,59 +38,7 @@ pub struct Middleware {
 // `NOTE`: This could be type alias.
 pub struct MiddlewareHandlerResult<'ctx> {
     // headers: HttpResponseHeaders<'b>,
-    pub ctx: RouteHandlerContext<'ctx>,
-}
-
-/// The async version of a middleware — a boxed future resolving to a middleware result.
-pub type MiddlewareHandlerFuture<'ctx> = Pin<
-    Box<
-        dyn Future<Output = Result<MiddlewareHandlerResult<'ctx>, Box<dyn Error + Send + Sync>>>
-            + Send
-            + 'ctx,
-    >,
->;
-
-/// The actual middleware closure type — async-capable, shareable across threads/tasks.
-
-pub type MiddlewareClosure = Arc<
-    dyn for<'ctx> Fn(RouteHandlerContext<'ctx>) -> MiddlewareHandlerFuture<'ctx>
-        + Send
-        + Sync
-        + 'static,
->;
-
-#[derive(Clone)]
-pub struct MiddlewareHandler(MiddlewareClosure);
-// 'a is the struct related things, 'ctx is the context
-
-impl MiddlewareHandler {
-    pub fn new<F>(handler: F) -> Self
-    where
-        F: Send + Sync + 'static,
-        F: Fn(RouteHandlerContext) -> MiddlewareHandlerFuture,
-    {
-        Self(Arc::new(handler))
-    }
-
-    pub async fn callback<'ctx>(
-        &self,
-        ctx: RouteHandlerContext<'ctx>,
-    ) -> Result<MiddlewareHandlerResult<'ctx>, Box<dyn Error + Send + Sync>> {
-        // Call the middleware function pointer with the request, response headers, and key.
-
-        (self.0)(ctx).await
-    }
-}
-
-impl std::fmt::Debug for MiddlewareHandler {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Custom debug implementation to show the function pointer address.
-        f.debug_tuple("MiddlewareHandler")
-            // That is impractical, it show the memory address of the dyn Trait
-            .field(&Arc::as_ptr(&self.0))
-            // .field(&Some(()))
-            .finish()
-    }
+    pub ctx: RouteContext<'ctx>,
 }
 
 pub const PATH_SEGMENT: &str = ":";
@@ -93,34 +46,63 @@ pub const PATH_SEGMENT: &str = ":";
 impl Middleware {
     pub fn new(routes: &RouteTable) -> Result<Self, Box<dyn Error + Send + Sync>> {
         // Create a new middleware with the given segments.
+
+        let middleware_routes = Self::create_middleware()?;
+
         Ok(Self {
-            segments: Self::generate_middleware_segments(routes)?,
+            segments: Self::generate_middleware_segments(routes, &middleware_routes)?,
+            routes: middleware_routes,
         })
     }
 
     /// `NOTE`: This has to run after the routes are initialized.
     ///
+    /// Runs on the routes declared on the `routes` field of the `Router` struct.
+    ///
     /// Middleware segments collected from the route table. Parses the segments, removing the leading `:` character,
     pub fn generate_middleware_segments(
         routes: &RouteTable,
-    ) -> Result<HashSet<RouteTableKey>, Box<dyn Error + Send + Sync>> {
+        middleware_routes: &RouteTable,
+    ) -> Result<HashMap<RouteTableKey, RouteEntry>, Box<dyn Error + Send + Sync>> {
         // Returns the paths that are used for middleware.
 
-        let mut segments = HashSet::new();
+        // We would generate O(1) look for the middleware segments
+        // That maps each path to the corresponding segments that could be run on that path.
+        // If the path given does exists in the segments, then there is no segment for that path.
 
-        for (key, value) in routes.get_routes().iter() {
+        let mut segments = HashSet::<RouteTableKey>::new();
+        let mut segments_mapping: HashMap<RouteTableKey, RouteEntry> = HashMap::new();
+
+        // Take the routes table, iterate and find the segments
+        // For each path in the routes, try to match the segment path, there could be only one segment for this particular path.
+
+        for key in middleware_routes.get_routes().keys() {
             let path = key.get_path().to_str().expect("Path should be valid UTF-8");
 
-            if value.get_middleware().is_some() && Middleware::is_path_segment(path) {
-                let key = RouteTableKey::new_no_validate(
+            if Middleware::is_path_segment(path) {
+                let segment_key = RouteTableKey::new_no_validate(
                     Middleware::parse_middleware_path(path),
                     key.get_method().clone(),
+                    RouteKeyKind::Middleware,
                 );
-                segments.insert(key);
+
+                segments.insert(segment_key);
             }
         }
 
-        Ok(segments)
+        for key in routes.get_routes().keys() {
+            let segment = Middleware::evaluate_to_segment(key, &segments);
+
+            if let Some(segment) = segment {
+                // If the segment is found, we add it to the mapping.
+
+                let handler = middleware_routes.get(&segment)?;
+
+                segments_mapping.insert(key.clone(), handler);
+            }
+        }
+
+        Ok(segments_mapping)
     }
 
     /// Checks if the path is a segment path, meaning it starts with `:`.
@@ -133,6 +115,52 @@ impl Middleware {
             && p.extension().is_none()
             && p != Path::new(PATH_SEGMENT)
             && p != Path::new(&format!("{}/", PATH_SEGMENT));
+    }
+
+    pub fn evaluate_to_segment(
+        key: &RouteTableKey,
+        segments: &HashSet<RouteTableKey>,
+    ) -> Option<RouteTableKey> {
+        let mut route = PathBuf::from(key.get_path());
+
+        if route.extension().is_some() {
+            route.pop();
+        };
+
+        let mut segment_key = RouteTableKey::new_no_validate(
+            &route,
+            key.get_method().clone(),
+            RouteKeyKind::Middleware,
+        );
+
+        loop {
+            if segments.contains(&segment_key) {
+                segment_key.path = Self::path_to_segment(route.as_path());
+
+                return Some(segment_key);
+            }
+
+            // Check if there is a segment handler for any method for that route.
+            segment_key.method = None;
+
+            if segments.contains(&segment_key) {
+                segment_key.path = Self::path_to_segment(route.as_path());
+
+                return Some(segment_key);
+            }
+
+            // Remove one component from the path, from the end.
+            if !route.pop() {
+                break;
+            }
+
+            // Update the path.
+            segment_key.path = route.clone();
+            // Revert the method to the original one.
+            segment_key.method = key.get_method().clone();
+        }
+
+        None
     }
 
     /// Checks if the characters that have special meaning for the middleware paths are not percent encoded.
@@ -160,7 +188,7 @@ impl Middleware {
 
     /// Middleware paths could have can have special characters that are used when resolving a path.
     ///
-    // NOTE:  Functionality can grow so we are implementing a method for that.
+    // NOTE: Functionality can grow so we are implementing a method for that.
     pub fn parse_middleware_path(path: &str) -> PathBuf {
         // Parses the middleware path by removing the leading `:` segment if it exists.
         // This is used to normalize the path for middleware handling.
@@ -168,23 +196,24 @@ impl Middleware {
         // That is stupid, but I want to use the same piece of code that does the same logic
         // because if we would change the segment recognition logic, we would have to change it in two places.
 
-        if Middleware::is_path_segment(path) {
-            // safe to unwrap as we checked if the path starts with `:`
-            return PathBuf::from(
-                path.strip_prefix(PATH_SEGMENT)
-                    // We want the "/" suffix to be removed as we will be using the Components API
-                    // which strips the trailing slash from each component.
-                    .and_then(|p| Some(p.strip_suffix("/").unwrap_or(p)))
-                    .unwrap(),
-            );
-        }
-
-        return PathBuf::from(path);
+        // if Middleware::is_path_segment(path) {
+        // safe to unwrap as we checked if the path starts with `:`
+        return PathBuf::from(
+            path.strip_prefix(PATH_SEGMENT)
+                // We want the "/" suffix to be removed as we will be using the Components API
+                // which strips the trailing slash from each component.
+                .and_then(|p| Some(p.strip_suffix("/").unwrap_or(p)))
+                .unwrap(),
+        );
+        // }
     }
 
+    pub fn path_to_segment(path: &Path) -> PathBuf {
+        PathBuf::from(format!("{}{}{}", PATH_SEGMENT, path.display(), "/"))
+    }
     /// Validates the database "connection" for path that requested it and utilizes it.
     /// It won't run on every single path, but only on the paths that start with the `:database/` segment.
-    pub fn validate_database(mut ctx: RouteHandlerContext) -> MiddlewareHandlerFuture {
+    pub fn validate_database(mut ctx: RouteContext) -> RouteHandlerFuture {
         Box::pin(async move {
             // Here we could initialize the database connection or any other resource
             // that we need for the middleware.
@@ -210,16 +239,16 @@ impl Middleware {
                 })
             })?;
 
-            return Ok(MiddlewareHandlerResult { ctx });
+            return Ok(RouteResult::Middleware(MiddlewareHandlerResult { ctx }));
         })
     }
 
-    pub fn create_middleware(routes: &mut RouteTable) {
-        // It should be possible to use the unnormalized paths there
-        routes.insert_middleware(
-            // pages/\\index.html => Should be normalized.
-            RouteTableKey::new("/", None),
-            MiddlewareHandler::new(|mut ctx| {
+    pub fn create_middleware() -> Result<RouteTable, Box<dyn Error + Send + Sync>> {
+        let mut routes = RouteTable::new();
+
+        routes.insert(
+            RouteTableKey::new("/", None, RouteKeyKind::Middleware),
+            RouteEntry::Middleware(Some(RouteHandler::new(|mut ctx| {
                 Box::pin(async move {
                     let headers = ctx.get_response_headers();
 
@@ -228,111 +257,57 @@ impl Middleware {
                         "Middleware executed for /".into(),
                     );
 
-                    Ok(MiddlewareHandlerResult { ctx })
+                    Ok(RouteResult::Middleware(MiddlewareHandlerResult { ctx }))
                 })
-            }),
+            }))),
         );
 
-        // The trailing slash since without it we would not know if that is a directory or a filename, because there could also be
-        // extension attached to the database and that would still match, like database.rs.
-        routes.insert_middleware(
-            RouteTableKey::new(":database/", None),
-            MiddlewareHandler::new(Middleware::validate_database),
+        routes.insert(
+            RouteTableKey::new(":database/", None, RouteKeyKind::Middleware),
+            RouteEntry::Middleware(Some(RouteHandler::new(Middleware::validate_database))),
         );
 
-        routes.insert_middleware(
-            RouteTableKey::new(":asd/", None),
-            MiddlewareHandler::new(|ctx| {
+        routes.insert(
+            RouteTableKey::new(":asd/", None, RouteKeyKind::Middleware),
+            RouteEntry::Middleware(Some(RouteHandler::new(|ctx| {
+                println!("Evaluating middleware for :asd/");
+
+                Box::pin(
+                    async move { Ok(RouteResult::Middleware(MiddlewareHandlerResult { ctx })) },
+                )
+            }))),
+        );
+
+        routes.insert(
+            RouteTableKey::new(":asd/data/asd asd/", None, RouteKeyKind::Middleware),
+            RouteEntry::Middleware(Some(RouteHandler::new(|ctx| {
                 Box::pin(async move {
-                    // let headers = ctx.get_response_headers();
+                    println!("Evaluating middleware for :asd/data/asd asd/");
 
-                    // Here we could do some validation or initialization
-                    // For example, we could check if the database is available or not.
-
-                    Ok(MiddlewareHandlerResult { ctx })
+                    Ok(RouteResult::Middleware(MiddlewareHandlerResult { ctx }))
                 })
-            }),
+            }))),
         );
 
-        routes.insert_middleware(
-            RouteTableKey::new(":asd/data/asd asd/", None),
-            MiddlewareHandler::new(|mut ctx| {
-                Box::pin(async move {
-                    println!("Stronger path");
-
-                    let headers = ctx.get_response_headers();
-
-                    headers.add(
-                        "X-Example-Middleware".into(),
-                        "Middleware executed for :asd/data/asd asd/".into(),
-                    );
-
-                    // Here we could do some validation or initialization
-                    // For example, we could check if the database is available or not.
-
-                    Ok(MiddlewareHandlerResult { ctx })
-                })
-            }),
-        )
+        Ok(routes)
     }
 
-    pub fn path_to_segment(path: &Path) -> PathBuf {
-        // Converts the path to a segment by removing the leading `:` character if it exists.
-        // This is used to normalize the path for middleware handling.
+    // Converts the path to a segment by removing the leading `:` character if it exists.
+    // This is used to normalize the path for middleware handling.
 
-        PathBuf::from(format!("{}{}{}", PATH_SEGMENT, path.display(), "/"))
-    }
-
-    pub fn get_segments(&self) -> &HashSet<RouteTableKey> {
+    pub fn get_segments(&self) -> &HashMap<RouteTableKey, RouteEntry> {
         // Returns the segments that are used for the middleware.
         &self.segments
     }
 
-    /// This is evaluated at runtime while processing the request, compared to the other API that is evaluated on server startup.
-    ///
-    /// The lookup for the segments will be O(n), where n is the number of components in the path
-    /// that comes from the client.
-    ///
-    /// Segments should be resolved in the order of their strength, so the more specific segment would run on the path.
-    /// :database/ => database/*
-    /// :database/tasks/ => This segment is stronger, so it should run on the paths containing database/tasks, :database should not run.
-    ///
-    /// `NOTE`: We can opt out of the behavior of the strength of the segment and just run every segment that matches.
-    pub fn is_segment(
-        &self,
-        key: &RouteTableKey,
-    ) -> Result<Option<RouteTableKey>, Box<dyn Error + Send + Sync>> {
-        let path = key.get_path();
-
-        let path =
-            Middleware::parse_middleware_path(path.to_str().expect("Path should be valid UTF-8"));
-
-        let method = key.get_method();
-
-        let segments = self.get_segments();
-        let mut segment = PathBuf::from(path);
-
-        if segment.extension().is_some() {
-            segment.pop();
-        };
-
-        loop {
-            let segment_key = RouteTableKey::new_no_validate(&segment, method.clone());
-
-            if segments.contains(&segment_key) {
-                // If the segment is found in the middleware segments, return it.
-
-                return Ok(Some(RouteTableKey::new_no_validate(
-                    Self::path_to_segment(&segment),
-                    key.get_method().clone(),
-                )));
-            }
-
-            if !segment.pop() {
-                break;
-            }
-        }
-
-        Ok(None)
-    }
+    // This is evaluated at runtime while processing the request, compared to the other API that is evaluated on server startup.
+    //
+    // The lookup for the segments will be O(n), where n is the number of components in the path
+    // that comes from the client.
+    //
+    // Segments should be resolved in the order of their strength, so the more specific segment would run on the path.
+    // :database/ => database/*
+    // :database/tasks/ => This segment is stronger, so it should run on the paths containing database/tasks, :database should not run.
+    //
+    // `NOTE`: We can opt out of the behavior of the strength of the segment and just run every segment that matches.
 }

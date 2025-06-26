@@ -32,10 +32,12 @@
 // We'll build a command system, for now we only need insertion, thought something like Update, Delete, Select would be nice
 // Easiest way thought not most performant is JSON file with commands.
 // QUESTION: When do we execute the commands
-// ANSWER: We are creating a file instead of storing it in memory because we want to persist the commands in case of server crash.
+// ANSWER: We are creating a file instead of storing it in memory because we want to persist the commands in case    of server crash.
 // For performance reasons we could store it in memory, but given that the tasks are async, working independently of each other
 // that would involve Arc<Mutex<T>>, also executing the commands on certain threshold or on system shutdown must be done on separate thread
 // so to avoid blocking the IO overhead, though the IO is async from tokio, thought don't sure if windows supports async IO
+
+// NOTE: We could just use the enums there not the dyn traits.
 
 pub mod collections;
 
@@ -524,12 +526,10 @@ impl DatabaseCollection {
         // d_type: &DatabaseType,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Hold entries as raw data instead of deserialized instances of `dyn DatabaseEntryTrait`
-        let data = serde_json::to_string(
-            &data
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.serialize()))
-                .collect::<std::collections::HashMap<_, _>>(),
-        )?;
+        let data = &data
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.serialize()))
+            .collect::<std::collections::HashMap<_, _>>();
 
         let serialized = serde_json::to_vec(&data)?;
 
@@ -590,24 +590,6 @@ impl DatabaseCollection {
     }
 }
 
-/// The `DatabaseType` describes which `DatabaseCollection` to initialize, it would stay unutilized until constructed.
-///
-/// Enum naming reflect the file name of the underlying database as lowercase, it will automatically
-/// create databases filenames with defined enum variants.
-///
-/// `TODO`: Provide opting out of the behavior of automatically creating the database with provided enum names
-/// and allow to supply it's own database name instead using the one defined as an enum variant
-#[derive(
-    Debug,
-    // EnumIter,
-    serde::Serialize,
-    serde::Deserialize,
-    strum_macros::Display,
-    Clone,
-    Eq,
-    PartialEq,
-    Hash,
-)]
 // If Tasks would be user specific, that would provide separation between users tasks, currently it just does not make any sense,
 // as everyone shares the same tasks.
 // QUESTION: How would database WAL look-like?
@@ -621,7 +603,13 @@ impl DatabaseCollection {
 //  => Given that when user is logged, his API key is carried over the requests, we could somehow utilize that.
 //  =>
 
-// #[serde(rename_all = "lowercase")]
+/// The `DatabaseType` describes which `DatabaseCollection` to initialize, it would stay unutilized until constructed.
+///
+/// Enum naming reflect the file name of the underlying database as lowercase, it will automatically
+/// create databases filenames with defined enum variants.
+#[derive(
+    Debug, serde::Serialize, serde::Deserialize, strum_macros::Display, Clone, Eq, PartialEq, Hash,
+)]
 pub enum DatabaseType {
     Users,
     Tasks,

@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     error::Error,
     future::Future,
     hash::Hash,
@@ -9,20 +9,19 @@ use std::{
     sync::Arc,
 };
 
-use strum::IntoEnumIterator;
 use tokio::sync::Mutex;
 
 use crate::{
     config::{
         config_file::DatabaseConfigEntry,
-        database::{Database, DatabaseType},
+        database::{self, collections::ClientUser, Database, DatabaseType, DatabaseUser},
         Config, SpecialDirectories,
     },
     http::{
         HttpHeaders, HttpRequestError, HttpRequestHeaders, HttpRequestMethod, HttpResponseHeaders,
     },
     http_request::HttpRequest,
-    middleware::{Middleware, MiddlewareHandler, MiddlewareHandlerResult},
+    middleware::{Middleware, MiddlewareHandlerResult},
 };
 
 // NOTE: Route table does live for the duration of the program, but not the values it is referencing.
@@ -39,11 +38,28 @@ use crate::{
 ///
 #[derive(Debug)]
 pub struct Router {
-    routes: RouteTable,
-    middleware: Middleware,
+    pub routes: RouteTable,
+    pub middleware: Middleware,
 }
 
-pub struct RouteTable(HashMap<RouteTableKey, Arc<RouteTableValue>>);
+/// Represents an entry in the route table, which can be either a route handler or a middleware handler.
+#[derive(Clone)]
+pub enum RouteEntry {
+    Route(Arc<RouteHandler>),
+    Middleware(Option<Arc<RouteHandler>>),
+}
+
+impl std::fmt::Debug for RouteEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RouteEntry::Route(handler) => write!(f, "Route({:?})", handler),
+            RouteEntry::Middleware(Some(handler)) => write!(f, "Middleware({:?})", handler),
+            RouteEntry::Middleware(None) => write!(f, "Middleware(None)"),
+        }
+    }
+}
+
+pub struct RouteTable(HashMap<RouteTableKey, RouteEntry>);
 
 impl std::fmt::Debug for RouteTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -71,51 +87,17 @@ impl std::fmt::Debug for RouteTable {
     }
 }
 
-/// Consists of a route handler and a middleware handler, both wrapped in an `Arc` to allow shared ownership.
-///
-/// That would technically waste some memory as I suspect that most path would not have it's corresponding middleware handler,
-/// and paths that are strictly a middleware handler would not have a route handler. But the pointer is just 8 bytes,
-/// so who cares. That is safer and easier to work with, because other way we would have to allocate a separate table for middleware.
-pub struct RouteTableValue(Option<RouteHandler>, Option<MiddlewareHandler>);
-
-impl RouteTableValue {
-    pub fn new(handler: Option<RouteHandler>, middleware: Option<MiddlewareHandler>) -> Arc<Self> {
-        // Creates a new route table value with the given handler and middleware.
-        // Self(Arc::new((handler, middleware)))
-        Arc::new(Self(handler, middleware))
-    }
-
-    pub fn get_handler(&self) -> Option<&RouteHandler> {
-        // Returns the route handler if it exists.
-        // self.0 .0.as_ref()
-        self.0.as_ref()
-    }
-
-    pub fn get_middleware(&self) -> Option<&MiddlewareHandler> {
-        // Returns the middleware handler if it exists.
-        self.1.as_ref()
-    }
-}
-
-impl std::fmt::Debug for RouteTableValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Handler: {} | Middleware: {}",
-            self.get_handler()
-                .map_or("None".to_string(), |_| "Some()".to_string()),
-            self.get_middleware()
-                .map_or("None".to_string(), |_| "Some()".to_string())
-        )
-    }
-}
-
-/// Routing table lives for the whole lifetime of the server, since path is a `static` lifetime.
-///
-/// Method is optional to support middleware paths that can be run with any method.
+/// Method is optional to support middleware paths that can be run with any method. `None` as a method is invalid for the routes.
 #[derive(Clone, Hash, Eq, PartialEq, PartialOrd, Ord)]
+pub struct RouteTableKey {
+    pub path: PathBuf,
+    pub method: Option<HttpRequestMethod>,
+}
 
-pub struct RouteTableKey(pub PathBuf, pub Option<HttpRequestMethod>);
+pub enum RouteKeyKind {
+    Route,
+    Middleware,
+}
 
 impl RouteTableKey {
     /// Creates a new route table key with the given path and method.
@@ -124,8 +106,17 @@ impl RouteTableKey {
     ///
     /// `panic!` if path cannot be normalized, so we can change the static definition of the path
     /// as this could be consider a typo in the code.
-    pub fn new(path: impl AsRef<Path>, method: Option<HttpRequestMethod>) -> Self {
+    pub fn new(
+        path: impl AsRef<Path>,
+        method: Option<HttpRequestMethod>,
+        kind: RouteKeyKind,
+    ) -> Self {
         // First validate, then normalize.
+        if let RouteKeyKind::Route = kind {
+            if method.is_none() {
+                panic!("Cannot create a route table key with no method, please specify a method.");
+            }
+        }
 
         // That would not be necessary if validate_request_target_path would operate on `Path` || `PathBuf` || impl AsRef<Path>.
         let path_str = path
@@ -142,12 +133,19 @@ impl RouteTableKey {
         // decoding special meaning, triggering special behavior.
 
         // Technically that should only work on middleware paths, when middleware is inserted.
-        if let Err(e) = Middleware::validate_middleware_path(&path_str) {
-            panic!("Could not validate for middleware path: {:?}", e)
-        };
+        // If we want to separate this we would have to create a separate constructor for the middleware paths or separate struct.
+
+        if let RouteKeyKind::Middleware = kind {
+            if let Err(e) = Middleware::validate_middleware_path(&path_str) {
+                panic!("Could not validate for middleware path: {:?}", e)
+            };
+        }
 
         match HttpRequestHeaders::normalize_path(&path_str) {
-            Ok(path) => Self(PathBuf::from(path), method),
+            Ok(path) => Self {
+                path: PathBuf::from(path),
+                method,
+            },
             Err(message) => {
                 panic!(
                     "Could not normalize path: {:?}, error: {}",
@@ -182,7 +180,17 @@ impl RouteTableKey {
     ///
     /// Validation runs under `HttpRequestRequestLine::new`, path is decoded in `HttpRequestHeaders::get_request_target_path`.
     ///
-    pub fn new_no_validate(path: impl AsRef<Path>, method: Option<HttpRequestMethod>) -> Self {
+    pub fn new_no_validate(
+        path: impl AsRef<Path>,
+        method: Option<HttpRequestMethod>,
+        kind: RouteKeyKind,
+    ) -> Self {
+        if let RouteKeyKind::Route = kind {
+            if method.is_none() {
+                panic!("Cannot create a route table key with no method, please specify a method.");
+            }
+        }
+
         // let path = HttpRequestHeaders::normalize_path(
         //     &path
         //         .as_ref()
@@ -192,12 +200,15 @@ impl RouteTableKey {
         // )?;
 
         // Ok(Self(PathBuf::from(path), method))
-        Self(PathBuf::from(path.as_ref()), method)
+        Self {
+            path: PathBuf::from(path.as_ref()),
+            method,
+        }
     }
 
     pub fn get_path(&self) -> &Path {
         // Returns the path of the route table key.
-        &self.0
+        &self.path
     }
 
     /// Path on the instance are already normalized, this is used to obtain the relative
@@ -212,21 +223,22 @@ impl RouteTableKey {
 
     pub fn get_method(&self) -> &Option<HttpRequestMethod> {
         // Returns the method of the route table key.
-        &self.1
+        &self.method
     }
 
     pub fn get_path_mut(&mut self) -> &mut PathBuf {
         // Returns a mutable reference to the path of the route table key.
-        &mut self.0
+        &mut self.path
     }
 }
+
 impl std::fmt::Debug for RouteTableKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Create a path string representation for more readable output
-        let path_str = self.0.to_string_lossy();
+        let path_str = self.path.to_string_lossy();
 
         // Format the method more nicely
-        let method_str = match &self.1 {
+        let method_str = match &self.method {
             Some(method) => format!("{:?}", method),
             None => "ANY".to_string(),
         };
@@ -244,7 +256,7 @@ impl std::fmt::Debug for RouteTableKey {
 /// as it is a reference to the key built in the `handle_client` entry point.
 
 #[derive(Debug)]
-pub struct RouteHandlerContext<'ctx> {
+pub struct RouteContext<'ctx> {
     pub request: &'ctx HttpRequest<'ctx>,
     pub response_headers: HttpResponseHeaders<'ctx>,
     pub key: &'ctx RouteTableKey,
@@ -254,13 +266,7 @@ pub struct RouteHandlerContext<'ctx> {
                                                       // If we would access that field we would have a problem.
 }
 
-// impl<'ctx> RouteResult<'ctx> for RouteHandlerContext<'ctx> {
-//     fn as_any(&self) -> &(dyn Any + 'ctx) {
-//         self
-//     }
-// }
-
-impl<'ctx> RouteHandlerContext<'ctx> {
+impl<'ctx> RouteContext<'ctx> {
     pub fn new(
         request: &'ctx HttpRequest<'ctx>,
         response_headers: HttpResponseHeaders<'ctx>,
@@ -311,15 +317,6 @@ impl<'ctx> RouteHandlerContext<'ctx> {
     }
 }
 
-// pub trait RouteResult<'ctx>: 'ctx {
-//     fn as_any(&self) -> &(dyn Any + 'ctx);
-// }
-
-pub enum RouteResult<'ctx> {
-    RouteResult(RouteHandlerResult<'ctx>),
-    MiddlewareResult(MiddlewareHandlerResult<'ctx>),
-}
-
 /// Take an owned version of headers that was previously moved from `handle_client` and the result of the
 /// request consisting of the body.
 ///
@@ -329,16 +326,17 @@ pub struct RouteHandlerResult<'ctx> {
     pub body: String,
 }
 
+pub enum RouteResult<'ctx> {
+    Route(RouteHandlerResult<'ctx>),
+    Middleware(MiddlewareHandlerResult<'ctx>),
+}
+
 // UPDATE: Callback cannot live for 'static as the Context gets moved in to a closure
 // and then lifetime it utilizes would become invariant. That means a lifetime of context
 // would have to be the same as the lifetime of 'static, but Context has lifetime "for all 'ctx".
 // We need to pass generic lifetime from the RouteHandlerClosure to use the same exact lifetime as there declared.
-type RouteHandlerFuture<'ctx> = Pin<
-    Box<
-        dyn Future<Output = Result<RouteHandlerResult<'ctx>, Box<dyn Error + Send + Sync>>>
-            + Send
-            + 'ctx,
-    >,
+pub type RouteHandlerFuture<'ctx> = Pin<
+    Box<dyn Future<Output = Result<RouteResult<'ctx>, Box<dyn Error + Send + Sync>>> + Send + 'ctx>,
 >;
 
 // TODO: The struct of RouteHandlerValue is already behind Arc, check how to avoid one of the Arc's.
@@ -346,12 +344,9 @@ type RouteHandlerFuture<'ctx> = Pin<
 
 // NOTE: Check if that 'static fits there, as of my logic, closure is computed at runtime and lives for the duration of the program,
 // so it should be 'static, but maybe I am wrong.
-type RouteHandlerClosure = Arc<
-    dyn for<'ctx> Fn(RouteHandlerContext<'ctx>) -> RouteHandlerFuture<'ctx> + Send + Sync + 'static,
->;
+pub type RouteHandlerClosure =
+    Arc<dyn for<'ctx> Fn(RouteContext<'ctx>) -> RouteHandlerFuture<'ctx> + Send + Sync + 'static>;
 
-/// A closure enclosing a function pointer that can be called with a `RouteHandlerContext`.
-///
 /// The idea is that the `RouteHandler` being a function pointer inside a closure stored in the `Arc` is valid for the duration of the program,
 /// and can be referenced via multiple async tasks. Only the parameters `RouteHandlerContext` passed to the handler
 /// are changing with each request and we make sure to not store that references in the routing table.
@@ -361,12 +356,22 @@ type RouteHandlerClosure = Arc<
 #[derive(Clone)]
 pub struct RouteHandler(RouteHandlerClosure);
 
-impl RouteHandler {
-    pub fn new(handler: fn(RouteHandlerContext) -> RouteHandlerFuture) -> Self {
-        let c: RouteHandlerClosure =
-            Arc::new(move |ctx: RouteHandlerContext| Box::pin(handler(ctx)));
+impl std::fmt::Debug for RouteHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Custom debug implementation to show the function pointer
+        f.debug_struct("RouteHandler")
+            .field("handler", &Arc::as_ptr(&self.0))
+            .finish()
+    }
+}
 
-        Self(c)
+impl RouteHandler {
+    pub fn new<F>(handler: F) -> Arc<Self>
+    where
+        F: Send + Sync + 'static,
+        F: for<'ctx> Fn(RouteContext<'ctx>) -> RouteHandlerFuture<'ctx>,
+    {
+        Arc::new(Self(Arc::new(handler)))
     }
 
     /// NOTE: The function that is called inside the callback is not async itself, but when called with
@@ -376,19 +381,21 @@ impl RouteHandler {
     /// Calls the function pointer with ctx.
     pub async fn callback<'ctx>(
         &self,
-        ctx: RouteHandlerContext<'ctx>,
-    ) -> Result<RouteHandlerResult<'ctx>, Box<dyn Error + Send + Sync>> {
+        ctx: RouteContext<'ctx>,
+    ) -> Result<RouteResult<'ctx>, Box<dyn Error + Send + Sync>> {
         (self.0)(ctx).await
     }
 
+    /// `NOTE`: Handlers do not have to be declared there.
+    ///
     /// A static route handler that reads the requested resource from the `/public` directory.
     pub fn static_route_handler(
-        // Pin<Box<dyn Future<Output = RouteHandlerResult<'ctx>> + Send + 'ctx>>;
-        ctx: RouteHandlerContext,
+        // Pin<Box<dyn Future<Output = RouteResult<'ctx>> + Send + 'ctx>>;
+        ctx: RouteContext,
     ) -> RouteHandlerFuture {
         Box::pin(async move {
             // Extract what we need before any mutable borrows
-            let RouteHandlerContext {
+            let RouteContext {
                 request,
                 mut response_headers,
                 key,
@@ -398,10 +405,10 @@ impl RouteHandler {
             let body =
                 request.read_requested_resource(&mut response_headers, &key.get_prefixed_path())?;
 
-            return Ok(RouteHandlerResult {
+            return Ok(RouteResult::Route(RouteHandlerResult {
                 headers: response_headers,
                 body,
-            });
+            }));
         })
     }
 }
@@ -427,27 +434,27 @@ impl Router {
         &mut self.routes
     }
 
-    pub fn get_middleware(&self) -> &Middleware {
+    pub fn get_middleware_routes(&self) -> &RouteTable {
         // Returns the middleware of the router.
-        &self.middleware
+        &self.middleware.routes
     }
 
-    pub fn get_middleware_segments(&self) -> &HashSet<RouteTableKey> {
+    pub fn get_middleware_segments(&self) -> &HashMap<RouteTableKey, RouteEntry> {
         // Returns the middleware segments of the router.
-        self.middleware.get_segments()
+        &self.middleware.segments
     }
 
     /// `NOTE`: I am a mistake implementing the RouteResult as an enum that could return standalone the result of the middleware handler.
     /// That is not the case as middleware does not produce the body and if the handler does not exists, but cannot respond with data.
     /// We will keep the functionality, maybe we will utilize it as it is not a big deal to keep it in the code. But keep in mind
-    /// That currently the function returns only the `RouteResult::RouteResult` of type `RouteHandlerResult<'ctx>`,
+    /// That currently the function returns only the `RouteResult::RouteResult` of type `RouteResult<'ctx>`,
     ///
     /// `NOTE`: Route with defined middleware and undefined handler could only be valid if the middleware is a segment, given that special case
     /// we need to keep the `RouteHandler` as `Option<RouteHandler>` in the `RouteTableValue` struct.
     pub async fn route<'ctx>(
         &self,
-        mut ctx: RouteHandlerContext<'ctx>,
-        // RouteHandlerResult<'ctx>
+        mut ctx: RouteContext<'ctx>,
+        // RouteResult<'ctx>
     ) -> Result<RouteResult<'ctx>, Box<dyn Error + Send + Sync>> {
         // Check if the path matches any of the middleware segments.
 
@@ -462,55 +469,121 @@ impl Router {
             })
         })?;
 
-        if let Some(segment) = self.middleware.is_segment(&ctx.get_key())? {
-            if let Ok(Some(middleware)) = self
-                .routes
-                .get(&segment)
-                .map(|v| v.get_middleware().cloned())
-            {
-                // Give back the context to the route handler.
-                ctx = middleware.callback(ctx).await?.ctx;
-            }
-        };
+        if let Some(RouteEntry::Middleware(Some(handler))) =
+            self.get_middleware_segments().get(ctx.get_key())
+        {
+            let result = handler.callback(ctx).await?;
 
-        let (handler, middleware) = (route.get_handler(), route.get_middleware());
-
-        match (handler, middleware) {
-            // Middleware but no handler, we run the middleware return the ctx.
-            // UPDATE: That is not a valid state, as we should always have a handler for the path.
-            // (None, Some(middleware)) => {
-            //     let result = middleware.callback(ctx).await?;
-            //
-            //     return Ok(RouteResult::MiddlewareResult(result));
-            // }
-
-            // Handle exists, despite the middleware, return the result of the handler.
-            (Some(handler), middleware) => {
-                // Check if the middleware exists, if it does, we run it, update the ctx.
-
-                if let Some(middleware) = middleware {
-                    ctx = middleware.callback(ctx).await?.ctx;
+            match result {
+                RouteResult::Middleware(MiddlewareHandlerResult { ctx: context }) => {
+                    // If the middleware segment exists, we run the middleware for that segment.
+                    // We do not want to propagate the error here, as we want to return the context back to the route handler.
+                    ctx = context;
                 }
-
-                // If the handler exists, we call it with the context and return the result.
-
-                return Ok(RouteResult::RouteResult(handler.callback(ctx).await?));
-
-                // Run the handler for the path.
+                // This branch would only evaluate if the wrong enum variant is returned from the handler
+                _ => {
+                    return Err(Box::from(HttpRequestError {
+                        internals: Some(Box::from(
+                            "Middleware segment handler should evaluate to RouteResult::Middleware",
+                        )),
+                        ..Default::default()
+                    }))
+                } // _ => unreachable!("Middleware segment handler should evaluate to RouteResult::Middleware"),
             }
-            _ => {
-                return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
-                    status_code: 404,
-                    status_text: "Not Found".to_string(),
-                    message: Some(format!(
-                        "Route not found for path: {:?} with method: {:?}",
-                        ctx.get_key().get_path(),
-                        ctx.get_key().get_method()
-                    )),
-                    ..Default::default()
-                }))
+
+            // If the segment exists, we run the middleware for that segment.
+            // We do not want to propagate the error here, as we want to return the context back to the route handler.
+        }
+
+        if let Ok(RouteEntry::Middleware(Some(middleware))) =
+            self.get_middleware_routes().get(ctx.get_key())
+        {
+            let result = middleware.callback(ctx).await?;
+
+            match result {
+                RouteResult::Middleware(MiddlewareHandlerResult { ctx: context }) => ctx = context,
+                // This branch would only evaluate if the wrong enum variant is returned from the handler
+                _ => {
+                    return Err(Box::from(HttpRequestError {
+                        internals: Some(Box::from(
+                            "Middleware handler should evaluate to RouteResult::Middleware",
+                        )),
+                        ..Default::default()
+                    }))
+                } // _ => unreachable!("Middleware handler should evaluate to RouteResult::Middleware"),
             }
-        };
+        }
+
+        // If the handler exists, we call it with the context and return the result.
+
+        if let RouteEntry::Route(route) = route {
+            // If the route exists, we run the handler for the path.
+            // We do not want to propagate the error here, as we want to return the context back to the route handler.
+            let result = route.callback(ctx).await?;
+
+            match result {
+                RouteResult::Route(route_result) => return Ok(RouteResult::Route(route_result)),
+                // This branch would only evaluate if the wrong enum variant is returned from the handler
+                _ => {
+                    return Err(Box::from(HttpRequestError {
+                        internals: Some(Box::from(
+                            "Route handler should evaluate to RouteResult::Route",
+                        )),
+                        ..Default::default()
+                    }))
+                } // _ => unreachable!("Route handler should evaluate to RouteResult::Route"),
+            }
+        }
+
+        return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+            status_code: 404,
+            status_text: "Not Found".to_string(),
+            message: Some(format!(
+                "Route not found for path: {:?} with method: {:?}",
+                ctx.get_key().get_path(),
+                ctx.get_key().get_method()
+            )),
+            ..Default::default()
+        }));
+
+        // return Ok(RouteResult::Route(handler.callback(ctx).await?));
+
+        // match (handler, middleware) {
+        //     // Middleware but no handler, we run the middleware return the ctx.
+        //     // UPDATE: That is not a valid state, as we should always have a handler for the path.
+        //     // (None, Some(middleware)) => {
+        //     //     let result = middleware.callback(ctx).await?;
+        //     //
+        //     //     return Ok(RouteResult::MiddlewareResult(result));
+        //     // }
+
+        //     // Handle exists, despite the middleware, return the result of the handler.
+        //     (Some(handler), middleware) => {
+        //         // Check if the middleware exists, if it does, we run it, update the ctx.
+
+        //         if let Some(middleware) = middleware {
+        //             ctx = middleware.callback(ctx).await?.ctx;
+        //         }
+
+        //         // If the handler exists, we call it with the context and return the result.
+
+        //         return Ok(RouteResult::Route(handler.callback(ctx).await?));
+
+        //         // Run the handler for the path.
+        //     }
+        //     _ => {
+        // return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+        //     status_code: 404,
+        //     status_text: "Not Found".to_string(),
+        //     message: Some(format!(
+        //         "Route not found for path: {:?} with method: {:?}",
+        //         ctx.get_key().get_path(),
+        //         ctx.get_key().get_method()
+        //     )),
+        //     ..Default::default()
+        // }))
+        //     }
+        // };
 
         // TODO: I think we should redirect to a 404 page or something like that.
         // But we need the functionality for that.
@@ -521,106 +594,27 @@ impl RouteTable {
     pub fn new() -> Self {
         // Creates a new route table.
         // Ok(Self::create_
-        Self(HashMap::<RouteTableKey, Arc<RouteTableValue>>::new())
+        Self(HashMap::<RouteTableKey, RouteEntry>::new())
     }
 
-    pub fn get_routes(&self) -> &HashMap<RouteTableKey, Arc<RouteTableValue>> {
+    pub fn get_routes(&self) -> &HashMap<RouteTableKey, RouteEntry> {
         // Returns the routes in the route table.
         &self.0
     }
 
-    pub fn get_routes_mut(&mut self) -> &mut HashMap<RouteTableKey, Arc<RouteTableValue>> {
+    pub fn get_routes_mut(&mut self) -> &mut HashMap<RouteTableKey, RouteEntry> {
         // Returns the mutable routes in the route table.
+
         &mut self.0
     }
 
-    pub fn insert_handler(&mut self, key: RouteTableKey, handler: RouteHandler) {
-        let (method, path) = (key.get_method(), key.0.clone());
-
-        if let None = method {
-            // If the method is ANY, we panic as that is not allowed.
+    pub fn insert(&mut self, key: RouteTableKey, handler: RouteEntry) {
+        if let Some(_) = self.get_routes_mut().insert(key.clone(), handler) {
             panic!(
-                "Cannot insert a route with ANY method for path: {:?}, please specify a method.",
-                path
+                "Route already defined for path: {:?} with method: {:?}",
+                key.get_path(),
+                key.get_method()
             );
-        }
-
-        // let mut insert_handler_closure = |key: RouteTableKey, handler: RouteHandler| {
-        match self
-            .get(&key)
-            .map(|v| (v.get_handler().cloned(), v.get_middleware().cloned()))
-        {
-            // Route exists with both RouteHandler and MiddlewareHandler — panic duplicate
-            Ok((Some(_), _)) => {
-                panic!(
-                    "Route already defined for path: {:?} with method: {:?}",
-                    path, method
-                );
-            }
-            // Middleware exists but no RouteHandler — insert new RouteHandler while preserving middleware
-            Ok((None, Some(middleware))) => {
-                let middleware = middleware.clone();
-
-                self.get_routes_mut()
-                    .insert(key, RouteTableValue::new(Some(handler), Some(middleware)));
-            }
-            // No route exists or no handlers — insert new RouteHandler
-            // NOTE: That would disregard the error for the result
-            _ => {
-                self.get_routes_mut()
-                    .insert(key, RouteTableValue::new(Some(handler), None));
-            }
-        }
-    }
-
-    /// Inserts a MiddlewareHandler into the route table for the given key,
-    ///
-    /// Will panic if  MiddlewareHandler already exists for the same path and method or if the route.
-    /// already exists for that path with both RouteHandler and MiddlewareHandler.
-    ///
-    /// For insert_middleware to work it has to match the paths given in the `HashSet<RouteTableKey>` which is used
-    /// to match the middleware paths.
-    pub fn insert_middleware(&mut self, key: RouteTableKey, handler: MiddlewareHandler) {
-        // Insert the route into the table, replacing any existing route with the same key.
-
-        let (method, path) = (key.get_method(), key.get_path());
-        // let (handler, middleware) = (handler.clone(), Some(handler.clone()));
-
-        let mut insert_middleware_closure = |key, handler| match self
-            .get(&key)
-            .map(|v| (v.get_handler().cloned(), v.get_middleware().cloned()))
-        {
-            // Duplicate MiddlewareHandler, route does not matter.
-            Ok((_, Some(_))) => {
-                panic!(
-                    "Middleware already defined for path: {:?} with method: {:?}",
-                    path, method
-                );
-            }
-            // Route exists with RouteHandler but no MiddlewareHandler, we will replace it with the new MiddlewareHandler
-            // and previous value for RouteHandler, but cloning the pointer so new reference.
-            Ok((Some(route), None)) => {
-                // If the route exists with a RouteHandler but no MiddlewareHandler, we replace it with the new MiddlewareHandler.
-                // This is useful for routes that should have middleware applied to them.
-
-                // Cloning a route is 8 bytes. We can afford that.
-                let route = Some(route.clone());
-
-                self.get_routes_mut()
-                    .insert(key, RouteTableValue::new(route, Some(handler)))
-            }
-            // No route for that key, we are inserting one with MiddlewareHandler defined.
-            _ => self
-                .get_routes_mut()
-                .insert(key, RouteTableValue::new(None, Some(handler))),
-        };
-
-        if let None = method {
-            for method in HttpRequestMethod::iter() {
-                insert_middleware_closure(RouteTableKey::new(path, Some(method)), handler.clone());
-            }
-        } else {
-            insert_middleware_closure(key.clone(), handler);
         }
     }
 
@@ -628,17 +622,15 @@ impl RouteTable {
     /// and if not found, it will try to suffix with index.html and look it up again. Path is already validated.
     /// Validation takes place in the `HttpRequestHeaders::validate_request_target_path` in `RouteTableKey::new`
     /// and when request from the client in `HttpRequestRequestLine::new`.
-    pub fn get(
-        &self,
-        key: &RouteTableKey,
-    ) -> Result<Arc<RouteTableValue>, Box<dyn Error + Send + Sync>> {
+    pub fn get(&self, key: &RouteTableKey) -> Result<RouteEntry, Box<dyn Error + Send + Sync>> {
         // Get the route handler for the given key, if it exists.
 
         let routes = self.get_routes();
 
         // First match the key as is, we are not prefixing write away as abstracted paths should not be prefixed
+
         if let Some(value) = routes.get(key) {
-            return Ok(Arc::clone(value));
+            return Ok(value.clone());
         }
 
         let path = key.get_path().to_str().ok_or_else(|| {
@@ -654,12 +646,13 @@ impl RouteTable {
         let mut path = PathBuf::from(path);
         path.push(Config::SERVER_INDEX_PATH);
 
-        let suffixed_path = RouteTableKey::new_no_validate(path, key.get_method().clone());
+        let suffixed_path =
+            RouteTableKey::new_no_validate(path, key.get_method().clone(), RouteKeyKind::Route);
 
         // Try to match the prefixed key, if the former did not match. This is done for paths
         // pointing to directory in the /public directory resolving to the index.html file in that directory.
         match routes.get(&suffixed_path) {
-            Some(value) => Ok(Arc::clone(value)),
+            Some(value) => Ok(value.clone()),
             None => Err(Box::<dyn Error + Send + Sync>::from(format!(
                 "Route not found for path: {:?} with method: {:?}",
                 key.get_path(),
@@ -690,52 +683,32 @@ impl RouteTable {
                 // The parameters should live for the duration of the request but the callback function
                 // should live for 'static
 
-                routes.insert_handler(key, RouteHandler::new(RouteHandler::static_route_handler))
+                routes.insert(
+                    key,
+                    RouteEntry::Route(RouteHandler::new(RouteHandler::static_route_handler)),
+                )
             });
 
         // Populates the middleware paths with handlers
 
-        Middleware::create_middleware(&mut routes);
-
         // ### Database Routes ###
-
-        routes.insert_handler(
-            RouteTableKey::new("database/tasks.json", Some(HttpRequestMethod::GET)),
-            RouteHandler::new(|ctx: RouteHandlerContext| {
-                Box::pin(async move {
-                    let RouteHandlerContext {
-                        request,
-                        mut response_headers,
-                        key,
-                        // database,
-                        ..
-                    } = ctx;
-
-                    // If we would want to lay some abstraction on the database we would have "select_all" from the database
-                    // and then parse it to the JSON format. Currently we just read the file from the disk.
-                    let body = request
-                        .read_requested_resource(&mut response_headers, key.get_prefixed_path())?;
-
-                    return Ok(RouteHandlerResult {
-                        headers: response_headers,
-                        body,
-                    });
-                })
-            }),
-        );
 
         // Abstracted route handler that does not exists in the file system.
         // Abstracted path is a path that do not resole to file system if normalized.
-        routes.insert_handler(
-            RouteTableKey::new("/message", Some(HttpRequestMethod::GET)),
-            RouteHandler::new(|ctx| {
+        routes.insert(
+            RouteTableKey::new(
+                "/message",
+                Some(HttpRequestMethod::GET),
+                RouteKeyKind::Route,
+            ),
+            RouteEntry::Route(RouteHandler::new(|ctx| {
                 Box::pin(async move {
                     // First borrow immutably
                     let database = ctx.get_database()?;
                     let database_config = ctx.get_database_config()?;
 
                     // Then destructure for owned values.
-                    let RouteHandlerContext {
+                    let RouteContext {
                         mut response_headers,
                         ..
                     } = ctx;
@@ -760,23 +733,56 @@ impl RouteTable {
                         Cow::from(body.len().to_string()),
                     );
 
-                    return Ok(RouteHandlerResult {
+                    return Ok(RouteResult::Route(RouteHandlerResult {
                         headers: response_headers,
                         body,
-                    });
+                    }));
                 })
-            }),
+            })),
         );
 
-        routes.insert_handler(
-            RouteTableKey::new("database/tasks.json", Some(HttpRequestMethod::POST)),
-            RouteHandler::new(|ctx| {
+        routes.insert(
+            RouteTableKey::new(
+                "database/tasks.json",
+                Some(HttpRequestMethod::GET),
+                RouteKeyKind::Route,
+            ),
+            RouteEntry::Route(RouteHandler::new(|ctx: RouteContext| {
+                Box::pin(async move {
+                    let RouteContext {
+                        request,
+                        mut response_headers,
+                        key,
+                        // database,
+                        ..
+                    } = ctx;
+
+                    // If we would want to lay some abstraction on the database we would have "select_all" from the database
+                    // and then parse it to the JSON format. Currently we just read the file from the disk.
+                    let body = request
+                        .read_requested_resource(&mut response_headers, key.get_prefixed_path())?;
+
+                    return Ok(RouteResult::Route(RouteHandlerResult {
+                        headers: response_headers,
+                        body,
+                    }));
+                })
+            })),
+        );
+
+        routes.insert(
+            RouteTableKey::new(
+                "database/tasks.json",
+                Some(HttpRequestMethod::POST),
+                RouteKeyKind::Route,
+            ),
+            RouteEntry::Route(RouteHandler::new(|ctx| {
                 Box::pin(async move {
                     // First borrow immutably
                     let database = ctx.get_database()?;
 
                     // Then destructure for owned values.
-                    let RouteHandlerContext {
+                    let RouteContext {
                         request,
                         response_headers,
                         ..
@@ -790,17 +796,72 @@ impl RouteTable {
                         return Err(Box::<dyn Error + Send + Sync>::from("Task cannot be empty"));
                     }
 
-                    return Ok(RouteHandlerResult {
+                    return Ok(RouteResult::Route(RouteHandlerResult {
                         headers: response_headers,
-                        body: String::from("Ok"),
-                    });
+                        body: "Task added successfully".to_string(),
+                    }));
                 })
-            }),
+            })),
+        );
+
+        routes.insert(
+            RouteTableKey::new(
+                "database/users.json",
+                Some(HttpRequestMethod::POST),
+                RouteKeyKind::Route,
+            ),
+            RouteEntry::Route(RouteHandler::new(|ctx| {
+                return Box::pin(async move {
+                    let database = ctx.get_database()?;
+
+                    let RouteContext {
+                        request,
+                        response_headers,
+                        ..
+                    } = ctx;
+
+                    let mut database = database.lock().await;
+
+                    if let Some(body) = request.get_body() {
+                        // NOTE: Why it does not work, and what have to be done to make it work?
+                        // 1. The body is not of DatabaseUser type after parsing. Data comes from client which does not have full information about the type.
+                        //  -> The server has to define those fields.
+                        // 2. We have to parse the body to the DatabaseUser first parsing to the type which client sends, that would be statically defined in the route handler,
+                        //  -> then we would generate undefined fields, create the DatabaseUser, serialize it to bytes and insert it into the database.
+                        // 3. Then we would have solve the problem of cookie headers, as each user_id should map to unique cookie header, as we need the identification
+                        //  -> of the user between requests. That would require us to create another collection of `sessions` that would resolve the cookie to the user_id
+                        //  -> (cookie can be thought of as session_id).
+                        // 4. Additionally we need to make sure the tasks can be inserted only if authenticated, meaning cookie exists and is valid.
+                        // 5. User creation should not be buffered in the WAL file and resolved abruptly.
+
+                        // NOTE: That is vulnerable to mistakes, we are defining the same fields as they are already defined.
+
+                        let entry = serde_json::from_slice::<ClientUser>(body).map_err(|e| {
+                            Box::<dyn Error + Send + Sync>::from(format!(
+                                "Failed to parse body: {}",
+                                e
+                            ))
+                        })?;
+
+                        let entry = DatabaseUser::from(entry);
+                        database
+                            .insert(DatabaseType::Users, &serde_json::to_vec(&entry)?)
+                            .await?;
+                    } else {
+                        return Err(Box::<dyn Error + Send + Sync>::from("Task cannot be empty"));
+                    }
+
+                    return Ok(RouteResult::Route(RouteHandlerResult {
+                        headers: response_headers,
+                        body: "User added successfully".to_string(),
+                    }));
+                });
+            })),
         );
 
         // #####
 
-        println!("{:#?}", routes);
+        // println!("{:#?}", routes);
 
         Ok(routes)
     }

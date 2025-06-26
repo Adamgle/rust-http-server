@@ -151,8 +151,6 @@ def send_custom(
                 f"{payload if payload else ''}"
             )
 
-    print(headers)
-
     def create_socket(message: str) -> str:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
@@ -311,7 +309,7 @@ def run_benchmark(
     log_entry.append(f"Payload size: {payload_size} bytes")
     log_entry.append(f"Average execution time: {average_time:.4f} seconds\n")
 
-    plot_response_timestamps(response_timestamps)
+    # plot_response_timestamps(response_timestamps)
 
     with open("benchmarks/benchmark.log", "a", encoding="utf-8") as f:
         f.write("\n".join(log_entry) + "\n")
@@ -416,29 +414,29 @@ def main():
     from urllib.parse import quote
 
     # path = quote(f"/%2F")
-    
-    send_custom(
-        request=HttpMethod.GET,
-        path=quote(":asd/data/asd asd"),
-        # NOTE: You can't check that as this double encodes that as that is f'ed up
-        # path="/%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
-        # /%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd ->
-        # payload="test",
-        host="localhost",
-    )
 
-    # run_benchmark(
-    #     callback=functools.partial(
-    #         run_multithreaded,
-    #         callback=send_custom,
-    #         threads_count=10,
-    #         requests_count=1000,
-    #         payload="test",
-    #     ),
-    #     request=HttpMethod.GET,
-    #     path="/message",
-    #     count=1,
+    # send_custom(
+    #     request=HttpMethod.POST,
+    #     path=quote("database/tasks.json"),
+    #     # NOTE: You can't check that as this double encodes that as that is f'ed up
+    #     # path="/%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+    #     # /%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd ->
+    #     payload="test",
+    #     host="localhost",
     # )
+
+    run_benchmark(
+        callback=functools.partial(
+            run_multithreaded,
+            callback=send_custom,
+            threads_count=10,
+            requests_count=1000,
+            payload="test",
+        ),
+        request=HttpMethod.POST,
+        path="/database/tasks.json",
+        count=1,
+    )
 
 
 if __name__ == "__main__":

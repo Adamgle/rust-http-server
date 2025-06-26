@@ -97,9 +97,37 @@ const addTask = async (formData) => {
   return taskObject;
 };
 
-const addUser = async (formData) => {
+const addUser = async (e, formData) => {
+  e.preventDefault();
+
+  // const submitter = document.querySelector(
+  //   "#register-form button[type=submit]"
+  // );
+
   const { email, password } = Object.fromEntries(formData.entries());
-  console.log(email, password);
+
+  try {
+    let endpoint = buildUrl(DATABASE_URL, "database/users.json");
+    const res = await fetch(endpoint, {
+      method: "POST",
+      mode: "cors",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ email, password }),
+    });
+
+    // const data = await res.json();
+    // console.log("User added:", data);
+  } catch (error) {
+    console.error("Error adding user:", error);
+    const errorContainer = document.getElementById("error-div");
+    errorContainer.innerText = "Error adding user: " + error.message;
+    errorContainer.style.display = "block";
+    return null;
+  }
+
+  return null;
 };
 
 async function getTasks() {
@@ -147,17 +175,9 @@ async function main() {
     return null;
   });
 
-  registerForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const submitter = document.querySelector(
-      "#register-form button[type=submit]"
-    );
-    const data = new FormData(registerForm, submitter);
-
-    await addUser(data);
-
-    return null;
-  });
+  registerForm.addEventListener("submit", (e) =>
+    addUser(e, new FormData(registerForm))
+  );
 }
 
 addEventListener("load", main);
