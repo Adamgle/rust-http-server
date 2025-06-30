@@ -309,7 +309,7 @@ def run_benchmark(
     log_entry.append(f"Payload size: {payload_size} bytes")
     log_entry.append(f"Average execution time: {average_time:.4f} seconds\n")
 
-    # plot_response_timestamps(response_timestamps)
+    plot_response_timestamps(response_timestamps)
 
     with open("benchmarks/benchmark.log", "a", encoding="utf-8") as f:
         f.write("\n".join(log_entry) + "\n")
@@ -430,7 +430,7 @@ def main():
             run_multithreaded,
             callback=send_custom,
             threads_count=10,
-            requests_count=1000,
+            requests_count=2000,
             payload="test",
         ),
         request=HttpMethod.POST,

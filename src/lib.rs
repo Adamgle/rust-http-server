@@ -1,9 +1,8 @@
 pub mod config;
 pub mod http;
 pub mod logger;
-pub mod middleware;
 pub mod prelude;
-pub mod routes;
+pub mod router;
 
 pub use http::http_request;
 pub use http::http_response;
@@ -17,10 +16,11 @@ pub mod tcp_handlers {
     use crate::config::Config::{self};
     use crate::http::{HttpHeaders, HttpResponseHeaders, HttpResponseStartLine};
     use crate::http_response::HttpResponse;
-    use crate::routes::{RouteContext, RouteHandlerResult, RouteResult, RouteTableKey};
+    use crate::router::{RouteContext, RouteHandlerResult, RouteResult, RouteTableKey};
     use crate::*;
     use http::HttpRequestError;
     use std::borrow::Cow;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::io::AsyncWriteExt;
     use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -185,8 +185,10 @@ pub mod tcp_handlers {
 
         let router = config.get_router();
 
-        let route_key =
-            RouteTableKey::new_no_validate(path, Some(method.clone()), routes::RouteKeyKind::Route);
+        let route_key = RouteTableKey {
+            path: PathBuf::from(path),
+            method: Some(method.clone()),
+        };
 
         println!("Requesting: {:?}", route_key);
 

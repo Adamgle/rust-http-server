@@ -26,12 +26,6 @@ pub struct HttpRequest<'a> {
     body: Option<Vec<u8>>,
 }
 
-impl<'a> std::fmt::Display for HttpRequest<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:#?}\n{:#?}", self.headers, "")
-    }
-}
-
 impl<'a> HttpRequest<'a> {
     /// Creates new HttpRequest instance from TcpStream, reads the stream to UTF-8 String and parses the headers
     ///
@@ -239,8 +233,6 @@ impl<'a> HttpRequest<'a> {
                 headers,
             });
         } else {
-            // TCP_keepalive
-
             eprintln!("Headers are not initialized");
             return Err("Invalid request".into());
         }

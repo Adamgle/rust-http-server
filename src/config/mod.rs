@@ -2,7 +2,7 @@ pub mod database;
 
 use crate::http::HttpRequestMethod;
 use crate::logger::Logger;
-use crate::routes::{RouteKeyKind, RouteTableKey, Router};
+use crate::router::{RouteTableKey, Router};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsStr;
@@ -33,6 +33,7 @@ pub struct Config {
 /// Contains information related to the application configuration, not the server configuration.
 ///
 /// It is used to store the URL of the server, routes, and other application-specific settings.
+#[derive(Debug)]
 pub struct AppConfig {
     /// URL of the server, composed of the parts in the config file, under `protocol` and `domain`, with `port` number
     /// set on the `SERVER_PORT` environment variable.
@@ -68,15 +69,15 @@ impl AppConfig {
 }
 
 // We will omit value of the routes HashMap to be printed as it is a function pointer
-impl std::fmt::Debug for AppConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AppConfig")
-            .field("url", &self.url)
-            .field("routes", &self.router.get_routes())
-            // .field("routes", &self.routes.0.keys().collect::<Vec<_>>())
-            .finish()
-    }
-}
+// impl std::fmt::Debug for AppConfig {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         f.debug_struct("AppConfig")
+//             .field("url", &self.url)
+//             .field("routes", &self.router.get_routes())
+//             // .field("routes", &self.routes.0.keys().collect::<Vec<_>>())
+//             .finish()
+//     }
+// }
 
 // TODO: Config file should be generate when server is first started with some crap that is default and required
 // for server to work, like `protocol` field.
@@ -308,11 +309,7 @@ impl SpecialDirectories {
                         .ok_or_else(|| format!("Path of the file under /public directory is not UTF-8 compatible: {:?}", file_path))
                         .map(|s| s.replace('\\', "/").to_string())?;
 
-                    paths.insert(RouteTableKey::new(
-                        file_path,
-                        Some(HttpRequestMethod::GET),
-                        RouteKeyKind::Route,
-                    ));
+                    paths.insert(RouteTableKey::new(file_path, Some(HttpRequestMethod::GET)));
 
                     // Insert the file path into the set, converting it to PathBuf
                     // Every path can be accessed with GET method, nothing else is guaranteed.
@@ -434,6 +431,8 @@ impl Config {
             router: Router::new()?,
             database,
         };
+
+        println!("AppConfig: {:#?}", app);
 
         Ok(Arc::new(Mutex::new(Config {
             logger: Logger {},
