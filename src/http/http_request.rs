@@ -347,7 +347,7 @@ impl<'a> HttpRequest<'a> {
         }
     }
 
-    /// Returns Iterator over the query parameters of the request target, presumably percent-encoded.
+    /// Returns Iterator over the query parameters of the request target, percent-decodes the queries.
     pub fn get_request_target_query(&self) -> url::form_urlencoded::Parse<'_> {
         self.headers.get_request_target().query_pairs()
     }

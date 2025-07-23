@@ -1,15 +1,14 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     error::Error,
-    os::windows::io::InvalidHandleError,
     path::{Path, PathBuf},
 };
 
 use crate::{
     http::HttpRequestError,
     router::{
-        routes::Routes, RouteContext, RouteEntry, RouteHandler, RouteHandlerFuture,
-        RouteHandlerResult, RouteResult, RouteTable, RouteTableKey,
+        routes::Routes, RouteContext, RouteEntry, RouteHandler, RouteHandlerFuture, RouteResult,
+        RouteTable, RouteTableKey,
     },
 };
 
@@ -279,6 +278,16 @@ impl Middleware {
         }
     }
 
+    pub fn get_routes(&self) -> &RouteTable {
+        // Returns the routes of the middleware.
+        &self.routes
+    }
+
+    pub fn get_segments(&self) -> &RouteTable {
+        // Returns the segments that are used for the middleware.
+        &self.segments
+    }
+
     /// Creates the middleware routes and segments for the example paths.
     pub fn create_middleware(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         // NOTE: Be aware that you can directly modify the RouteTable by invoking self.get_routes_mut().insert() which is invalid
@@ -328,25 +337,5 @@ impl Middleware {
         );
 
         Ok(())
-    }
-
-    pub fn get_routes(&self) -> &RouteTable {
-        // Returns the routes of the middleware.
-        &self.routes
-    }
-
-    pub fn get_routes_mut(&mut self) -> &mut RouteTable {
-        // Returns the mutable routes of the middleware.
-        &mut self.routes
-    }
-
-    pub fn get_segments(&self) -> &RouteTable {
-        // Returns the segments that are used for the middleware.
-        &self.segments
-    }
-
-    pub fn get_segments_mut(&mut self) -> &mut RouteTable {
-        // Returns the mutable segments that are used for the middleware.
-        &mut self.segments
     }
 }

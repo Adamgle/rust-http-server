@@ -58,40 +58,51 @@ const addTask = async (formData) => {
 
   taskObject = {
     // Most secure
-    id: Math.floor(Math.random() * (2 ** 31 - 1)).toString(),
+    // id: Math.floor(Math.random() * (2 ** 31 - 1)).toString(),
     value: taskValue,
   };
 
   const tasks = document.querySelector("#tasks");
   // const header = document.querySelector(".header-content");
 
-  const task = buildTaskElement(taskValue, taskObject.id);
+  // const task = buildTaskElement(taskValue, taskObject.id);
 
-  task.value = taskValue;
-  tasks.appendChild(task);
+  // task.value = taskValue;
+  // tasks.appendChild(task);
 
   if (!taskValue) {
     return null;
   }
 
   const errorContainer = document.getElementById("error-div");
+  try {
+    // Add task to database
+    const res = await fetch(DATABASE_TASKS_PATH, {
+      method: "POST",
+      mode: "cors",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(taskObject),
+    });
 
-  // Add task to database
-  const res = await fetch(DATABASE_TASKS_PATH, {
-    method: "POST",
-    mode: "cors",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(taskObject),
-  });
+    if (res.status !== 200) {
+      errorContainer.innerText = `Failed to add task. Status: ${res.status}`;
+      errorContainer.style.display = "block";
+      return null;
+    }
 
-  const text = await res.text();
-  if (res.status !== 200) {
-    errorContainer.innerText = text;
-    return null;
-  } else {
+    const entry = await res.json();
+    const task = buildTaskElement(taskValue, entry.id);
+
+    task.value = taskValue;
+    tasks.appendChild(task);
     errorContainer.style.display = "none";
+  } catch (error) {
+    console.error("Error adding task:", error);
+    errorContainer.innerText = `Error adding task: ${error.message}`;
+    errorContainer.style.display = "block";
+    return null;
   }
 
   return taskObject;
@@ -99,10 +110,6 @@ const addTask = async (formData) => {
 
 const addUser = async (e, formData) => {
   e.preventDefault();
-
-  // const submitter = document.querySelector(
-  //   "#register-form button[type=submit]"
-  // );
 
   const { email, password } = Object.fromEntries(formData.entries());
 

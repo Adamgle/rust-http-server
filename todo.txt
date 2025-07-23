@@ -228,6 +228,8 @@ ISSUES
     -> routes table and are throwing early without trying to parse the request when the redirection logic triggers.
 23. Refactor RouteHandlerContext to struct with fields not tuple struct as it become to ambiguous.
 24. Make sure the .html, .css, and .js cannot be declared outside SpecialDirectories,
+25. Requesting a collection crates it if not exists, api/database/list?collection=asd => That should not create the given collection and throw early.
+26. There is a way to walk file system using http://localhost:5000/api/database/list?collection=../../../../, in query parameters.
     
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,

@@ -432,8 +432,6 @@ impl Config {
             database,
         };
 
-        println!("AppConfig: {:#?}", app);
-
         Ok(Arc::new(Mutex::new(Config {
             logger: Logger {},
             socket_address,

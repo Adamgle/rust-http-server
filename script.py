@@ -1,5 +1,6 @@
 # Code in this file is a shenanigans, foolishness.
 
+import collections
 import functools
 import json
 import os
@@ -16,6 +17,8 @@ import requests
 import random
 import secrets
 import uuid
+
+from urllib.parse import quote
 
 URL_BASE = "http://localhost:5000/"
 DEFAULT_PORT = 5000
@@ -411,26 +414,19 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
 
 def main():
-    from urllib.parse import quote
-
-    # path = quote(f"/%2F")
-
     # send_custom(
     #     request=HttpMethod.POST,
-    #     path=quote("database/tasks.json"),
-    #     # NOTE: You can't check that as this double encodes that as that is f'ed up
-    #     # path="/%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
-    #     # /%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd ->
+    #     path=quote("/database/tasks.json"),
     #     payload="test",
     #     host="localhost",
-    # )
+    # )panic!("Error initializing database: {}", e);
 
     run_benchmark(
         callback=functools.partial(
             run_multithreaded,
             callback=send_custom,
             threads_count=10,
-            requests_count=2000,
+            requests_count=100,
             payload="test",
         ),
         request=HttpMethod.POST,

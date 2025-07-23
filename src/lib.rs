@@ -184,7 +184,6 @@ pub mod tcp_handlers {
             HttpResponseHeaders::new(HttpResponseStartLine::default());
 
         let router = config.get_router();
-
         let route_key = RouteTableKey {
             path: PathBuf::from(path),
             method: Some(method.clone()),

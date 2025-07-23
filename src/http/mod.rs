@@ -359,8 +359,6 @@ impl HttpRequestError {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // NOTE: This page could be dynamically set, but this function is sketchy and not very useful and flexible, so maybe we will refactor in the future.
 
-        dbg!(&err);
-
         let mut writer = writer.lock().await;
         let config = config.lock().await;
 
@@ -383,7 +381,16 @@ impl HttpRequestError {
                     serde_json::to_string(http_err)?
                 }
                 Some(content_type) if content_type == "text/plain" => {
-                    format!("{:#?}", http_err)
+                    // Keep in mind that the message also has its default value set in Default impl,
+                    // so the other branch would evaluate only if explicitly set to None,
+
+                    // Excerpt => message: Some("An error occurred while processing a request".to_string()),
+
+                    if let Some(message) = &http_err.message {
+                        message.clone()
+                    } else {
+                        format!("{:#?}", http_err)
+                    }
                 }
                 // NOTE: matching different content-types
                 // Some(content_type) if content_type == "application/x-www-form-urlencoded"
