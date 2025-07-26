@@ -8,7 +8,7 @@
 // This database is deeply flawed, as insertions are not done in O(1) append only time, since we have to parse the file to
 // add a new entry. Implementing the WAL file, which is append only, we could postpone that process, but that is not even the
 // biggest issue that is resolved, we still have to bring the data to memory, parse it and operate on it to insert new entries. That also
-// means that if we would want to select and entry we would have to flush the WAL file to the database file to provide stateful output.
+// means that if we would want to select an entry we would have to flush the WAL file to the database file to provide stateful output.
 // It is easy to see that when database grows, the performance of the database would degrade.
 // #############
 
@@ -37,16 +37,24 @@
 // that would involve Arc<Mutex<T>>, also executing the commands on certain threshold or on system shutdown must be done on separate thread
 // so to avoid blocking the IO overhead, though the IO is async from tokio, thought don't sure if windows supports async IO
 
-// NOTE: We could just use the enums there not the dyn traits.
+// ###########################
+// ###########################
+
+// Final thought after implementation:
+
+//
+
+// ###########################
+// ###########################
 
 pub mod collections;
 
-use crate::config::database::collections::{DatabaseCollections, DatabaseEntry};
+use crate::config::database::collections::DatabaseCollections;
 pub use crate::config::database::collections::{DatabaseEntryTrait, DatabaseTask, DatabaseUser};
 
 use crate::config::config_file::DatabaseConfigEntry;
 use crate::prelude::*;
-use std::collections::{HashSet};
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::Debug;
 use std::sync::atomic::AtomicUsize;
@@ -56,7 +64,6 @@ use tokio::{
     fs::File,
     io::{AsyncSeekExt, AsyncWriteExt},
 };
-
 
 #[derive(Debug)]
 pub struct Database {
@@ -95,9 +102,10 @@ struct DatabaseWAL {
 /// There is also possibility to opt-out of slushing on certain size, do it only on commands
 /// like select, select_all to provide stateful output, but otherwise just flush it on shutdown.
 /// To opt-out set it to max value of `usize`.
-const WAL_COMMAND_SIZE: usize = 100;
 
 impl DatabaseWAL {
+    pub const WAL_COMMAND_SIZE: usize = 100;
+
     async fn new(
         config: &DatabaseConfigEntry,
     ) -> Result<Arc<Mutex<Self>>, Box<dyn Error + Send + Sync>> {
@@ -252,23 +260,23 @@ impl DatabaseWAL {
 /// IO buffered commands execute on the database, on system shutdown or 100 commands in the buffer (memory or WAL file I think).
 pub enum DatabaseCommand {
     /// Insert one entry to given DatabaseEntry with a new entry
-    Insert { entry: DatabaseEntry },
+    Insert { entry: Box<dyn DatabaseEntryTrait> },
     Update {
         /// The entry to update, should be a new entry with the same id.
-        entry: DatabaseEntry,
+        entry: Box<dyn DatabaseEntryTrait>,
         // The entry holds it's type in the tagged fashion, as it is parsed when first inserted, deleted, whatever command is used, it would be tagged. So we know what type
         // we are dealing with.
         /// The id of the entry to update.
         id: String,
     },
-    /// Delete one entry to given DatabaseEntry
+    /// Delete one entry to given Box<dyn DatabaseEntryTrait>
     Delete {
-        /// The entry to delete, should be a new entry with the same id.
-        entry: DatabaseEntry,
+        // entry: Box<dyn DatabaseEntryTrait>,
+        collection_name: String,
         /// The id of the entry to delete.
         id: String,
     },
-    /// Select one entry to given Box<dyn DatabaseEntryTrait>
+    /// Select one entry to given Box<dyn Box<dyn DatabaseEntryTrait>Trait>
     ///
     /// `Select` and `SelectAll` are commands that cannot be buffered in the WAL file,
     /// as they are not triggering the side effect on database, so they will not be stored in the WAL file
@@ -286,13 +294,14 @@ impl DatabaseCommand {
     fn get_collection_name(&self) -> String {
         use DatabaseCommand::*;
         match self {
-            Insert { entry } | Update { entry, .. } | Delete { entry, .. } => {
-                entry.typetag_name().to_string()
-            }
+            Insert { entry } | Update { entry, .. } => entry.typetag_name().to_string(),
             Select {
                 collection_name, ..
             }
-            | SelectAll { collection_name } => collection_name.clone(),
+            | SelectAll { collection_name }
+            | Delete {
+                collection_name, ..
+            } => collection_name.clone(),
         }
     }
 

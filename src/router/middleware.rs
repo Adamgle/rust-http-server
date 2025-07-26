@@ -104,7 +104,7 @@ impl Middleware {
                     "Segment should exist in the routes as it was generated from them in the Middleware::evaluate_to_segment",
                 );
 
-                self.segments.insert(key.clone(), handler);
+                self.segments.insert(key.clone(), handler)?;
             }
         }
 
@@ -228,6 +228,9 @@ impl Middleware {
         PathBuf::from(format!("{}{}/", PATH_SEGMENT, path.display()))
     }
 
+    /// NOTE: This is useless, as the program would not work if database is configured but not initialized,
+    /// it is handled in the `Config::new`.
+    ///
     /// Validates the database "connection" for path that requested it and utilizes it.
     /// It won't run on every single path, but only on the paths that start with the `:database/` segment.
     pub fn validate_database(mut ctx: RouteContext) -> RouteHandlerFuture {
@@ -256,7 +259,11 @@ impl Middleware {
         })
     }
 
-    pub fn insert(&mut self, key: RouteTableKey, entry: RouteEntry) {
+    pub fn insert(
+        &mut self,
+        key: RouteTableKey,
+        entry: RouteEntry,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         match &entry {
             RouteEntry::Middleware(handler) => match handler {
                 Some(_) => {
@@ -307,12 +314,12 @@ impl Middleware {
                     Ok(RouteResult::Middleware(MiddlewareHandlerResult { ctx }))
                 })
             }))),
-        );
+        )?;
 
         self.insert(
             RouteTableKey::new(":database/", None),
             RouteEntry::Middleware(Some(RouteHandler::new(Middleware::validate_database))),
-        );
+        )?;
 
         self.insert(
             RouteTableKey::new(":asd/", None),
@@ -323,7 +330,7 @@ impl Middleware {
                     Ok(RouteResult::Middleware(MiddlewareHandlerResult { ctx }))
                 })
             }))),
-        );
+        )?;
 
         self.insert(
             RouteTableKey::new(":asd/data/asd asd/", None),
@@ -334,7 +341,7 @@ impl Middleware {
                     Ok(RouteResult::Middleware(MiddlewareHandlerResult { ctx }))
                 })
             }))),
-        );
+        )?;
 
         Ok(())
     }

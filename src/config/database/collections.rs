@@ -1,5 +1,4 @@
 use crate::config::config_file::DatabaseConfigEntry;
-use crate::config::database::WAL_COMMAND_SIZE;
 use crate::config::database::{DatabaseCommand, DatabaseWAL};
 use crate::config::Config;
 use crate::http::HttpRequestError;
@@ -8,11 +7,9 @@ use crate::prelude::*;
 use serde_json;
 use std::any::Any;
 use std::collections::HashMap;
-use std::default;
 use std::error::Error;
 use std::fmt::Debug;
 use std::path::PathBuf;
-use strum::VariantNames;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 // / We are using Strings as the keys to store uuids.
@@ -31,14 +28,15 @@ pub struct DatabaseCollections {
 
 impl DatabaseCollections {
     pub async fn new(config: DatabaseConfigEntry) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        // Flush the buffered commands on the server startup, if any.
         if let Some(WAL) = DatabaseWAL::load_state(&config).await? {
             let mut instance = Self {
                 collections: DatabaseStorage::new(),
-                WAL,
                 config: config.clone(),
+                WAL,
             };
 
-            instance.execute_commands().await?;
+            instance.flush().await?;
 
             return Ok(instance);
         }
@@ -51,6 +49,26 @@ impl DatabaseCollections {
             config,
         })
     }
+
+    /// Explicitly flushes the WAL file and returns the used instance of the `DatabaseCollections`.
+    ///
+    /// We always want to flush every single collection occurring in the WAL as queries may depend on the data being present
+    /// in the WAL, but not yet in the database, so we need to flush it to database.
+    // pub async fn flush(
+    //     &mut self,
+    //     config: DatabaseConfigEntry,
+    // ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    //     if let Some(WAL) = DatabaseWAL::load_state(&config).await? {
+    //         self.WAL = WAL;
+    //         self.flush().await?;
+    //     }
+
+    //     Ok(())
+
+    //     // `load_state` will return Ok(None) in the case of no WAL file being present,
+    //     // or if the WAL file is empty. Technically in that context of explicit flushing it would be an error
+    //     // as we except some data to be present in the WAL file.
+    // }
 
     /// Creates a new collection with the given name and returns it. If it exists, it returns the existing collection.
     ///
@@ -103,25 +121,27 @@ impl DatabaseCollections {
     ///
     /// Scenario in which Database does not have a collection instance inside `collections` field
     /// but it exists inside DatabaseWAL SHOULD NOT happen, as the WAL file gets flushed on the server shutdown.
-    async fn execute_commands(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    pub async fn flush(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let start_time = std::time::Instant::now();
+
         let instance = Arc::clone(&self.WAL);
         let WAL = instance.lock().await;
 
         let commands = DatabaseWAL::parse_WAL(WAL.get_handler(), WAL.get_size()).await?;
-
+        
         drop(WAL);
 
         self.parse_collections().await?;
 
         for command in commands {
-            // TODO: If Logger would be implemented I would want to log the result of that.
             match command {
-                DatabaseCommand::Insert { entry } => self._insert(entry).await,
-                DatabaseCommand::Update { entry, id } => self._update(entry, id).await,
-                DatabaseCommand::Delete { entry, id } => self._delete(entry, id).await,
-                // Select and SelectAll are commands that cannot be buffered in the WAL file, invocation of those makes the WAL commands flushed
-                // to provide stateful output.
-                _ => Err("Unsupported command.")?,
+            DatabaseCommand::Insert { entry } => self._insert(entry).await,
+            DatabaseCommand::Update { entry, id } => self._update(entry, id).await,
+            DatabaseCommand::Delete {
+                collection_name,
+                id,
+            } => self._delete(&collection_name, id).await,
+            _ => Err("Unsupported command.")?,
             }?;
         }
 
@@ -130,6 +150,8 @@ impl DatabaseCollections {
         let WAL = Arc::clone(&self.WAL);
         let WAL = WAL.lock().await;
         WAL.reset_size().await?;
+
+        println!("Total flush time: {:?}", start_time.elapsed());
 
         return Ok(());
     }
@@ -146,6 +168,7 @@ impl DatabaseCollections {
 
             // Clear the vector, we can remove this line and improve performance, but waste more memory as we would keep the entries in the RAM.
             // Some adjustments would be necessary if we would not want to clear the data.
+            // Also it would make DatabaseWAL unnecessary as everything would be in-memory.
             collection.data.clear();
         }
 
@@ -163,10 +186,10 @@ impl DatabaseCollections {
 
         WAL.save_command(command).await?;
 
-        if WAL.get_size() >= WAL_COMMAND_SIZE {
+        if WAL.get_size() >= DatabaseWAL::WAL_COMMAND_SIZE {
             drop(WAL);
 
-            self.execute_commands().await?;
+            self.flush().await?;
         }
 
         Ok(())
@@ -179,7 +202,6 @@ impl DatabaseCollections {
     where
         T: DatabaseEntryTrait + serde::Serialize + Clone + 'static,
         T: From<U>,
-        DatabaseEntry: From<T>,
         U: serde::de::DeserializeOwned + serde::Serialize,
     {
         // Entry is tagged, so we have serialize it back to the bytes, it is tagged with the type of the entry.
@@ -195,18 +217,10 @@ impl DatabaseCollections {
 
         let e = T::parse::<U>(entry)?;
 
-        let entry = DatabaseEntry::from(e.clone());
-
-        if entry.to_string() != e.typetag_name() {
-            return Err(format!(
-                "Entry type mismatch: expected {}, got {}",
-                e.typetag_name(),
-                entry.to_string()
-            )
-            .into());
-        }
-
-        self.execute(DatabaseCommand::Insert { entry }).await?;
+        self.execute(DatabaseCommand::Insert {
+            entry: Box::new(e.clone()),
+        })
+        .await?;
 
         return Ok(e);
     }
@@ -219,34 +233,33 @@ impl DatabaseCollections {
     where
         T: DatabaseEntryTrait + serde::Serialize + Clone + 'static,
         T: From<U>,
-        DatabaseEntry: From<T>,
         U: serde::de::DeserializeOwned + serde::Serialize,
     {
         let e = T::parse::<U>(entry)?;
-        let entry = DatabaseEntry::from(e.clone());
+        // let entry = DatabaseEntry::from(e.clone());
 
-        self.execute(DatabaseCommand::Update { entry, id }).await?;
+        self.execute(DatabaseCommand::Update {
+            entry: Box::new(e.clone()),
+            id,
+        })
+        .await?;
 
         Ok(e)
     }
 
-    pub async fn delete<T, U>(
+    pub async fn delete(
         &mut self,
-        entry: &impl AsRef<[u8]>,
+        collection_name: &str,
         id: String,
-    ) -> Result<T, Box<dyn Error + Send + Sync>>
-    where
-        T: DatabaseEntryTrait + serde::Serialize + Clone + 'static,
-        T: From<U>,
-        DatabaseEntry: From<T>,
-        U: serde::de::DeserializeOwned + serde::Serialize,
-    {
-        let e = T::parse::<U>(entry)?;
-        let entry = DatabaseEntry::from(e.clone());
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.execute(DatabaseCommand::Delete {
+            // entry: Box::new(e.clone()),
+            collection_name: collection_name.to_string(),
+            id,
+        })
+        .await?;
 
-        self.execute(DatabaseCommand::Delete { entry, id }).await?;
-
-        return Ok(e);
+        Ok(())
     }
 
     pub async fn select<T, U>(
@@ -257,7 +270,6 @@ impl DatabaseCollections {
     where
         T: DatabaseEntryTrait + serde::Serialize + Clone + 'static,
         T: From<U>,
-        DatabaseEntry: From<T>,
         U: serde::de::DeserializeOwned + serde::Serialize,
     {
         let WAL = Arc::clone(&self.WAL);
@@ -269,7 +281,7 @@ impl DatabaseCollections {
             drop(WAL);
 
             // Flush the commands to the database file to provide stateful output.
-            self.execute_commands().await?;
+            self.flush().await?;
         }
 
         // Collection could not have been created if WAL did not flush.
@@ -277,7 +289,7 @@ impl DatabaseCollections {
         let collection = self.get(collection_name).await?;
         let collection = collection.lock().await;
 
-        let Some(entry) = collection.data.get(&id).cloned() else {
+        let Some(entry) = collection.data.get(&id) else {
             return Err(format!("Entry with the provided id: {id} does not exists.").into());
         };
 
@@ -304,7 +316,7 @@ impl DatabaseCollections {
             drop(WAL);
 
             // Flush the commands to the database file to provide stateful output.
-            self.execute_commands().await?;
+            self.flush().await?;
         }
 
         let collection = self.get(collection_name).await?;
@@ -334,48 +346,19 @@ impl DatabaseCollections {
             drop(WAL);
 
             // Flush the commands to the database file to provide stateful output.
-            self.execute_commands().await?;
+            self.flush().await?;
         }
 
         let collection = self.get(collection_name).await?;
         let collection = collection.lock().await;
 
-        let variants = DatabaseEntry::VARIANTS;
-
-        let mut storage = DatabaseStorage::<Box<dyn DatabaseEntryTrait>>::new();
-
-        let mut first_type: Option<&str> = None;
-
-        for entry in collection.data.values() {
-            if first_type.is_none() {
-                // Check if the entry's type is registered in the DatabaseEntry enum.
-                // and the typetag matches the enum variant name, we wan't to keep it synced
-                if variants.contains(&entry.typetag_name())
-                    && entry.typetag_name() == entry.to_string()
-                {
-                    first_type = Some(entry.typetag_name());
-                } else {
-                    return Err(Box::<dyn Error + Send + Sync>::from(format!(
-                        "Entry with the type: {} is not registered in the DatabaseEntry enum.",
-                        entry.typetag_name()
-                    )));
-                }
-            }
-
-            if first_type.unwrap() == entry.typetag_name() {}
-
-            storage.insert(
-                entry.get_id(),
-                Box::new(entry.clone()) as Box<dyn DatabaseEntryTrait>,
-            );
-        }
-
-        // return Ok(storage);
-        // return Ok(collection.data.clone());
-        return Ok(storage);
+        return Ok(collection.data.clone());
     }
 
-    async fn _insert(&mut self, entry: DatabaseEntry) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn _insert(
+        &mut self,
+        entry: Box<dyn DatabaseEntryTrait>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // The idea of typetag is just outrageous, so stupid. We could just use the strum_macros to get the type name as string
         // and get the specific collection for given entry.
 
@@ -401,7 +384,7 @@ impl DatabaseCollections {
 
     async fn _update(
         &mut self,
-        entry: DatabaseEntry,
+        entry: Box<dyn DatabaseEntryTrait>,
         id: String,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Retrieves the collection from the storage
@@ -422,11 +405,11 @@ impl DatabaseCollections {
 
     async fn _delete(
         &mut self,
-        entry: DatabaseEntry,
+        collection_name: &str,
         id: String,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Retrieves the collection from the storage
-        let collection = self.get(entry.typetag_name()).await?;
+        let collection = self.get(collection_name).await?;
         let mut collection = collection.lock().await;
 
         let collection = &mut collection.data;
@@ -453,7 +436,7 @@ pub struct DatabaseCollection {
     /// Technically we could keep it written into but that would waste memory, improve performance.
     ///
     /// Stays uninitialized until the WAL file is flushed.
-    data: DatabaseStorage<DatabaseEntry>,
+    data: DatabaseStorage<Box<dyn DatabaseEntryTrait>>,
     // That is a clone of the WAL file, clone as the increase of the reference count, not the actual data.
     // WAL: Arc<Mutex<DatabaseWAL>>,
 }
@@ -485,21 +468,21 @@ impl DatabaseCollection {
         let mut collection_path = database_path.join(collection_name.to_string().to_lowercase());
         collection_path.set_extension("json");
 
-        if collection_path.starts_with(database_path) {
-            return Ok(collection_path);
+        if !collection_path.starts_with(database_path) {
+            println!("Collection path: {collection_path:?} is not inside the database root: ");
+
+            return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                status_code: 400,
+                status_text: "Bad Request".into(),
+                message: Some("Invalid database path".to_string()),
+                internals: Some(Box::<dyn Error + Send + Sync>::from(
+                    "Collection path is not inside the database root.",
+                )),
+                content_type: Some("text/plain".to_string()),
+            }));
         }
 
-        println!("Collection path: {collection_path:?} is not inside the database root: ");
-
-        return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
-            status_code: 400,
-            status_text: "Bad Request".into(),
-            message: Some("Invalid database path".to_string()),
-            internals: Some(Box::<dyn Error + Send + Sync>::from(
-                "Collection path is not inside the database root.",
-            )),
-            content_type: Some("text/plain".to_string()),
-        }));
+        return Ok(collection_path);
     }
 
     /// Creates the database file if it does not exist, and returns the file handle to it.
@@ -532,11 +515,6 @@ impl DatabaseCollection {
 
     async fn overwrite_database_file(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         let serialized: Vec<u8> = serde_json::to_vec(&self.data)?;
-
-        println!(
-            "Deserizlied serialized: {:?}",
-            String::from_utf8_lossy(&serialized)
-        );
 
         let handler = self.get_handler();
         let mut handler = handler.lock().await;
@@ -599,10 +577,12 @@ impl DatabaseCollection {
     }
 }
 
-#[typetag::serde(tag = "type")]
+#[typetag::serde(tag = "__type")]
 pub trait DatabaseEntryTrait: Send + Sync + Debug {
     /// Converts the entry to the `Any` trait object, so it could be downcasted to the actual type.
     fn as_any(&self) -> &dyn Any;
+
+    fn clone_box(&self) -> Box<dyn DatabaseEntryTrait>;
 
     /// Serializes the entry to the JSON format, so it could be written to the file.
     fn serialize(&self) -> Result<String, serde_json::Error>
@@ -651,6 +631,12 @@ pub trait DatabaseEntryTrait: Send + Sync + Debug {
     }
 }
 
+impl Clone for Box<dyn DatabaseEntryTrait> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct DatabaseTask {
     /// Primary key.
@@ -667,6 +653,10 @@ pub struct ClientTask {
 impl DatabaseEntryTrait for DatabaseTask {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn clone_box(&self) -> Box<dyn DatabaseEntryTrait> {
+        Box::new(self.clone())
     }
 
     fn get_id(&self) -> String {
@@ -712,8 +702,19 @@ impl DatabaseEntryTrait for DatabaseUser {
         self
     }
 
+    fn clone_box(&self) -> Box<dyn DatabaseEntryTrait> {
+        Box::new(self.clone())
+    }
+
     fn get_id(&self) -> String {
         self.id.clone()
+    }
+}
+
+impl DatabaseUser {
+    /// Returns the API key of the user.
+    pub fn get_api_key(&self) -> String {
+        self.API_key.clone()
     }
 }
 
@@ -721,11 +722,7 @@ impl DatabaseEntryTrait for DatabaseUser {
 impl From<ClientUser> for DatabaseUser {
     fn from(value: ClientUser) -> Self {
         Self {
-            // email: value.email,
-            // password: value.password,
-            // TODO: Generate a new API key for the user.
             API_key: uuid::Uuid::new_v4().to_string(),
-            // TODO: Generate a new UUID for the user ID.
             id: uuid::Uuid::new_v4().to_string(),
             email: value.email,
             password: value.password,
@@ -735,16 +732,41 @@ impl From<ClientUser> for DatabaseUser {
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct DatabaseSession {
+    id: String,
     /// User id comes form the client and is used to identify the user session.
     user_id: String,
     /// Created at is the time when the session was created.
     created_at: std::time::SystemTime,
 }
 
+// impl DatabaseSession {
+
+//     pub fn new(user_id: String) -> Self {
+//         Self {
+//             user_id,
+//             created_at: std::time::SystemTime::now(),
+//         }
+//     }
+// }
+
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
 pub struct ClientSession {
+    // Id there is of API token to allow quick lookup based on information that is already cached in the browser.
+    id: String,
     /// User id comes form the client and is used to identify the user session.
     user_id: String,
+}
+
+impl ClientSession {
+    /// Since we want the session creation be server side only logic, we would define the constructor here,
+    /// as the object does not come from the client, not it gets weird because we are defining the client type of the session.
+    /// We also could just define the endpoint for the session creation, and delegate the task of calling that endpoint to the client.
+    ///
+    /// Constructor is on client type as it already have the functionality to get tagged with `typetag`, and we need that,
+    /// meaning we have to construct it, parse to bytes, convert from bytes again to client type, and then to database type.
+    pub fn new(id: String, user_id: String) -> Self {
+        Self { id, user_id }
+    }
 }
 
 #[typetag::serde(name = "Sessions")]
@@ -753,8 +775,12 @@ impl DatabaseEntryTrait for DatabaseSession {
         self
     }
 
+    fn clone_box(&self) -> Box<dyn DatabaseEntryTrait> {
+        Box::new(self.clone())
+    }
+
     fn get_id(&self) -> String {
-        self.user_id.clone()
+        self.id.clone()
     }
 }
 
@@ -762,70 +788,8 @@ impl From<ClientSession> for DatabaseSession {
     fn from(value: ClientSession) -> Self {
         Self {
             created_at: std::time::SystemTime::now(),
+            id: value.id,
             user_id: value.user_id,
         }
-    }
-}
-
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    strum_macros::Display,
-    strum_macros::VariantNames,
-    Clone,
-)]
-#[strum(serialize_all = "lowercase")]
-pub enum DatabaseEntry {
-    Tasks(DatabaseTask),
-    Users(DatabaseUser),
-    Sessions(DatabaseSession),
-}
-
-impl DatabaseEntry {
-    /// Static evaluation of the inner type, so to avoid doing that in every implementation of the methods on the DatabaseEntryTrait for that type.
-    fn inner(&self) -> &dyn DatabaseEntryTrait {
-        match self {
-            Self::Tasks(e) => e,
-            Self::Users(e) => e,
-            Self::Sessions(e) => e,
-        }
-    }
-}
-
-impl From<DatabaseTask> for DatabaseEntry {
-    fn from(value: DatabaseTask) -> Self {
-        Self::Tasks(value)
-    }
-}
-
-impl From<DatabaseUser> for DatabaseEntry {
-    fn from(value: DatabaseUser) -> Self {
-        Self::Users(value)
-    }
-}
-
-impl From<DatabaseSession> for DatabaseEntry {
-    fn from(value: DatabaseSession) -> Self {
-        Self::Sessions(value)
-    }
-}
-
-impl DatabaseEntryTrait for DatabaseEntry {
-    fn as_any(&self) -> &dyn Any {
-        self.inner().as_any()
-    }
-
-    /// Value that is used as the "primary key" for the entry.
-    fn get_id(&self) -> String {
-        self.inner().get_id()
-    }
-
-    fn typetag_name(&self) -> &'static str {
-        self.inner().typetag_name()
-    }
-
-    fn typetag_deserialize(&self) {
-        self.inner().typetag_deserialize()
     }
 }

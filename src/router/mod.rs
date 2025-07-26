@@ -14,7 +14,7 @@ use std::{
 use tokio::sync::Mutex;
 
 use crate::{
-    config::{config_file::DatabaseConfigEntry, database::Database, Config},
+    config::{config_file::DatabaseConfigEntry, database::Database, Config, SpecialDirectories},
     http::{HttpRequestError, HttpRequestHeaders, HttpRequestMethod, HttpResponseHeaders},
     http_request::HttpRequest,
     router::{
@@ -574,8 +574,28 @@ impl RouteTable {
     /// If the route already exists, it will panic with a message indicating that the route is already defined.
     ///
     /// Works as an internal function for the `Middleware` and `Routes` structs.
-    fn insert(&mut self, key: RouteTableKey, handler: RouteEntry) {
+    fn insert(
+        &mut self,
+        key: RouteTableKey,
+        handler: RouteEntry,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let routes = self.get_routes_mut();
+
+        // We are throwing an error in case the route already exists, but we allowing to overwrite the routes
+        // that are in the public directory, but only with the GET method. Since all routes in the public directory
+        // have the same default behavior, we want to allow overwriting them.
+
+        // All keys are the one with GET method on it, we can just compare the keys
+        let special_directories = SpecialDirectories::collect()?;
+
+        if special_directories.contains(&key) {
+            // Guard check, although every key in the special_directories is with GET method,
+            if key.method == Some(HttpRequestMethod::GET) {
+                routes.insert(key.clone(), handler);
+
+                return Ok(());
+            }
+        }
 
         if let Some(_) = routes.insert(key.clone(), handler) {
             panic!(
@@ -583,5 +603,7 @@ impl RouteTable {
                 key.path, key.method
             );
         }
+
+        Ok(())
     }
 }

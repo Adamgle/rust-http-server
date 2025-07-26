@@ -48,6 +48,8 @@ pub mod tcp_handlers {
             listener.local_addr().unwrap()
         );
 
+        // Obscure logger.
+
         let logs = fs::OpenOptions::new()
             .append(true)
             .create(true)
@@ -97,6 +99,8 @@ pub mod tcp_handlers {
                         )
                         .await
                         {
+                            // Obscure logger.
+
                             logs.lock()
                                 .await
                                 .write_all(format!("Error handling request: {}\n", err).as_bytes())
@@ -189,7 +193,7 @@ pub mod tcp_handlers {
             method: Some(method.clone()),
         };
 
-        println!("Requesting: {:?}", route_key);
+        println!("Incoming: {:?}", route_key);
 
         // To resolve the double mutable reference to headers we will move the ownership of headers
         // that is cheap operation.

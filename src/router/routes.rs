@@ -1,9 +1,11 @@
 use std::{borrow::Cow, collections::HashMap, error::Error};
 
+use serde_json::json;
+
 use crate::{
     config::{
         database::{
-            collections::{ClientTask, ClientUser},
+            collections::{ClientSession, ClientTask, ClientUser, DatabaseSession},
             DatabaseEntryTrait, DatabaseTask, DatabaseUser,
         },
         SpecialDirectories,
@@ -61,7 +63,11 @@ impl Routes {
     /// Inserts a new route into the route table with the given key and handler.
     ///
     /// If the route already exists, it will panic with a message indicating that the route is already defined.
-    pub fn insert(&mut self, key: RouteTableKey, handler: RouteEntry) {
+    pub fn insert(
+        &mut self,
+        key: RouteTableKey,
+        handler: RouteEntry,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         match handler {
             RouteEntry::Middleware(_) => {
                 panic!("Cannot insert a RouteEntry::Middleware into Routes.")
@@ -71,18 +77,7 @@ impl Routes {
                     panic!("Cannot insert a route handler with no method, please specify a method. None as method is restricted to middleware handlers that run on any method.");
                 }
 
-                // let path = key.get_path().to_str().expect("Path should be valid UTF-8");
-
-                // if Middleware::is_path_segment(path) {
-                //     let segment_key = RouteTableKey {
-                //         path: Middleware::parse_middleware_path(path),
-                //         method: key.get_method().clone(),
-                //     };
-
-                //     segments.insert(segment_key);
-                // }
-
-                self.routes.insert(key, handler);
+                self.routes.insert(key, handler)
             }
         }
 
@@ -101,21 +96,44 @@ impl Routes {
     pub fn create_routes(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Every path in the SpecialDirectories can be routed without authentication using GET method.
 
-        SpecialDirectories::collect()
-            .inspect_err(|e: &Box<dyn Error + Send + Sync>| {
+        let static_routes =
+            SpecialDirectories::collect().inspect_err(|e: &Box<dyn Error + Send + Sync>| {
                 eprintln!("Failed to collect static routes: {}", e);
-            })?
-            .into_iter()
-            .for_each(|key| {
-                // This callback would be used to handle the request for the static route.
-                // The parameters should live for the duration of the request but the callback function
-                // should live for 'static
+            })?;
 
-                self.insert(
-                    key,
-                    RouteEntry::Route(RouteHandler::new(Self::static_route_handler)),
-                )
-            });
+        for key in static_routes {
+            // This callback would be used to handle the request for the static route.
+            // The parameters should live for the duration of the request but the callback function
+            // should live for 'static
+            self.insert(
+                key,
+                RouteEntry::Route(RouteHandler::new(Self::static_route_handler)),
+            )?;
+        }
+
+        // ### Redefined for custom behavior Static Routes ###
+
+        self.insert(
+            RouteTableKey::new("/", Some(HttpRequestMethod::GET)),
+            RouteEntry::Route(RouteHandler::new(|mut ctx| {
+                Box::pin(async move {
+                    // We want to flush the database on the load of that route.
+
+                    let database = ctx.get_database()?;
+                    let mut database = database.lock().await;
+
+                    database.collections.flush().await?;
+
+                    return Ok(RouteResult::Route(RouteHandlerResult {
+                        body: ctx.request.read_requested_resource(
+                            &mut ctx.response_headers,
+                            ctx.key.get_prefixed_path(),
+                        )?,
+                        headers: ctx.response_headers,
+                    }));
+                })
+            })),
+        )?;
 
         // ### Database Routes ###
 
@@ -153,17 +171,31 @@ impl Routes {
 
                     // That is impossible as we cannot know the type of the collection at runtime.
 
-                    let body = database.collections.select_all_any(collection_name).await?;
+                    let collection = database.collections.select_all_any(collection_name).await?;
 
-                    println!("Body size: {}", body.len());
+                    // Get the size of the collection if specified in the query. Acts like boolean flag.
+                    if let Some(size) = query.get("size") {
+                        if let Ok(_) = size.parse::<usize>() {
+                            // If the size is specified, we can return the collection data with the size limit.
+                            return Ok(RouteResult::Route(RouteHandlerResult {
+                                headers: response_headers,
+                                body: serde_json::to_string(&json!({
+                                    "collection": collection_name,
+                                    "size": collection.len().to_string(),
+                                }))?,
+                            }));
+                        }
+                    }
+
+                    let body = serde_json::to_string(&collection)?;
 
                     return Ok(RouteResult::Route(RouteHandlerResult {
                         headers: response_headers,
-                        body: serde_json::to_string(&body)?,
+                        body,
                     }));
                 })
             })),
-        );
+        )?;
 
         // We should allow GET to the databases but make sure if they not require authentication.
         // If they require we will just check for the, I imagine this the same as with the static routes,
@@ -192,7 +224,7 @@ impl Routes {
                     }));
                 })
             })),
-        );
+        )?;
 
         self.insert(
             RouteTableKey::new("/database/users.json", Some(HttpRequestMethod::GET)),
@@ -221,7 +253,7 @@ impl Routes {
                     }));
                 })
             })),
-        );
+        )?;
 
         self.insert(
             // api/database/tasks/create
@@ -259,7 +291,40 @@ impl Routes {
                     return Err(Box::<dyn Error + Send + Sync>::from("Task cannot be empty"));
                 })
             })),
-        );
+        )?;
+
+        self.insert(
+            RouteTableKey::new("/database/tasks.json", Some(HttpRequestMethod::DELETE)),
+            RouteEntry::Route(RouteHandler::new(|ctx| {
+                Box::pin(async move {
+                    let database = ctx.get_database()?;
+                    let mut database = database.lock().await;
+
+                    let RouteContext {
+                        request,
+                        response_headers,
+                        ..
+                    } = ctx;
+
+                    if let Some(body) = request.get_body().cloned() {
+                        let id = String::from_utf8(body).map_err(|_| HttpRequestError {
+                            status_code: 400,
+                            message: Some("Invalid UTF-8 sequence".into()),
+                            ..Default::default()
+                        })?;
+
+                        database.collections.delete("tasks", id).await?;
+
+                        return Ok(RouteResult::Route(RouteHandlerResult {
+                            headers: response_headers,
+                            body: String::new(),
+                        }));
+                    }
+
+                    return Err(Box::<dyn Error + Send + Sync>::from("Task ID is required"));
+                })
+            })),
+        )?;
 
         self.insert(
             // api/database/users/create
@@ -291,30 +356,41 @@ impl Routes {
                         // 4. Additionally we need to make sure the tasks can be inserted only if authenticated, meaning cookie exists and is valid.
                         // 5. User creation should not be buffered in the WAL file and resolved abruptly.
 
-                        // sessionId: {sessionId => { userId, create_at }} => Set-Cookie: sessionId={sessionId}, that cookie is carried over the requests, as cookies are.
-                        // userId -> sessionId | User creation creates the session for that users
-                        // userId -> API_KEY
-
                         let entry = database
                             .collections
                             .insert::<DatabaseUser, ClientUser>(&body.clone())
                             .await?;
 
+                        // We could define an endpoint for the session creation, but we can also just create it here.
+                        // That is kind of ambiguous, but the API key is of id in the session, and the id is of the userId
+                        let session = ClientSession::new(entry.get_api_key(), entry.get_id());
+
+                        database
+                            .collections
+                            .insert::<DatabaseSession, ClientSession>(&serde_json::to_vec(
+                                &session,
+                            )?)
+                            .await?;
+
+                        database.collections.flush().await?;
+
+                        // Generate a session entry.
+
                         response_headers.add(
                             Cow::from("Set-Cookie"),
-                            format!("sessionId={}", entry.get_id()).into(),
+                            format!("sessionId={}", entry.get_api_key()).into(),
                         );
+
+                        return Ok(RouteResult::Route(RouteHandlerResult {
+                            headers: response_headers,
+                            body: entry.serialize()?,
+                        }));
                     } else {
                         return Err(Box::<dyn Error + Send + Sync>::from("Task cannot be empty"));
                     }
-
-                    return Ok(RouteResult::Route(RouteHandlerResult {
-                        headers: response_headers,
-                        body: "User added successfully".to_string(),
-                    }));
                 });
             })),
-        );
+        )?;
 
         return Ok(());
     }

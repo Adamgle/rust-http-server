@@ -414,19 +414,12 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
 
 def main():
-    # send_custom(
-    #     request=HttpMethod.POST,
-    #     path=quote("/database/tasks.json"),
-    #     payload="test",
-    #     host="localhost",
-    # )panic!("Error initializing database: {}", e);
-
     run_benchmark(
         callback=functools.partial(
             run_multithreaded,
             callback=send_custom,
             threads_count=10,
-            requests_count=100,
+            requests_count=10000,
             payload="test",
         ),
         request=HttpMethod.POST,
