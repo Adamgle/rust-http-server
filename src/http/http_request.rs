@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::http::{HttpResponseHeaders, RequestRedirected};
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -238,8 +239,52 @@ impl<'a> HttpRequest<'a> {
         }
     }
 
+    pub fn get_cookies(&self) -> Result<HashMap<&str, &str>, HttpRequestError> {
+        if let Some(cookies) = self.get_headers().get("Cookie")
+            && cookies.len() > 0
+        {
+            let mut cookie_map = HashMap::new();
+
+            for cookie in cookies.split(';') {
+                match cookie.split_once('=') {
+                    Some((name, value)) => {
+                        cookie_map.insert(name.trim(), value.trim());
+                    }
+                    None => {
+                        return Err(HttpRequestError {
+                            status_code: 400,
+                            status_text: "Bad Request".into(),
+                            message: "Invalid cookie format".to_string().into(),
+                            internals: Some(Box::<dyn Error + Send + Sync>::from(
+                                "Cookie format is invalid, expected 'name=value'",
+                            )),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+
+            return Ok(cookie_map);
+        }
+
+        return Err(HttpRequestError {
+            status_code: 400,
+            status_text: "Bad Request".into(),
+            message: "No cookies found in the request".to_string().into(),
+            internals: Some(Box::<dyn Error + Send + Sync>::from(
+                "No cookies found in the request headers.",
+            )),
+            content_type: Some("application/json".into()),
+            ..Default::default()
+        });
+    }
+
     pub fn get_body(&self) -> Option<&Vec<u8>> {
         self.body.as_ref()
+    }
+
+    pub fn get_body_mut(&mut self) -> Option<&mut Vec<u8>> {
+        self.body.as_mut()
     }
 
     pub fn get_method(&self) -> &HttpRequestMethod {
@@ -249,8 +294,6 @@ impl<'a> HttpRequest<'a> {
     pub fn get_headers(&self) -> &HttpRequestHeaders {
         &self.headers
     }
-
-    // pub fn get_request_line(&self) -> Option<&HttpRequestRequestLine> {}
 
     /// Returns absolute path to the requested resource on the server
     ///
@@ -367,7 +410,7 @@ impl<'a> HttpRequest<'a> {
     ///
     /// `relative_path` is already resolved path, fully valid if prefixed with `/public` directory.
     pub fn read_requested_resource(
-        &'a self,
+        self,
         headers: &mut HttpResponseHeaders<'a>,
         relative_path: impl AsRef<Path>,
     ) -> Result<String, Box<dyn Error + Send + Sync>> {
@@ -390,9 +433,9 @@ impl<'a> HttpRequest<'a> {
     }
 
     /// I hate this, should be typed
-    pub fn detect_mime_type(&self, request_target: impl AsRef<Path>) -> &str {
+    pub fn detect_mime_type(self, request_target: impl AsRef<Path>) -> String {
         match self.headers.get("Content-Type") {
-            Some(content_type) => return content_type,
+            Some(content_type) => return content_type.to_string(),
             None => {
                 // At this point file name should always be supplied as this path resolves root directories to index.html and so on.
                 // Given that, expect would be appropriate as that would be just the server error1.
@@ -460,9 +503,10 @@ impl<'a> HttpRequest<'a> {
                             "go" => "text/x-go",
                             // Return default `text/plain` if all of the above fails
                             _ => "text/plain",
-                        };
+                        }
+                        .to_string();
                     }
-                    None => return "text/plain",
+                    None => return String::from("text/plain"),
                 }
             }
         }

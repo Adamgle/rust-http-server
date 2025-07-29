@@ -1,19 +1,20 @@
-use std::{borrow::Cow, collections::HashMap, error::Error};
+use std::{collections::HashMap, error::Error};
 
 use serde_json::json;
 
 use crate::{
     config::{
-        database::{
-            collections::{ClientSession, ClientTask, ClientUser, DatabaseSession},
-            DatabaseEntryTrait, DatabaseTask, DatabaseUser,
-        },
         SpecialDirectories,
+        database::{
+            DatabaseEntryTrait, DatabaseTask, DatabaseUser,
+            collections::{ClientSession, ClientTask, ClientUser, DatabaseSession},
+        },
     },
-    http::{HttpHeaders, HttpRequestError, HttpRequestMethod},
+    http::{HttpRequestError, HttpRequestMethod},
     router::{
-        RouteContext, RouteEntry, RouteHandler, RouteHandlerFuture, RouteHandlerResult,
-        RouteResult, RouteTable, RouteTableKey,
+        RouteContext, RouteEntry, RouteHandler, RouteHandlerResult, RouteResult, RouteTable,
+        RouteTableKey,
+        controller::{AppController, Controller},
     },
 };
 
@@ -36,30 +37,6 @@ impl Routes {
         &self.routes
     }
 
-    /// A static route handler that reads the requested resource from the `/public` directory.
-    pub fn static_route_handler(
-        // Pin<Box<dyn Future<Output = RouteResult<'ctx>> + Send + 'ctx>>;
-        ctx: RouteContext,
-    ) -> RouteHandlerFuture {
-        Box::pin(async move {
-            // Extract what we need before any mutable borrows
-            let RouteContext {
-                request,
-                mut response_headers,
-                key,
-                ..
-            } = ctx;
-
-            let body =
-                request.read_requested_resource(&mut response_headers, &key.get_prefixed_path())?;
-
-            return Ok(RouteResult::Route(RouteHandlerResult {
-                headers: response_headers,
-                body,
-            }));
-        })
-    }
-
     /// Inserts a new route into the route table with the given key and handler.
     ///
     /// If the route already exists, it will panic with a message indicating that the route is already defined.
@@ -74,17 +51,15 @@ impl Routes {
             }
             RouteEntry::Route(_) => {
                 if key.get_method().is_none() {
-                    panic!("Cannot insert a route handler with no method, please specify a method. None as method is restricted to middleware handlers that run on any method.");
+                    panic!(
+                        "Cannot insert a route handler with no method, please specify a method. None as method is restricted to middleware handlers that run on any method."
+                    );
                 }
 
+                // TODO: handler there should be wrapper in all of those new calls like they are now, so to avoid repeating the same code.
                 self.routes.insert(key, handler)
             }
         }
-
-        // self.routes.insert(key, handler);
-
-        // We should check here if the key does not map to a middleware segment, but that would require for the middleware to be
-        // already created, so we would have to create the middleware before the routes.
     }
 
     /// Statically creates the routes based on the user definitions of the routes with appropriate handlers
@@ -93,6 +68,9 @@ impl Routes {
     /// Basically that build API endpoints for the application.
     ///
     /// Automatically collects the routes from the `SpecialDirectories` and inserts them into the route table.
+    ///
+    /// NOTE: Technically every single handler defined now in the Self::insert could be moved to the `Controller` struct,
+    /// just a matter of design choice.
     pub fn create_routes(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Every path in the SpecialDirectories can be routed without authentication using GET method.
 
@@ -107,7 +85,7 @@ impl Routes {
             // should live for 'static
             self.insert(
                 key,
-                RouteEntry::Route(RouteHandler::new(Self::static_route_handler)),
+                RouteEntry::Route(RouteHandler::new(Controller::static_route_handler)),
             )?;
         }
 
@@ -115,24 +93,7 @@ impl Routes {
 
         self.insert(
             RouteTableKey::new("/", Some(HttpRequestMethod::GET)),
-            RouteEntry::Route(RouteHandler::new(|mut ctx| {
-                Box::pin(async move {
-                    // We want to flush the database on the load of that route.
-
-                    let database = ctx.get_database()?;
-                    let mut database = database.lock().await;
-
-                    database.collections.flush().await?;
-
-                    return Ok(RouteResult::Route(RouteHandlerResult {
-                        body: ctx.request.read_requested_resource(
-                            &mut ctx.response_headers,
-                            ctx.key.get_prefixed_path(),
-                        )?,
-                        headers: ctx.response_headers,
-                    }));
-                })
-            })),
+            RouteEntry::Route(RouteHandler::new(Controller::handle_root_render)),
         )?;
 
         // ### Database Routes ###
@@ -174,17 +135,17 @@ impl Routes {
                     let collection = database.collections.select_all_any(collection_name).await?;
 
                     // Get the size of the collection if specified in the query. Acts like boolean flag.
-                    if let Some(size) = query.get("size") {
-                        if let Ok(_) = size.parse::<usize>() {
-                            // If the size is specified, we can return the collection data with the size limit.
-                            return Ok(RouteResult::Route(RouteHandlerResult {
-                                headers: response_headers,
-                                body: serde_json::to_string(&json!({
-                                    "collection": collection_name,
-                                    "size": collection.len().to_string(),
-                                }))?,
-                            }));
-                        }
+                    // NOTE: We could also implement it to return the `size` of the entries of the collection.
+                    if let Some(_) = query.get("size") {
+                        // if let Ok(_) = size.parse::<usize>() {
+                        // If the size is specified, we can return the collection data with the size limit.
+                        return Ok(RouteResult::Route(RouteHandlerResult {
+                            headers: response_headers,
+                            body: serde_json::to_string(&json!({
+                                "collection": collection_name,
+                                "size": collection.len().to_string(),
+                            }))?,
+                        }));
                     }
 
                     let body = serde_json::to_string(&collection)?;
@@ -197,6 +158,21 @@ impl Routes {
             })),
         )?;
 
+        self.insert(
+            RouteTableKey::new("/api/getSessionUser", Some(HttpRequestMethod::GET)),
+            RouteEntry::Route(RouteHandler::new(Controller::get_session_user)),
+        )?;
+
+        self.insert(
+            RouteTableKey::new("/api/signOutUser", Some(HttpRequestMethod::POST)),
+            RouteEntry::Route(RouteHandler::new(Controller::sign_out_user)),
+        )?;
+
+        self.insert(
+            RouteTableKey::new("/api/signInUser", Some(HttpRequestMethod::POST)),
+            RouteEntry::Route(RouteHandler::new(Controller::sign_in_user)),
+        )?;
+
         // We should allow GET to the databases but make sure if they not require authentication.
         // If they require we will just check for the, I imagine this the same as with the static routes,
         // although using predefined methods implemented on the Database would be better, as they could allow for
@@ -206,21 +182,40 @@ impl Routes {
             RouteTableKey::new("/database/tasks.json", Some(HttpRequestMethod::GET)),
             RouteEntry::Route(RouteHandler::new(|ctx: RouteContext| {
                 Box::pin(async move {
-                    let RouteContext {
-                        request,
-                        mut response_headers,
-                        key,
-                        ..
-                    } = ctx;
-
                     // If we would want to lay some abstraction on the database we would have "select_all" from the database
                     // and then parse it to the JSON format. Currently we just read the file from the disk.
-                    let body = request
-                        .read_requested_resource(&mut response_headers, key.get_prefixed_path())?;
+
+                    // let body = ctx
+                    //     .request
+                    //     .read_requested_resource(&mut response_headers, key.get_prefixed_path())?;
+
+                    let user = AppController::get_session_user(&ctx).await?;
+
+                    let database = ctx.get_database()?;
+                    let mut database = database.lock().await;
+
+                    let collection = &database
+                        .collections
+                        .select_all::<DatabaseTask, ClientTask>("tasks")
+                        .await?;
+
+                    let collection = collection
+                        .iter()
+                        .filter_map(|(_, entry)| {
+                            let user_id = entry.get_user_id();
+                            if user_id == user.get_id() {
+                                Some((entry.get_id(), entry))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<HashMap<String, &DatabaseTask>>();
+
+                    let body = serde_json::to_string(&collection)?;
 
                     return Ok(RouteResult::Route(RouteHandlerResult {
-                        headers: response_headers,
                         body,
+                        headers: ctx.response_headers,
                     }));
                 })
             })),
@@ -233,23 +228,19 @@ impl Routes {
                     let database = ctx.get_database()?;
                     let mut database = database.lock().await;
 
-                    let RouteContext {
-                        response_headers, ..
-                    } = ctx;
-
                     // If we would want to lay some abstraction on the database we would have "select_all" from the database
                     // and then parse it to the JSON format. Currently we just read the file from the disk.
                     // let body = request
                     // .read_requested_resource(&mut response_headers, key.get_prefixed_path())?;
 
-                    let body = database
+                    let collection = database
                         .collections
                         .select_all::<DatabaseUser, ClientUser>("users")
                         .await?;
 
                     return Ok(RouteResult::Route(RouteHandlerResult {
-                        headers: response_headers,
-                        body: serde_json::to_string(&body)?,
+                        headers: ctx.response_headers,
+                        body: serde_json::to_string(&collection)?,
                     }));
                 })
             })),
@@ -264,30 +255,24 @@ impl Routes {
             RouteTableKey::new("/database/tasks.json", Some(HttpRequestMethod::POST)),
             RouteEntry::Route(RouteHandler::new(|ctx| {
                 Box::pin(async move {
-                    // First borrow immutably
                     let database = ctx.get_database()?;
 
                     // Then destructure for owned values.
-                    let RouteContext {
-                        request,
-                        response_headers,
-                        ..
-                    } = ctx;
+                    // let RouteContext { request, .. } = ctx;
 
-                    let mut database = database.lock().await;
+                    if let Some(body) = ctx.request.get_body() {
+                        let mut database = database.lock().await;
 
-                    if let Some(body) = request.get_body() {
                         let entry = database
                             .collections
                             .insert::<DatabaseTask, ClientTask>(&body.clone())
                             .await?;
 
                         return Ok(RouteResult::Route(RouteHandlerResult {
-                            headers: response_headers,
+                            headers: ctx.response_headers,
                             body: DatabaseEntryTrait::serialize(&entry)?,
                         }));
                     }
-
                     return Err(Box::<dyn Error + Send + Sync>::from("Task cannot be empty"));
                 })
             })),
@@ -313,7 +298,7 @@ impl Routes {
                             ..Default::default()
                         })?;
 
-                        database.collections.delete("tasks", id).await?;
+                        database.collections.delete("tasks", &id).await?;
 
                         return Ok(RouteResult::Route(RouteHandlerResult {
                             headers: response_headers,
@@ -331,59 +316,89 @@ impl Routes {
             // api/database/users/get?
             // ...
             RouteTableKey::new("/database/users.json", Some(HttpRequestMethod::POST)),
-            // RouteTableKey::new("database/users.json", Some(HttpRequestMethod::POST)),
-            RouteEntry::Route(RouteHandler::new(|ctx| {
+            RouteEntry::Route(RouteHandler::new(|mut ctx| {
                 return Box::pin(async move {
                     let database = ctx.get_database()?;
 
-                    let RouteContext {
-                        request,
-                        mut response_headers,
-                        ..
-                    } = ctx;
+                    // That is kind off stupid and not even necessary in the first place, but we wan't to disallow calls to that route if
+                    // session for the user already exists and is valid.
+                    if let Ok(cookies) = ctx.request.get_cookies() {
+                        if let Some(session_id) = cookies.get("sessionId") {
+                            let mut database = database.lock().await;
 
-                    let mut database = database.lock().await;
+                            let session = database
+                                .collections
+                                .select::<DatabaseSession, ClientSession>("sessions", session_id)
+                                .await
+                                .map_err(|e| HttpRequestError {
+                                    status_code: 404,
+                                    status_text: "Not Found".into(),
+                                    message: Some(format!(
+                                        "Session not found for sessionId: {}",
+                                        session_id
+                                    )),
+                                    internals: Some(Box::<dyn Error + Send + Sync>::from(
+                                        e.to_string(),
+                                    )),
+                                    content_type: Some("application/json".into()),
+                                    ..Default::default()
+                                })?;
 
-                    if let Some(body) = request.get_body() {
-                        // NOTE: Why it does not work, and what have to be done to make it work?
-                        // 1. The body is not of DatabaseUser type after parsing. Data comes from client which does not have full information about the type.
-                        //  -> The server has to define those fields.
-                        // 2. We have to parse the body to the DatabaseUser first parsing to the type which client sends,
-                        //  -> then we would generate not client defined fields, instantiate the DatabaseUser, serialize it to bytes and insert it into the database.
-                        // 3. Then we would have solve the problem of cookie headers, as each user_id should map to unique cookie header, as we need the identification
-                        //  -> of the user between requests. That would require us to create another collection of `sessions` that would resolve the cookie to the user_id
-                        //  -> (cookie can be thought of as session_id).
-                        // 4. Additionally we need to make sure the tasks can be inserted only if authenticated, meaning cookie exists and is valid.
-                        // 5. User creation should not be buffered in the WAL file and resolved abruptly.
+                            // If the session exists, and is not expired, we won't create a new one, so error.
+                            if session.expires > std::time::SystemTime::now() {
+                                database.collections.delete("sessions", session_id).await?;
 
-                        let entry = database
+                                return Err(Box::<dyn Error + Send + Sync>::from(
+                                    HttpRequestError {
+                                        status_code: 400,
+                                        status_text: "Bad Request".into(),
+                                        message: Some(format!(
+                                            "Session is already active for sessionId: {}",
+                                            session_id
+                                        )),
+                                        content_type: Some("application/json".into()),
+                                        internals: None,
+                                        ..Default::default()
+                                    },
+                                ));
+                            }
+
+                            // Since session is expired, we cannot save it like that, that is the stale session, we have to create a new one.
+                            // session = Some(session);
+                        }
+                    }
+
+                    if let Some(body) = ctx.request.get_body() {
+                        let mut database = database.lock().await;
+
+                        let user = database
                             .collections
                             .insert::<DatabaseUser, ClientUser>(&body.clone())
-                            .await?;
+                            .await
+                            .map_err(|e| HttpRequestError {
+                                status_code: 400,
+                                status_text: "Bad Request".into(),
+                                message: Some(format!("Failed to create user: {}", e)),
+                                internals: Some(Box::<dyn Error + Send + Sync>::from(
+                                    e.to_string(),
+                                )),
+                                content_type: Some("application/json".into()),
+                                ..Default::default()
+                            })?;
 
-                        // We could define an endpoint for the session creation, but we can also just create it here.
-                        // That is kind of ambiguous, but the API key is of id in the session, and the id is of the userId
-                        let session = ClientSession::new(entry.get_api_key(), entry.get_id());
+                        // Drop the lock before creating a session.
+                        drop(database);
 
-                        database
-                            .collections
-                            .insert::<DatabaseSession, ClientSession>(&serde_json::to_vec(
-                                &session,
-                            )?)
-                            .await?;
+                        AppController::create_user_session(&mut ctx, &user).await?;
+
+                        let database = ctx.get_database()?;
+                        let mut database = database.lock().await;
 
                         database.collections.flush().await?;
 
-                        // Generate a session entry.
-
-                        response_headers.add(
-                            Cow::from("Set-Cookie"),
-                            format!("sessionId={}", entry.get_api_key()).into(),
-                        );
-
                         return Ok(RouteResult::Route(RouteHandlerResult {
-                            headers: response_headers,
-                            body: entry.serialize()?,
+                            headers: ctx.response_headers,
+                            body: user.serialize()?,
                         }));
                     } else {
                         return Err(Box::<dyn Error + Send + Sync>::from("Task cannot be empty"));

@@ -5,10 +5,10 @@ use std::{
 };
 
 use crate::{
-    http::HttpRequestError,
+    http::HttpRequestMethod,
     router::{
-        routes::Routes, RouteContext, RouteEntry, RouteHandler, RouteHandlerFuture, RouteResult,
-        RouteTable, RouteTableKey,
+        RouteContext, RouteEntry, RouteHandler, RouteResult, RouteTable, RouteTableKey,
+        controller::MiddlewareController, routes::Routes,
     },
 };
 
@@ -228,37 +228,6 @@ impl Middleware {
         PathBuf::from(format!("{}{}/", PATH_SEGMENT, path.display()))
     }
 
-    /// NOTE: This is useless, as the program would not work if database is configured but not initialized,
-    /// it is handled in the `Config::new`.
-    ///
-    /// Validates the database "connection" for path that requested it and utilizes it.
-    /// It won't run on every single path, but only on the paths that start with the `:database/` segment.
-    pub fn validate_database(mut ctx: RouteContext) -> RouteHandlerFuture {
-        Box::pin(async move {
-            // Here we could initialize the database connection or any other resource
-            // that we need for the middleware.
-
-            let res = ctx.get_response_headers();
-
-            res.add(
-                "X-Database-Validation".into(),
-                "Middleware executed for database validation".into(),
-            );
-
-            ctx.get_database().map_err(|e| {
-                Box::<dyn Error + Send + Sync>::from(HttpRequestError {
-                    message: Some(
-                        format!("Database not found for: {}", ctx.key.path.display()).to_string(),
-                    ),
-                    internals: Some(Box::<dyn Error + Send + Sync>::from(e)),
-                    ..Default::default()
-                })
-            })?;
-
-            return Ok(RouteResult::Middleware(MiddlewareHandlerResult { ctx }));
-        })
-    }
-
     pub fn insert(
         &mut self,
         key: RouteTableKey,
@@ -318,7 +287,9 @@ impl Middleware {
 
         self.insert(
             RouteTableKey::new(":database/", None),
-            RouteEntry::Middleware(Some(RouteHandler::new(Middleware::validate_database))),
+            RouteEntry::Middleware(Some(RouteHandler::new(
+                MiddlewareController::validate_database,
+            ))),
         )?;
 
         self.insert(
@@ -341,6 +312,13 @@ impl Middleware {
                     Ok(RouteResult::Middleware(MiddlewareHandlerResult { ctx }))
                 })
             }))),
+        )?;
+
+        self.insert(
+            RouteTableKey::new("/database/tasks.json", Some(HttpRequestMethod::POST)),
+            RouteEntry::Middleware(Some(RouteHandler::new(
+                MiddlewareController::preprocess_create_task,
+            ))),
         )?;
 
         Ok(())

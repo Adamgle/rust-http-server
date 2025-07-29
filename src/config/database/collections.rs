@@ -1,6 +1,6 @@
+use crate::config::Config;
 use crate::config::config_file::DatabaseConfigEntry;
 use crate::config::database::{DatabaseCommand, DatabaseWAL};
-use crate::config::Config;
 use crate::http::HttpRequestError;
 use crate::prelude::*;
 
@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::Debug;
 use std::path::PathBuf;
+use std::time::SystemTimeError;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 // / We are using Strings as the keys to store uuids.
@@ -128,21 +129,24 @@ impl DatabaseCollections {
         let WAL = instance.lock().await;
 
         let commands = DatabaseWAL::parse_WAL(WAL.get_handler(), WAL.get_size()).await?;
-        
+
         drop(WAL);
 
         self.parse_collections().await?;
 
         for command in commands {
-            match command {
-            DatabaseCommand::Insert { entry } => self._insert(entry).await,
-            DatabaseCommand::Update { entry, id } => self._update(entry, id).await,
-            DatabaseCommand::Delete {
-                collection_name,
-                id,
-            } => self._delete(&collection_name, id).await,
-            _ => Err("Unsupported command.")?,
-            }?;
+            let c = command.clone();
+            if let Err(err) = match command {
+                DatabaseCommand::Insert { entry } => self._insert(entry).await,
+                DatabaseCommand::Update { entry, id } => self._update(entry, id).await,
+                DatabaseCommand::Delete {
+                    collection_name,
+                    id,
+                } => self._delete(&collection_name, id).await,
+                _ => Err("Unsupported command.")?,
+            } {
+                eprintln!("Failed to execute command: {:?}, error: {}", c, err);
+            };
         }
 
         self.save_commands_execution().await?;
@@ -250,12 +254,12 @@ impl DatabaseCollections {
     pub async fn delete(
         &mut self,
         collection_name: &str,
-        id: String,
+        id: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.execute(DatabaseCommand::Delete {
             // entry: Box::new(e.clone()),
             collection_name: collection_name.to_string(),
-            id,
+            id: id.to_string(),
         })
         .await?;
 
@@ -265,7 +269,7 @@ impl DatabaseCollections {
     pub async fn select<T, U>(
         &mut self,
         collection_name: &str,
-        id: String,
+        id: &str,
     ) -> Result<T, Box<dyn Error + Send + Sync>>
     where
         T: DatabaseEntryTrait + serde::Serialize + Clone + 'static,
@@ -289,7 +293,7 @@ impl DatabaseCollections {
         let collection = self.get(collection_name).await?;
         let collection = collection.lock().await;
 
-        let Some(entry) = collection.data.get(&id) else {
+        let Some(entry) = collection.data.get(id) else {
             return Err(format!("Entry with the provided id: {id} does not exists.").into());
         };
 
@@ -298,6 +302,9 @@ impl DatabaseCollections {
         })?);
     }
 
+    /// Select the whole collections,
+    /// It would be nice to defined something like `criteria` of `HashMap<_, _>`, but since it returns generic T, we cannot easily access fields of
+    /// the T that it will resolve to in the runtime, so we have to delegate that filtering of collection to the caller.
     pub async fn select_all<T, U>(
         &mut self,
         collection_name: &str,
@@ -642,11 +649,26 @@ pub struct DatabaseTask {
     /// Primary key.
     id: String,
     value: String,
+    user_id: String,
+}
+
+impl DatabaseTask {
+    pub fn get_user_id(&self) -> String {
+        self.user_id.clone()
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
 pub struct ClientTask {
     value: String,
+    user_id: String,
+}
+
+impl ClientTask {
+    /// Creates a new task with the given value and user id.
+    pub fn new(value: String, user_id: String) -> Self {
+        Self { value, user_id }
+    }
 }
 
 #[typetag::serde(name = "Tasks")]
@@ -670,6 +692,7 @@ impl From<ClientTask> for DatabaseTask {
             id: uuid::Uuid::new_v4().to_string(),
             // Average expression => \(~_~)/
             value: value.value,
+            user_id: value.user_id,
         }
     }
 }
@@ -679,9 +702,9 @@ pub struct DatabaseUser {
     /// Primary key.
     id: String,
     /// Arbitrary String, we won't even validate it.
-    email: String,
+    pub email: String,
     /// We could hash the password before storing it in the database, but for simplicity we will store it as plain text.
-    password: String,
+    pub password: String,
     /// User can utilize this API key to access the API. This should be created on user registration.
     API_key: String,
 }
@@ -691,9 +714,9 @@ pub struct DatabaseUser {
 /// We need to do some server logic on the type, so we cannot use the `DatabaseUser` type directly as those fields are not client defined.
 pub struct ClientUser {
     /// Arbitrary String, we won't even validate it.
-    email: String,
+    pub email: String,
     /// We could hash the password before storing it in the database, but for simplicity we will store it as plain text.
-    password: String,
+    pub password: String,
 }
 
 #[typetag::serde(name = "Users")]
@@ -736,22 +759,28 @@ pub struct DatabaseSession {
     /// User id comes form the client and is used to identify the user session.
     user_id: String,
     /// Created at is the time when the session was created.
-    created_at: std::time::SystemTime,
+    // pub created_at: std::time::SystemTime,
+    pub expires: std::time::SystemTime,
 }
 
-// impl DatabaseSession {
+impl DatabaseSession {
+    pub fn duration(&self) -> Result<u64, SystemTimeError> {
+        // session.expires is A SystemTime::now + 1 year, so duration since now would be just one 1 year
 
-//     pub fn new(user_id: String) -> Self {
-//         Self {
-//             user_id,
-//             created_at: std::time::SystemTime::now(),
-//         }
-//     }
-// }
+        self.expires
+            .duration_since(std::time::SystemTime::now())
+            .map(|d| d.as_secs())
+    }
+
+    pub fn get_user_id(&self) -> String {
+        self.user_id.clone()
+    }
+}
 
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
 pub struct ClientSession {
     // Id there is of API token to allow quick lookup based on information that is already cached in the browser.
+    // That is the API_key of the user.
     id: String,
     /// User id comes form the client and is used to identify the user session.
     user_id: String,
@@ -787,9 +816,11 @@ impl DatabaseEntryTrait for DatabaseSession {
 impl From<ClientSession> for DatabaseSession {
     fn from(value: ClientSession) -> Self {
         Self {
-            created_at: std::time::SystemTime::now(),
             id: value.id,
             user_id: value.user_id,
+            // TODO: That could be configurable, but for now we will just set it to 1 year constant.
+            expires: std::time::SystemTime::now()
+                + std::time::Duration::from_secs(60 * 60 * 24 * 365), // 1 year,
         }
     }
 }

@@ -359,6 +359,8 @@ impl HttpRequestError {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // NOTE: This page could be dynamically set, but this function is sketchy and not very useful and flexible, so maybe we will refactor in the future.
 
+        dbg!(&err);
+        
         let mut writer = writer.lock().await;
         let config = config.lock().await;
 

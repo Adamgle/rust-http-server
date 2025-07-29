@@ -1,0 +1,389 @@
+use std::{borrow::Cow, error::Error};
+
+use crate::{
+    config::database::{
+        DatabaseEntryTrait, DatabaseUser,
+        collections::{ClientSession, ClientTask, ClientUser, DatabaseSession},
+    },
+    http::{HttpHeaders, HttpRequestError},
+    router::{
+        RouteContext, RouteHandlerFuture, RouteHandlerResult, RouteResult,
+        middleware::MiddlewareHandlerResult,
+    },
+};
+
+/// Responsible for defining routes handlers for the application.
+pub struct Controller;
+
+/// Defines abstraction over Database operations that sometimes could be used as a logic used in the Controller routes handlers.
+///
+/// NOTE: We are separating those as they are not route handlers since we are not registering them in the router.
+/// Also they could take arbitrary signatures and return types, so we cannot treat them as routes handlers and we do not want to
+/// pollute the controller with non route handler definitions.
+pub struct AppController;
+
+pub struct MiddlewareController;
+
+impl Controller {
+    /// A static route handler that reads the requested resource from the `/public` directory.
+    pub fn static_route_handler(
+        // Pin<Box<dyn Future<Output = RouteResult<'ctx>> + Send + 'ctx>>;
+        ctx: RouteContext,
+    ) -> RouteHandlerFuture {
+        Box::pin(async move {
+            // Extract what we need before any mutable borrows
+            let RouteContext {
+                request,
+                mut response_headers,
+                key,
+                ..
+            } = ctx;
+
+            let body =
+                request.read_requested_resource(&mut response_headers, &key.get_prefixed_path())?;
+
+            return Ok(RouteResult::Route(RouteHandlerResult {
+                headers: response_headers,
+                body,
+            }));
+        })
+    }
+
+    pub fn handle_root_render(mut ctx: RouteContext) -> RouteHandlerFuture {
+        Box::pin(async move {
+            // We want to flush the database on the load of that route.
+
+            let database = ctx.get_database()?;
+            let mut database = database.lock().await;
+
+            database.collections.flush().await?;
+
+            return Ok(RouteResult::Route(RouteHandlerResult {
+                body: ctx.request.read_requested_resource(
+                    &mut ctx.response_headers,
+                    ctx.key.get_prefixed_path(),
+                )?,
+                headers: ctx.response_headers,
+            }));
+        })
+    }
+
+    /// Wrapper around the `AppController::get_session_user` method that will be used to get the session user from the route handler.
+    ///
+    /// Register a route handler that will be used to get the session user. Will be called by the client to get the user information based on the sessionId cookie.
+    pub fn get_session_user(ctx: RouteContext) -> RouteHandlerFuture {
+        Box::pin(async move {
+            let body = serde_json::to_string(&AppController::get_session_user(&ctx).await?)?;
+
+            return Ok(RouteResult::Route(RouteHandlerResult {
+                body,
+                headers: ctx.response_headers,
+            }));
+        })
+    }
+
+    pub fn sign_out_user(ctx: RouteContext) -> RouteHandlerFuture {
+        Box::pin(async move {
+            // We will just delete the session from the database, so the user will be logged out.
+            let database = ctx.get_database()?;
+
+            let session = AppController::validate_user_session(&ctx).await?;
+
+            let mut database = database.lock().await;
+
+            // TODO: Sometimes the session is not deleted and it keep persisting in the database.
+
+            database
+                .collections
+                .delete("sessions", &session.get_id())
+                .await?;
+
+            // Explicitly flush the database WAL for immediate release of WAL commands.
+            database.collections.flush().await?;
+
+            // Clear the sessionId cookie
+            // ctx.request.clear_cookie("sessionId");
+
+            return Ok(RouteResult::Route(RouteHandlerResult {
+                body: "User signed out successfully".into(),
+                headers: ctx.response_headers,
+            }));
+        })
+    }
+
+    pub fn sign_in_user(mut ctx: RouteContext) -> RouteHandlerFuture {
+        Box::pin(async move {
+            // We will just delete the session from the database, so the user will be logged out.
+            let database = ctx.get_database()?;
+
+            let mut database = database.lock().await;
+
+            // As we do not have a way of selecting entry based on criteria, we would have to select_all and find accordingly
+            // Technically we would be doing that in the select either way. The reason we cannot do that is we would have to now what
+            // type the entry is but we do not know that until runtime.
+
+            let data = database
+                .collections
+                .select_all::<DatabaseUser, ClientUser>("users")
+                .await?;
+
+            let user = match ctx.request.get_body() {
+                Some(body) => {
+                    let body = serde_json::from_slice::<ClientUser>(&body)?;
+
+                    match data.into_iter().find(|(_, user)| {
+                        user.email == body.email && user.password == body.password
+                    }) {
+                        Some((_, user)) => {
+                            // We have to drop the database lock before creating a session, as it also locks the database.
+                            drop(database);
+
+                            AppController::create_user_session(&mut ctx, &user).await?
+                        }
+                        None => {
+                            return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                                status_code: 401,
+                                status_text: "Unauthorized".into(),
+                                message: Some("Invalid email or password".to_string()),
+                                content_type: Some("application/json".into()),
+                                internals: None,
+                            }));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                        status_code: 400,
+                        status_text: "Bad Request".into(),
+                        message: Some("Request body is missing".to_string()),
+                        content_type: Some("application/json".into()),
+                        internals: None,
+                    }));
+                }
+            };
+
+            return Ok(RouteResult::Route(RouteHandlerResult {
+                body: user.serialize()?,
+                headers: ctx.response_headers,
+            }));
+        })
+    }
+}
+
+impl MiddlewareController {
+    /// NOTE: This is useless, as the program would not work if database is configured but not initialized,
+    /// it is handled in the `Config::new`.
+    ///
+    /// Validates the database "connection" for path that requested it and utilizes it.
+    /// It won't run on every single path, but only on the paths that start with the `:database/` segment.
+    pub fn validate_database(mut ctx: RouteContext) -> RouteHandlerFuture {
+        Box::pin(async move {
+            // Here we could initialize the database connection or any other resource
+            // that we need for the middleware.
+
+            let res = ctx.get_response_headers();
+
+            res.add(
+                "X-Database-Validation".into(),
+                "Middleware executed for database validation".into(),
+            );
+
+            ctx.get_database().map_err(|e| {
+                Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                    message: Some(
+                        format!("Database not found for: {}", ctx.key.path.display()).to_string(),
+                    ),
+                    internals: Some(Box::<dyn Error + Send + Sync>::from(e)),
+                    ..Default::default()
+                })
+            })?;
+
+            return Ok(RouteResult::Middleware(MiddlewareHandlerResult { ctx }));
+        })
+    }
+
+    /// NOTE: That is unnecessary, as we could also include that cookie from the client directly and just delegate the responsibility
+    /// to the client for including that in the request. That would save as from the need to pre-process the request body and keep the types consistent.
+    /// Treat it more like a over engineered solution for the sake of example.
+    ///
+    /// UPDATE: Actually that is not so simple, we would have to expose API endpoint that would resolve sessionId to userId, or just the user object.
+    /// Also we could just keep that id in the cookies or local storage.
+    ///
+    /// We will pre-process the request body to also include the userId derived from the sessionId cookie.
+    pub fn preprocess_create_task(mut ctx: RouteContext) -> RouteHandlerFuture {
+        Box::pin(async move {
+            println!("Preprocessing request body to include userId...");
+
+            let user = AppController::get_session_user(&ctx).await?;
+
+            let body = ctx.request.get_body_mut().ok_or_else(|| {
+                Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                    status_code: 400,
+                    status_text: "Bad Request".into(),
+                    message: Some("Request body is missing".to_string()),
+                    internals: None,
+                    ..Default::default()
+                })
+            })?;
+
+            #[derive(serde::Deserialize, serde::Serialize)]
+            struct Body {
+                value: String,
+            }
+
+            let task = ClientTask::new(
+                serde_json::from_slice::<Body>(body)
+                    .map_err(|e| {
+                        Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                            status_code: 400,
+                            status_text: "Bad Request".into(),
+                            message: Some(format!("Invalid request body: {}", e)),
+                            internals: None,
+                            ..Default::default()
+                        })
+                    })?
+                    .value,
+                user.get_id(),
+            );
+
+            // Mutate the body of the request object to include the userId
+            *body = serde_json::to_vec(&task).map_err(|e| {
+                Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                    status_code: 500,
+                    status_text: "Internal Server Error".into(),
+                    message: Some(format!("Failed to serialize task: {}", e)),
+                    internals: None,
+                    ..Default::default()
+                })
+            })?;
+
+            // Data from the client comes in the format of { value: String }, we need to parse it to that type
+            // and then add the userId to it.
+
+            // Give back the context with the mutated request body.
+
+            return Ok(RouteResult::Middleware(MiddlewareHandlerResult { ctx }));
+        })
+    }
+}
+
+impl AppController {
+    /// Returns the user object based on the sessionId cookie, if session happens to be valid.
+    pub async fn get_session_user(
+        ctx: &RouteContext<'_>,
+    ) -> Result<DatabaseUser, Box<dyn Error + Send + Sync>> {
+        let database = ctx.get_database()?;
+
+        let session = Self::validate_user_session(ctx).await?;
+
+        let mut database = database.lock().await;
+
+        println!("Validating session for sessionId: {}", session.get_id());
+
+        let user = database
+            .collections
+            .select::<DatabaseUser, ClientUser>("users", &session.get_user_id())
+            .await?;
+
+        return Ok(user);
+    }
+
+    /// Validates the session by checking if the session exists in the database and is not expired and returns the session entry if valid.
+    ///
+    /// If the session is expired, it will delete the session from the database and return an error.
+    ///
+    /// NOTE: Maybe that is a good idea to run that on startup, so we can erased expired sessions.
+    /// But then how would we do that on the client browser as it still stores that cookie?
+    pub async fn validate_user_session(
+        ctx: &RouteContext<'_>,
+    ) -> Result<DatabaseSession, Box<dyn Error + Send + Sync>> {
+        let database = ctx.get_database()?;
+
+        let RouteContext { request, .. } = ctx;
+
+        let mut database = database.lock().await;
+        let cookies = request.get_cookies()?;
+
+        if let Some(session_id) = cookies.get("sessionId") {
+            let session = database
+                .collections
+                .select::<DatabaseSession, ClientSession>("sessions", session_id)
+                .await
+                .map_err(|e| {
+                    Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                        status_code: 404,
+                        status_text: "Not Found".into(),
+                        message: Some(format!("User not found for session: {}", session_id)),
+                        internals: Some(Box::<dyn Error + Send + Sync>::from(e.to_string())),
+                        content_type: Some("application/json".into()),
+                        ..Default::default()
+                    })
+                })?;
+
+            if session.expires < std::time::SystemTime::now() {
+                database.collections.delete("sessions", session_id).await?;
+
+                return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                    status_code: 401,
+                    status_text: "Unauthorized".into(),
+                    message: "Session expired".to_string().into(),
+                    internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                        "Session expired for sessionId: {}",
+                        session_id
+                    ))),
+                    ..Default::default()
+                }));
+            }
+
+            return Ok(session);
+        }
+
+        return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+            status_code: 401,
+            status_text: "Unauthorized".into(),
+            message: "Session not found or invalid".to_string().into(),
+            internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
+                "sessionId not found in cookies map: {:?}",
+                cookies
+            ))),
+            ..Default::default()
+        }));
+    }
+
+    /// Registers the session for the user in the database and sets the sessionId cookie in the response headers.
+    pub async fn create_user_session(
+        ctx: &mut RouteContext<'_>,
+        user: &DatabaseUser,
+    ) -> Result<DatabaseSession, Box<dyn Error + Send + Sync>> {
+        let database = ctx.get_database()?;
+
+        let mut database = database.lock().await;
+
+        let session = ClientSession::new(user.get_api_key(), user.get_id());
+
+        // Generate a session entry. That would internally turn the ClientSession into DatabaseSession.
+        let session = database
+            .collections
+            .insert::<DatabaseSession, ClientSession>(&serde_json::to_vec(&session)?)
+            .await?;
+
+        println!(
+            "Session for user: {} created with id: {}",
+            user.get_id(),
+            session.get_id()
+        );
+
+        // Mutate via mutable reference, that is not moved to the function.
+        ctx.response_headers.add(
+            Cow::from("Set-Cookie"),
+            format!(
+                "sessionId={}; Path=/; Max-Age={}",
+                session.get_id(),
+                session.duration()?
+            )
+            .into(),
+        );
+
+        return Ok(session);
+    }
+}

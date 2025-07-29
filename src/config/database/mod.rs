@@ -57,8 +57,8 @@ use crate::prelude::*;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::Debug;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::{
     fs::File,
@@ -256,7 +256,7 @@ impl DatabaseWAL {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// IO buffered commands execute on the database, on system shutdown or 100 commands in the buffer (memory or WAL file I think).
 pub enum DatabaseCommand {
     /// Insert one entry to given DatabaseEntry with a new entry

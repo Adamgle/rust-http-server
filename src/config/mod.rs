@@ -391,18 +391,25 @@ impl Config {
                         Ok(default_path)
                     })?;
 
-                std::env::set_var("SERVER_ROOT", &root);
+                // That is safe cause we are not running multiple threads at the moment on Config initialization.
+                unsafe {
+                    std::env::set_var("SERVER_ROOT", &root);
+                }
+
                 root
             }
         };
 
-        // In all the above did not throw and error, we will set the environment variables
+        // If all the above did not throw and error, we will set the environment variables
         // Set the SERVER_ROOT, SERVER_PUBLIC, SERVER_PORT environment variables
         // refer as std::env::var("SERVER_ROOT") to get the value
         // technically we could check if not they exists, thought that is unnecessary
 
-        std::env::set_var("SERVER_PUBLIC", &server_root.join("public"));
-        std::env::set_var("SERVER_PORT", socket_address.port().to_string());
+        // That is safe cause we are not running multiple threads at the moment on Config initialization.
+        unsafe {
+            std::env::set_var("SERVER_PUBLIC", &server_root.join("public"));
+            std::env::set_var("SERVER_PORT", socket_address.port().to_string());
+        }
 
         // This has to be done AFTER env's are set, as it may rely on them
         let config_file = config_file::ServerConfigFile::get_config()?;

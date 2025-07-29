@@ -23,8 +23,8 @@ pub mod tcp_handlers {
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::io::AsyncWriteExt;
-    use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
     use tokio::net::TcpListener;
+    use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
     use tokio::sync::Mutex;
     use tokio::time::timeout;
 
@@ -198,7 +198,7 @@ pub mod tcp_handlers {
         // To resolve the double mutable reference to headers we will move the ownership of headers
         // that is cheap operation.
         let ctx = RouteContext::new(
-            &request,
+            request,
             headers,
             &route_key,
             config.app.get_database(),

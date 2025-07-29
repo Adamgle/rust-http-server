@@ -159,3 +159,17 @@ button[type="submit"]:active {
     background-color: #f0f0f0;
     border-radius: 0.5rem;
 }
+
+.user-info {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 2rem;
+
+}
+
+#login-form {
+    display: flex;
+    flex-direction: row;
+    gap: .5rem;
+}

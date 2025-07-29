@@ -1,3 +1,4 @@
+mod controller;
 mod middleware;
 mod routes;
 
@@ -14,7 +15,7 @@ use std::{
 use tokio::sync::Mutex;
 
 use crate::{
-    config::{config_file::DatabaseConfigEntry, database::Database, Config, SpecialDirectories},
+    config::{Config, SpecialDirectories, config_file::DatabaseConfigEntry, database::Database},
     http::{HttpRequestError, HttpRequestHeaders, HttpRequestMethod, HttpResponseHeaders},
     http_request::HttpRequest,
     router::{
@@ -235,7 +236,7 @@ impl std::fmt::Debug for RouteTableKey {
 
 #[derive(Debug)]
 pub struct RouteContext<'ctx> {
-    pub request: &'ctx HttpRequest<'ctx>,
+    pub request: HttpRequest<'ctx>,
     pub response_headers: HttpResponseHeaders<'ctx>,
     pub key: &'ctx RouteTableKey,
     pub database: Option<Arc<Mutex<Database>>>,
@@ -246,7 +247,7 @@ pub struct RouteContext<'ctx> {
 
 impl<'ctx> RouteContext<'ctx> {
     pub fn new(
-        request: &'ctx HttpRequest<'ctx>,
+        request: HttpRequest<'ctx>,
         response_headers: HttpResponseHeaders<'ctx>,
         key: &'ctx RouteTableKey,
         database: Option<Arc<Mutex<Database>>>,
@@ -261,10 +262,10 @@ impl<'ctx> RouteContext<'ctx> {
         }
     }
 
-    pub fn get_request(&self) -> &HttpRequest<'ctx> {
-        // Returns the request of the route handler context.
-        self.request
-    }
+    // pub fn get_request(&self) -> HttpRequest<'ctx> {
+    //     // Returns the request of the route handler context.
+    //     self.request
+    // }
 
     pub fn get_response_headers(&mut self) -> &mut HttpResponseHeaders<'ctx> {
         // Returns the response headers of the route handler context.
@@ -435,7 +436,9 @@ impl Router {
         {
             println!("Running middleware segment for path: {:?}", ctx.get_key());
 
-            let result = handler.callback(ctx).await?;
+            let result = handler.callback(ctx).await.inspect_err(|e| {
+                eprintln!("Error in middleware segment handler: {:?}", e);
+            })?;
 
             match result {
                 RouteResult::Middleware(MiddlewareHandlerResult { ctx: context }) => {
@@ -450,7 +453,7 @@ impl Router {
                             "Middleware segment handler should evaluate to RouteResult::Middleware",
                         )),
                         ..Default::default()
-                    }))
+                    }));
                 } // _ => unreachable!("Middleware segment handler should evaluate to RouteResult::Middleware"),
             }
 
@@ -462,7 +465,9 @@ impl Router {
             self.middleware.get_routes().get_routes().get(ctx.get_key())
         {
             println!("Running middleware for path: {:?}", ctx.get_key());
-            let result = middleware.callback(ctx).await?;
+            let result = middleware.callback(ctx).await.inspect_err(|e| {
+                eprintln!("Error in middleware handler: {:?}", e);
+            })?;
 
             match result {
                 RouteResult::Middleware(MiddlewareHandlerResult { ctx: context }) => ctx = context,
@@ -473,7 +478,7 @@ impl Router {
                             "Middleware handler should evaluate to RouteResult::Middleware",
                         )),
                         ..Default::default()
-                    }))
+                    }));
                 } // _ => unreachable!("Middleware handler should evaluate to RouteResult::Middleware"),
             }
         }
@@ -494,7 +499,7 @@ impl Router {
                             "Route handler should evaluate to RouteResult::Route",
                         )),
                         ..Default::default()
-                    }))
+                    }));
                 } // _ => unreachable!("Route handler should evaluate to RouteResult::Route"),
             }
         }

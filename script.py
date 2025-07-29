@@ -25,46 +25,6 @@ DEFAULT_PORT = 5000
 NOTE_FILE_PATH = "./public/note.txt"
 
 
-# class HttpHeaders:
-#     def __init__(self, headers: dict[str, str]):
-#         self.headers = headers
-
-#     def __getitem__(self, key: str) -> str:
-#         return self.headers.get(key, "")
-
-#     def __setitem__(self, key: str, value: str) -> None:
-#         self.headers[key] = value
-
-#     def get_headers(self) -> dict[str, str]:
-#         return self.headers
-
-
-# class HttpRequest(HttpHeaders):
-#     def __init__(self, method: str, path: str, headers: dict[str, str]):
-#         super().__init__(headers)
-#         self.method = method
-#         self.path = path
-
-#     def __str__(self) -> str:
-#         return f"{self.method} {self.path} HTTP/1.1\r\n" + "\r\n".join(
-#             [f"{k}: {v}" for k, v in self.headers.items()]
-#         )
-
-
-# headers_dict = {
-#     "User-Agent": "Mozilla/5.0",
-#     "Host": f"localhost:{DEFAULT_PORT}",
-# }
-
-# headers = HttpHeaders(headers_dict)
-
-# request = HttpRequest(
-#     method="GET",
-#     path="/",
-#     headers=headers_dict,
-# )
-
-
 class SendResult(TypedDict):
     payload_size: int
     status: bool
@@ -108,6 +68,7 @@ def send_custom(
     payload: Optional[str] = None,
     host: str = "localhost",
     inject_size: int = 1,
+    sessionId: str = "",
     **kwargs,
 ) -> SendResult:
 
@@ -131,6 +92,7 @@ def send_custom(
                 f"Content-Length: {len(payload) if payload else 0}\r\n"
                 "Content-Type: application/json\r\n"
                 "User-Agent: Mozilla/5.0\r\n"
+                f"Cookie: sessionId={sessionId}\r\n"
                 f"Host: {host}:{DEFAULT_PORT}\r\n"
                 "X-Custom-Header: valid-value\r\n"
                 f"Injected-Header{injected_header}: {injected_header}\r\n\r\n"
@@ -140,6 +102,7 @@ def send_custom(
             headers = (
                 f"GET {path} HTTP/1.1\r\n"
                 "User-Agent: Mozilla/5.0\r\n"
+                f"Cookie: sessionId={sessionId}\r\n"
                 f"Host: {host}:{DEFAULT_PORT}\r\n"
                 "X-Custom-Header: valid-value\r\n"
                 f"Injected-Header: {injected_header}\r\n\r\n"
@@ -149,6 +112,7 @@ def send_custom(
                 f"{request.value} {path} HTTP/1.1\r\n"
                 "User-Agent: Mozilla/5.0\r\n"
                 f"Host: {host}:{DEFAULT_PORT}\r\n"
+                f"Cookie: sessionId={sessionId}\r\n"
                 "X-Custom-Header: valid-value\r\n"
                 f"Injected-Header: {injected_header}\r\n\r\n"
                 f"{payload if payload else ''}"
@@ -161,7 +125,6 @@ def send_custom(
                 s.sendall(message.encode())
 
                 response = s.recv(1024).decode()
-                # s.close()
 
                 return response
             except OSError as e:
@@ -419,8 +382,9 @@ def main():
             run_multithreaded,
             callback=send_custom,
             threads_count=10,
-            requests_count=10000,
+            requests_count=1000,
             payload="test",
+            sessionId="62d7beb6-7ee2-4024-9856-0c425322b0f2",
         ),
         request=HttpMethod.POST,
         path="/database/tasks.json",
