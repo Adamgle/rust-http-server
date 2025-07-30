@@ -12,7 +12,7 @@ use strum::IntoEnumIterator;
 use tokio::{net::tcp::OwnedWriteHalf, sync::MutexGuard};
 // use crate::prelude::*;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum HttpProtocol {
     HTTP1,
     HTTP1_1,
@@ -56,7 +56,7 @@ impl Display for HttpProtocol {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HttpRequestRequestLine {
     method: HttpRequestMethod,
     /// This is a work around to store the Url as the request_target, as the library `url::Url` does not allow relative urls parsing.
@@ -217,7 +217,15 @@ impl Display for HttpRequestMethod {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
+pub struct OwnedHttpResponseStartLine {
+    protocol: HttpProtocol,
+    // status_code should be typed for all available status codes
+    status_code: u16,
+    status_text: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct HttpResponseStartLine<'a> {
     protocol: HttpProtocol,
     // status_code should be typed for all available status codes
@@ -360,7 +368,7 @@ impl HttpRequestError {
         // NOTE: This page could be dynamically set, but this function is sketchy and not very useful and flexible, so maybe we will refactor in the future.
 
         dbg!(&err);
-        
+
         let mut writer = writer.lock().await;
         let config = config.lock().await;
 
@@ -538,10 +546,16 @@ pub trait HttpHeaders<'a> {
     }
 }
 
-#[derive(Debug)]
-pub struct HttpRequestHeaders<'a> {
-    headers: HeaderMap<'a>,
+#[derive(Debug, Clone)]
+pub struct OwnedHttpRequestHeaders {
+    headers: OwnedHeaderMap,
     request_line: HttpRequestRequestLine,
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpRequestHeaders<'a> {
+    pub headers: HeaderMap<'a>,
+    pub request_line: HttpRequestRequestLine,
 }
 
 impl<'a> HttpHeaders<'a> for HttpRequestHeaders<'a> {
@@ -560,6 +574,13 @@ impl<'a> HttpRequestHeaders<'a> {
         HttpRequestHeaders {
             headers: HeaderMap::new(),
             request_line,
+        }
+    }
+
+    fn into_owned(self) -> OwnedHttpRequestHeaders {
+        OwnedHttpRequestHeaders {
+            headers: self.headers.into_owned(),
+            request_line: self.request_line,
         }
     }
 
@@ -786,7 +807,7 @@ impl<'a> HttpRequestHeaders<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct HeaderMap<'a> {
     headers: HashMap<Cow<'a, str>, Cow<'a, str>>,
 }
@@ -797,9 +818,30 @@ impl<'a> HeaderMap<'a> {
             headers: HashMap::<Cow<str>, Cow<str>>::new(),
         }
     }
+
+    pub fn into_owned(self) -> OwnedHeaderMap {
+        OwnedHeaderMap {
+            headers: self
+                .headers
+                .into_iter()
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect(),
+        }
+    }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
+pub struct OwnedHeaderMap {
+    pub headers: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OwnedHttpResponseHeaders {
+    headers: OwnedHeaderMap,
+    start_line: OwnedHttpResponseStartLine,
+}
+
+#[derive(Clone, Debug)]
 pub struct HttpResponseHeaders<'a> {
     headers: HeaderMap<'a>,
     start_line: HttpResponseStartLine<'a>,
@@ -821,6 +863,17 @@ impl<'a> HttpResponseHeaders<'a> {
         HttpResponseHeaders {
             headers: HeaderMap::new(),
             start_line,
+        }
+    }
+
+    pub fn into_owned(self) -> OwnedHttpResponseHeaders {
+        OwnedHttpResponseHeaders {
+            headers: self.headers.into_owned(),
+            start_line: OwnedHttpResponseStartLine {
+                protocol: self.start_line.protocol.clone(),
+                status_code: self.start_line.status_code,
+                status_text: self.start_line.status_text.map(|s| s.to_string()),
+            },
         }
     }
 

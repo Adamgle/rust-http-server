@@ -283,6 +283,10 @@ impl Routes {
             RouteEntry::Route(RouteHandler::new(|ctx| {
                 Box::pin(async move {
                     let database = ctx.get_database()?;
+
+                    // Validate the session for the user, check if authenticated.
+                    AppController::validate_user_session(&ctx).await?;
+
                     let mut database = database.lock().await;
 
                     let RouteContext {

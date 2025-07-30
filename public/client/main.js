@@ -155,6 +155,8 @@ class Components extends ElementCreator {
   static async UserInfo() {
     const user = await API.getSessionUser();
 
+    console.log("Session user:", user);
+
     if (user) {
       const header = document.querySelector("header");
       const userInfoContainer = ElementCreator.createElement("div", {
@@ -206,6 +208,20 @@ class Components extends ElementCreator {
 }
 
 class API {
+  static cache = {};
+
+  static getFromCache(key) {
+    return this.cache[key];
+  }
+
+  static setInCache(key, value) {
+    this.cache[key] = value;
+  }
+
+  static removeFromCache(key) {
+    delete this.cache[key];
+  }
+
   /**
    * Fetch all tasks from the database and display them
    */
@@ -214,6 +230,8 @@ class API {
 
     try {
       const user = await API.getSessionUser();
+
+      console.log(user);
 
       if (user) {
         try {
@@ -361,6 +379,8 @@ class API {
 
           const data = await res.json();
 
+          this.setInCache("sessionUser", data);
+
           console.log("User signed in:", data);
 
           // Clear the forms
@@ -371,7 +391,6 @@ class API {
         } catch (error) {
           console.error("Error signing in:", error);
           handleError(error);
-          return;
         }
       } catch (error) {
         console.error("Error signing in:", error);
@@ -395,9 +414,7 @@ class API {
         });
 
         if (res.status !== 200) {
-          const error = await res.json();
-
-          throw error;
+          throw await res.json();
         }
 
         const data = await res
@@ -406,7 +423,7 @@ class API {
 
         console.log("User added:", data);
 
-        header.remove(formsContainer);
+        header.removeChild(formsContainer);
       } catch (error) {
         console.error("Error adding user:", error);
 
@@ -429,20 +446,14 @@ class API {
         },
       });
 
-      console.log(res.status, res.statusText);
-
       if (res.status !== 200) {
-        const error = await res.json();
-        throw error;
+        throw await res.json();
       }
 
       return res.status === 200;
     } catch (error) {
+      console.error("Error deleting task:", error);
       handleError(error);
-
-      throw new Error({
-        message: `Failed to delete task with id ${id}: ${error.message}`,
-      });
     }
   }
   static async registerAddTask() {
@@ -492,10 +503,6 @@ class API {
 
         tasks.appendChild(taskContainer);
 
-        console.log("User cookie: ", document.cookie);
-
-        console.log(APIConfig.DATABASE_TASKS_PATH);
-
         try {
           const res = await fetch(APIConfig.DATABASE_TASKS_PATH, {
             method: "POST",
@@ -528,6 +535,11 @@ class API {
   }
 
   static async getSessionUser() {
+    // Cache the call to getSessionUser.
+    if (this.getFromCache("sessionUser")) {
+      return this.getFromCache("sessionUser");
+    }
+
     let cookies = deserializeCookies();
 
     let sessionId = cookies.sessionId;
@@ -549,6 +561,9 @@ class API {
       }
 
       const user = await res.json();
+
+      this.setInCache("sessionUser", user);
+
       return user;
     } catch (error) {
       console.error("Error fetching user info:", error);
@@ -575,17 +590,15 @@ class API {
 
       let cookies = deserializeCookies();
 
-      console.log(cookies);
-
       // Set as expired
       // 2026-07-28T20:38:30.296Z
       cookies.sessionId = "Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
 
-      console.log(cookies);
-
       document.cookie = serializeCookies(cookies);
 
       console.log(document.cookie);
+
+      this.removeFromCache("sessionUser");
 
       console.log("User signed out successfully");
     } catch (error) {

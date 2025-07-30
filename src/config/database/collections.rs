@@ -78,16 +78,18 @@ impl DatabaseCollections {
         &mut self,
         collection_name: &str,
     ) -> Result<Arc<Mutex<DatabaseCollection>>, Box<dyn Error + Send + Sync>> {
-        let collection = if let Some(collection) = self.collections.get(collection_name) {
+        let collection_name = collection_name.to_lowercase();
+
+        let collection = if let Some(collection) = self.collections.get(&collection_name) {
             Arc::clone(&collection)
         } else {
-            DatabaseCollection::new(&self.config, collection_name).await?
+            DatabaseCollection::new(&self.config, &collection_name).await?
         };
 
         let c = Arc::clone(&collection);
         let mut collection = collection.lock().await;
 
-        if collection.data.is_empty() {
+        if let None = collection.data {
             collection.parse_collection().await?;
         }
 
@@ -128,34 +130,38 @@ impl DatabaseCollections {
         let instance = Arc::clone(&self.WAL);
         let WAL = instance.lock().await;
 
-        let commands = DatabaseWAL::parse_WAL(WAL.get_handler(), WAL.get_size()).await?;
+        if WAL.get_size() != 0 {
+            let commands = DatabaseWAL::parse_WAL(WAL.get_handler(), WAL.get_size()).await?;
 
-        drop(WAL);
+            drop(WAL);
 
-        self.parse_collections().await?;
+            self.parse_collections().await?;
 
-        for command in commands {
-            let c = command.clone();
-            if let Err(err) = match command {
-                DatabaseCommand::Insert { entry } => self._insert(entry).await,
-                DatabaseCommand::Update { entry, id } => self._update(entry, id).await,
-                DatabaseCommand::Delete {
-                    collection_name,
-                    id,
-                } => self._delete(&collection_name, id).await,
-                _ => Err("Unsupported command.")?,
-            } {
-                eprintln!("Failed to execute command: {:?}, error: {}", c, err);
-            };
+            for command in commands {
+                let c = command.clone();
+                if let Err(err) = match command {
+                    DatabaseCommand::Insert { entry } => self._insert(entry).await,
+                    DatabaseCommand::Update { entry, id } => self._update(entry, id).await,
+                    DatabaseCommand::Delete {
+                        collection_name,
+                        id,
+                    } => self._delete(&collection_name, id).await,
+
+                    _ => Err("Unsupported command.")?,
+                } {
+                    eprintln!("Failed to execute command: {:?}, error: {}", c, err);
+                };
+            }
+
+            self.save_commands_execution().await?;
+
+            let WAL = Arc::clone(&self.WAL);
+            let WAL = WAL.lock().await;
+
+            WAL.reset_size().await?;
+
+            println!("Total flush time: {:?}", start_time.elapsed());
         }
-
-        self.save_commands_execution().await?;
-
-        let WAL = Arc::clone(&self.WAL);
-        let WAL = WAL.lock().await;
-        WAL.reset_size().await?;
-
-        println!("Total flush time: {:?}", start_time.elapsed());
 
         return Ok(());
     }
@@ -166,6 +172,7 @@ impl DatabaseCollections {
 
         for collection_name in keys {
             let collection = self.get(collection_name.as_ref()).await?;
+
             let mut collection: MutexGuard<'_, DatabaseCollection> = collection.lock().await;
 
             collection.overwrite_database_file().await?;
@@ -173,7 +180,8 @@ impl DatabaseCollections {
             // Clear the vector, we can remove this line and improve performance, but waste more memory as we would keep the entries in the RAM.
             // Some adjustments would be necessary if we would not want to clear the data.
             // Also it would make DatabaseWAL unnecessary as everything would be in-memory.
-            collection.data.clear();
+            // collection.data.clear();
+            collection.data = None;
         }
 
         println!("Write-ahead log file has been flushed to the disk.");
@@ -280,20 +288,19 @@ impl DatabaseCollections {
         let WAL = WAL.lock().await;
 
         // To avoid unnecessary parsing of the WAL file, we will check if it is empty.
-        if WAL.get_size() != 0 {
-            // I think this have to be release so to avoid passing the WAL into that function.
-            drop(WAL);
+        // I think this have to be release so to avoid passing the WAL into that function.
+        drop(WAL);
 
-            // Flush the commands to the database file to provide stateful output.
-            self.flush().await?;
-        }
+        // Flush the commands to the database file to provide stateful output.
+        self.flush().await?;
 
         // Collection could not have been created if WAL did not flush.
 
         let collection = self.get(collection_name).await?;
         let collection = collection.lock().await;
 
-        let Some(entry) = collection.data.get(id) else {
+        // Safe to unwrap as the collection.data is always Some
+        let Some(entry) = collection.data.as_ref().unwrap().get(id) else {
             return Err(format!("Entry with the provided id: {id} does not exists.").into());
         };
 
@@ -318,13 +325,11 @@ impl DatabaseCollections {
         let WAL = WAL.lock().await;
 
         // To avoid unnecessary parsing of the WAL file, we will check if it is empty.
-        if WAL.get_size() > 0 {
-            // I think this have to be released so to avoid passing the WAL into that function.
-            drop(WAL);
+        // I think this have to be released so to avoid passing the WAL into that function.
+        drop(WAL);
 
-            // Flush the commands to the database file to provide stateful output.
-            self.flush().await?;
-        }
+        // Flush the commands to the database file to provide stateful output.
+        self.flush().await?;
 
         let collection = self.get(collection_name).await?;
         let collection = collection.lock().await;
@@ -359,7 +364,7 @@ impl DatabaseCollections {
         let collection = self.get(collection_name).await?;
         let collection = collection.lock().await;
 
-        return Ok(collection.data.clone());
+        return Ok(collection.data.as_ref().unwrap().clone());
     }
 
     async fn _insert(
@@ -375,7 +380,7 @@ impl DatabaseCollections {
         let collection = self.get(entry.typetag_name()).await?;
         let mut collection = collection.lock().await;
 
-        let collection = &mut collection.data;
+        let collection = collection.data.as_mut().unwrap();
 
         let id = entry.get_id();
 
@@ -398,7 +403,7 @@ impl DatabaseCollections {
         let collection = self.get(entry.typetag_name()).await?;
         let mut collection = collection.lock().await;
 
-        let collection = &mut collection.data;
+        let collection = collection.data.as_mut().unwrap();
 
         if !collection.contains_key(&id) {
             return Err("Entry with the provided id does not exists.".into());
@@ -419,7 +424,7 @@ impl DatabaseCollections {
         let collection = self.get(collection_name).await?;
         let mut collection = collection.lock().await;
 
-        let collection = &mut collection.data;
+        let collection = collection.data.as_mut().unwrap();
 
         if !collection.contains_key(&id) {
             return Err("Entry with the provided id does not exists.".into());
@@ -443,7 +448,7 @@ pub struct DatabaseCollection {
     /// Technically we could keep it written into but that would waste memory, improve performance.
     ///
     /// Stays uninitialized until the WAL file is flushed.
-    data: DatabaseStorage<Box<dyn DatabaseEntryTrait>>,
+    data: Option<DatabaseStorage<Box<dyn DatabaseEntryTrait>>>,
     // That is a clone of the WAL file, clone as the increase of the reference count, not the actual data.
     // WAL: Arc<Mutex<DatabaseWAL>>,
 }
@@ -456,7 +461,7 @@ impl DatabaseCollection {
     ) -> Result<Arc<Mutex<Self>>, Box<dyn Error + Send + Sync>> {
         Ok(Arc::new(Mutex::new(Self {
             handler: Self::open_database_file(config, &collection_name).await?,
-            data: DatabaseStorage::new(),
+            data: None,
         })))
     }
 
@@ -550,7 +555,8 @@ impl DatabaseCollection {
             return Err("Empty file".into());
         }
 
-        self.data = serde_json::from_slice(&buffer)?;
+        // After parsing the self.data is always Some, so we can unwrap it safely.
+        self.data = Some(serde_json::from_slice(&buffer)?);
 
         Ok(())
     }
@@ -569,7 +575,7 @@ impl DatabaseCollection {
     {
         let mut serialized_data = HashMap::new();
 
-        for (entry_id, entry) in self.data.iter() {
+        for (entry_id, entry) in self.data.as_ref().unwrap().iter() {
             let value = entry.as_any().downcast_ref::<T>().ok_or_else(|| {
                 format!(
                     "Failed to downcast entry with id: {entry_id} to type: {}",

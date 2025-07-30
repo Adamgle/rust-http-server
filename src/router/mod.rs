@@ -12,14 +12,19 @@ use std::{
     sync::Arc,
 };
 
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
 
 use crate::{
     config::{Config, SpecialDirectories, config_file::DatabaseConfigEntry, database::Database},
-    http::{HttpRequestError, HttpRequestHeaders, HttpRequestMethod, HttpResponseHeaders},
-    http_request::HttpRequest,
+    http::{
+        HttpRequestError, HttpRequestHeaders, HttpRequestMethod, HttpResponseHeaders,
+        OwnedHttpResponseHeaders,
+    },
+    http_request::{HttpRequest, OwnedHttpRequest},
     router::{
-        middleware::{Middleware, MiddlewareHandlerResult},
+        middleware::{Middleware, MiddlewareHandlerResult, OwnedMiddlewareHandlerResult},
         routes::Routes,
     },
 };
@@ -32,6 +37,30 @@ use crate::{
 pub struct Router {
     routes: Routes,
     middleware: Middleware,
+}
+
+pub struct RouterCache;
+
+pub static CACHE: Lazy<DashMap<RouteTableKey, OwnedRouteResult>> = Lazy::new(DashMap::new);
+
+impl RouterCache {
+    pub fn get(key: &RouteTableKey) -> Option<OwnedRouteResult> {
+        println!("Returning from cache for key: {:?}", key);
+        
+        // Get the value from the cache by key.
+        CACHE.get(key).map(|entry| entry.value().clone())
+    }
+
+    /// We are storing the `RouteResult` for given key and using it later to avoid recomputing the route.
+    pub fn set(key: RouteTableKey, value: OwnedRouteResult) {
+        // Set the value in the cache by key.
+        CACHE.insert(key, value);
+    }
+
+    pub fn clear() {
+        // Clear the cache.
+        CACHE.clear();
+    }
 }
 
 /// Represents an entry in the route table, which can be either a route handler or a middleware handler.
@@ -226,6 +255,16 @@ impl std::fmt::Debug for RouteTableKey {
         write!(f, "[{}] {}", method_str, path_str)
     }
 }
+
+#[derive(Clone, Debug)]
+pub struct OwnedRouteContext {
+    pub request: OwnedHttpRequest,
+    pub response_headers: OwnedHttpResponseHeaders,
+    pub key: RouteTableKey,
+    pub database: Option<Arc<Mutex<Database>>>,
+    pub database_config: Option<DatabaseConfigEntry>,
+}
+
 /// Context for the route handler that takes a reference `HttpRequest`, a mutable reference to `HttpResponseHeaders, and a
 
 /// reference to `RouteTableKey`.
@@ -234,7 +273,7 @@ impl std::fmt::Debug for RouteTableKey {
 /// `RouteTableKey` even though is 'static in lifetime in the `RouteTable` it is not static in the parameters of the route handler
 /// as it is a reference to the key built in the `handle_client` entry point.
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct RouteContext<'ctx> {
     pub request: HttpRequest<'ctx>,
     pub response_headers: HttpResponseHeaders<'ctx>,
@@ -262,10 +301,16 @@ impl<'ctx> RouteContext<'ctx> {
         }
     }
 
-    // pub fn get_request(&self) -> HttpRequest<'ctx> {
-    //     // Returns the request of the route handler context.
-    //     self.request
-    // }
+    pub fn into_owned(self) -> OwnedRouteContext {
+        // Converts the `RouteContext` into an `OwnedRouteContext`.
+        OwnedRouteContext {
+            request: self.request.into_owned(),
+            response_headers: self.response_headers.into_owned(),
+            key: self.key.clone(),
+            database: self.database,
+            database_config: self.database_config,
+        }
+    }
 
     pub fn get_response_headers(&mut self) -> &mut HttpResponseHeaders<'ctx> {
         // Returns the response headers of the route handler context.
@@ -300,14 +345,44 @@ impl<'ctx> RouteContext<'ctx> {
 /// request consisting of the body.
 ///
 /// Applies changes to headers as defined in the handler for a given path.
+#[derive(Clone, Debug)]
 pub struct RouteHandlerResult<'ctx> {
     pub headers: HttpResponseHeaders<'ctx>,
     pub body: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct OwnedRouteHandlerResult {
+    pub headers: OwnedHttpResponseHeaders,
+    pub body: String,
+}
+
+#[derive(Clone, Debug)]
 pub enum RouteResult<'ctx> {
     Route(RouteHandlerResult<'ctx>),
     Middleware(MiddlewareHandlerResult<'ctx>),
+}
+
+impl RouteResult<'_> {
+    pub fn into_owned(self) -> OwnedRouteResult {
+        match self {
+            RouteResult::Route(result) => OwnedRouteResult::Route(OwnedRouteHandlerResult {
+                headers: result.headers.into_owned(),
+                body: result.body,
+            }),
+            RouteResult::Middleware(result) => {
+                OwnedRouteResult::Middleware(OwnedMiddlewareHandlerResult {
+                    ctx: result.ctx.into_owned(),
+                })
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum OwnedRouteResult {
+    Route(OwnedRouteHandlerResult),
+    Middleware(OwnedMiddlewareHandlerResult),
 }
 
 // UPDATE: Callback cannot live for 'static as the Context gets moved in to a closure

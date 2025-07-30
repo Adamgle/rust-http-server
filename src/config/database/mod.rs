@@ -248,7 +248,7 @@ impl DatabaseWAL {
     }
 
     fn add_collection_name(&mut self, collection: String) {
-        self.collection_names.insert(collection);
+        self.collection_names.insert(collection.to_lowercase());
     }
 
     fn get_collection_names(&self) -> &HashSet<String> {
@@ -302,7 +302,7 @@ impl DatabaseCommand {
             | Delete {
                 collection_name, ..
             } => collection_name.clone(),
-        }
+        }.to_lowercase()
     }
 
     fn deserialize(entry: &impl AsRef<[u8]>) -> Result<Self, serde_json::Error> {

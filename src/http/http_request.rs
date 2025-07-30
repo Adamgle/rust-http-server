@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::http::{HttpResponseHeaders, RequestRedirected};
+use crate::http::{HttpResponseHeaders, OwnedHttpRequestHeaders, RequestRedirected};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -20,11 +20,17 @@ use crate::{
 
 use super::{HttpHeaders, HttpRequestHeaders, HttpRequestMethod};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct HttpRequest<'a> {
     // headers: String,
     headers: HttpRequestHeaders<'a>,
     body: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OwnedHttpRequest {
+    pub headers: OwnedHttpRequestHeaders,
+    pub body: Option<Vec<u8>>,
 }
 
 impl<'a> HttpRequest<'a> {
@@ -39,6 +45,13 @@ impl<'a> HttpRequest<'a> {
         Ok(Self::parse_request(config, reader, writer).await?)
     }
 
+    pub fn into_owned(self) -> OwnedHttpRequest {
+        OwnedHttpRequest {
+            headers: self.headers.into_owned(),
+            body: self.body,
+        }
+    }
+    
     /// Parses to HTTP/1.1 from the TcpStream, relying on Content-Length headers, no chunked transfer encoding
     /// is supported. It will read the stream and allocate as much as Content-Length header specifies.
     async fn parse_request(

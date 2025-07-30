@@ -7,8 +7,7 @@ use std::{
 use crate::{
     http::HttpRequestMethod,
     router::{
-        RouteContext, RouteEntry, RouteHandler, RouteResult, RouteTable, RouteTableKey,
-        controller::MiddlewareController, routes::Routes,
+        controller::MiddlewareController, routes::Routes, OwnedRouteContext, RouteContext, RouteEntry, RouteHandler, RouteResult, RouteTable, RouteTableKey
     },
 };
 
@@ -39,9 +38,16 @@ pub struct Middleware {
 ///
 /// Every change on the headers can be done by a mutable reference, as the context
 /// is owned by value with headers also owned by value.
+#[derive(Clone, Debug)]
 pub struct MiddlewareHandlerResult<'ctx> {
     // headers: HttpResponseHeaders<'b>,
     pub ctx: RouteContext<'ctx>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OwnedMiddlewareHandlerResult {
+    // headers: OwnedHttpResponseHeaders,
+    pub ctx: OwnedRouteContext,
 }
 
 impl Middleware {
