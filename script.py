@@ -353,7 +353,7 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
     # count = 1, threads_count = 10, requests_count = 10000, empty db
     quadratic_approx = (
         7.064454015189068e-08 * xs**2
-        + 0.00035391819927912033 * xs
+        +  0.00035391819927912033 * xs
         + 0.07135582499828524
     )
 

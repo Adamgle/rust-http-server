@@ -41,12 +41,15 @@ pub struct Router {
 
 pub struct RouterCache;
 
+// NOTE: Not sure if we would ever use the full output of the RouteResult, but technically we could
+// thought as always with caching we have to be careful to not return stale data for routes that are doing validation or something
+// that require fresh data.
 pub static CACHE: Lazy<DashMap<RouteTableKey, OwnedRouteResult>> = Lazy::new(DashMap::new);
 
 impl RouterCache {
     pub fn get(key: &RouteTableKey) -> Option<OwnedRouteResult> {
         println!("Returning from cache for key: {:?}", key);
-        
+
         // Get the value from the cache by key.
         CACHE.get(key).map(|entry| entry.value().clone())
     }
