@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::http::{HttpHeaders, HttpRequestError, HttpResponseHeaders};
+use crate::http::{HttpHeaders, HttpResponseHeaders};
 use std::error::Error;
 use std::io::Write;
 
@@ -85,30 +85,24 @@ impl<'a> HttpResponse<'a> {
         _config: &MutexGuard<'_, Config>,
         writer: &mut MutexGuard<'_, OwnedWriteHalf>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let data = match self.parse_response() {
-            Ok(res) => res,
-            Err(err) => {
-                eprintln!("Error parsing response: {}", err);
-                return Err(Box::new(HttpRequestError::default()));
-            }
-        };
-        // short ----------
-        // long     ----
+        let data = self.parse_response().inspect_err(|e| {
+            log::error!("Error parsing response: {}", e);
+        })?;
 
         writer
             .writable()
             .await
-            .inspect_err(|_| eprintln!("Stream is not writable"))?;
+            .inspect_err(|_| log::error!("Stream is not writable"))?;
 
         writer
             .write_all(&data)
             .await
-            .inspect_err(|_| println!("Could not write to the stream"))?;
+            .inspect_err(|_| log::error!("Could not write to the stream"))?;
 
         writer
             .flush()
             .await
-            .inspect_err(|_| println!("Could not flush the stream after writing to it"))?;
+            .inspect_err(|_| log::error!("Could not flush the stream after writing to it"))?;
 
         // Disregarded the error as it is not critical.
 

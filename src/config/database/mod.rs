@@ -131,7 +131,7 @@ impl DatabaseWAL {
 
                     let commands = DatabaseWAL::parse_WAL(WAL.get_handler(), WAL.get_size())
                         .await
-                        .inspect_err(|e| eprintln!("Failed to parse WAL file: {e}"))?;
+                        .inspect_err(|e| error!("Failed to parse WAL file: {e}"))?;
 
                     WAL.collection_names
                         .extend(commands.iter().map(|command| command.get_collection_name()));
@@ -167,11 +167,10 @@ impl DatabaseWAL {
         let mut reader = BufReader::new(&mut *handler).lines();
 
         while let Some(line) = reader.next_line().await.inspect_err(|e| {
-            eprintln!("Potentially corrupted DatabaseCommand in WAL file with: {e}.")
+            error!("Potentially corrupted DatabaseCommand in WAL file with: {e}.")
         })? {
-            let command = DatabaseCommand::deserialize(&line).inspect_err(|_| {
-                eprintln!("Failed to deserialize DatabaseCommand from WAL file.")
-            })?;
+            let command = DatabaseCommand::deserialize(&line)
+                .inspect_err(|_| error!("Failed to deserialize DatabaseCommand from WAL file."))?;
             buffer.push(command);
         }
 
@@ -236,11 +235,11 @@ impl DatabaseWAL {
 
         file.set_len(0)
             .await
-            .inspect_err(|_| eprintln!("Failed to reset the size of WAL file."))?;
+            .inspect_err(|_| error!("Failed to reset the size of WAL file."))?;
 
         file.seek(std::io::SeekFrom::Start(0))
             .await
-            .inspect_err(|_| eprintln!("Failed to reset the size of WAL file."))?;
+            .inspect_err(|_| error!("Failed to reset the size of WAL file."))?;
 
         self.size.store(0, std::sync::atomic::Ordering::SeqCst);
 
@@ -302,11 +301,12 @@ impl DatabaseCommand {
             | Delete {
                 collection_name, ..
             } => collection_name.clone(),
-        }.to_lowercase()
+        }
+        .to_lowercase()
     }
 
     fn deserialize(entry: &impl AsRef<[u8]>) -> Result<Self, serde_json::Error> {
         serde_json::from_slice::<Self>(entry.as_ref())
-            .inspect_err(|e| eprintln!("Failed to deserialize DatabaseCommand: {e}"))
+            .inspect_err(|e| error!("Failed to deserialize DatabaseCommand: {e}"))
     }
 }

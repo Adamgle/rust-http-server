@@ -7,7 +7,8 @@ use std::{
 use crate::{
     http::HttpRequestMethod,
     router::{
-        controller::MiddlewareController, routes::Routes, OwnedRouteContext, RouteContext, RouteEntry, RouteHandler, RouteResult, RouteTable, RouteTableKey
+        RouteContext, RouteEntry, RouteHandler, RouteResult, RouteTable, RouteTableKey,
+        controller::MiddlewareController, routes::Routes,
     },
 };
 
@@ -42,12 +43,6 @@ pub struct Middleware {
 pub struct MiddlewareHandlerResult<'ctx> {
     // headers: HttpResponseHeaders<'b>,
     pub ctx: RouteContext<'ctx>,
-}
-
-#[derive(Clone, Debug)]
-pub struct OwnedMiddlewareHandlerResult {
-    // headers: OwnedHttpResponseHeaders,
-    pub ctx: OwnedRouteContext,
 }
 
 impl Middleware {

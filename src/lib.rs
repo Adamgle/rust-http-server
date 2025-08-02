@@ -1,6 +1,5 @@
 pub mod config;
 pub mod http;
-pub mod logger;
 pub mod prelude;
 pub mod router;
 
@@ -19,6 +18,7 @@ pub mod tcp_handlers {
     use crate::router::{RouteContext, RouteHandlerResult, RouteResult, RouteTableKey};
     use crate::*;
     use http::HttpRequestError;
+    use log::{error, info};
     use std::borrow::Cow;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -43,20 +43,10 @@ pub mod tcp_handlers {
         // This extra lock will only affect first load time of the server and it is also negligible
         let listener = self::connect(config.lock().await).await?;
 
-        println!(
-            "TCP Connection Established at {:?}\nListening...",
+        info!(
+            "TCP Connection Established at {:?}",
             listener.local_addr().unwrap()
         );
-
-        // Obscure logger.
-
-        let logs = fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open("logs/log.txt")
-            .await?;
-
-        let logs = Arc::new(Mutex::new(logs));
 
         loop {
             match listener.accept().await {
@@ -73,7 +63,7 @@ pub mod tcp_handlers {
                     if let Err(err) =
                         timeout(tokio::time::Duration::from_secs(5), stream.readable()).await
                     {
-                        eprintln!("Stream is not readable, skipping: {err:?}");
+                        error!("Stream is not readable, skipping: {err:?}");
                         continue;
                     };
 
@@ -87,8 +77,6 @@ pub mod tcp_handlers {
                     let config = Arc::clone(&config);
                     let task_error_writer = Arc::clone(&writer);
 
-                    let logs = Arc::clone(&logs);
-
                     let task = tokio::spawn(async move {
                         // let writer = Arc::clone(&writer);
 
@@ -99,13 +87,7 @@ pub mod tcp_handlers {
                         )
                         .await
                         {
-                            // Obscure logger.
-
-                            logs.lock()
-                                .await
-                                .write_all(format!("Error handling request: {}\n", err).as_bytes())
-                                .await
-                                .unwrap();
+                            error!("Error handling request: {}", err);
 
                             // This is error that occurs while handling the error.
                             if let Err(err) = HttpRequestError::send_error_response(
@@ -115,7 +97,7 @@ pub mod tcp_handlers {
                             )
                             .await
                             {
-                                eprintln!("Error sending error response: {}", err);
+                                error!("Error sending error response: {}", err);
                             };
 
                             // The above code SHOULD release the lock so no deadlock, but keep in mind.
@@ -125,7 +107,7 @@ pub mod tcp_handlers {
                             // error occurs while errors handling the http request, we could not
                             // shut it down.
                             if let Err(err) = writer.shutdown().await {
-                                eprintln!("Error shutting down the stream: {}", err);
+                                error!("Error shutting down the stream: {}", err);
                             }
                         } else {
                             // Request termination, handled successfully
@@ -137,14 +119,14 @@ pub mod tcp_handlers {
                         tokio::time::timeout(tokio::time::Duration::from_secs(5), task).await
                     {
                         // println!("Is task still running? {}", task.is_finished());
-                        eprintln!("Error spawning task: {}", err);
+                        error!("Error spawning task: {}", err);
 
                         let mut writer = task_error_writer.lock().await;
 
                         // Ensure the writer is shutdown, although it could already be shutdown
                         // Shut downs the writing portion of the stream if error occurs
                         if let Err(err) = writer.shutdown().await {
-                            eprintln!("Error shutting down the stream: {}", err);
+                            error!("Error shutting down the stream: {}", err);
                         };
                     };
 
@@ -155,13 +137,13 @@ pub mod tcp_handlers {
                     // .await
                     // {
                     //     if let Err(err) = writer.shutdown().await {
-                    //         eprintln!("Error shutting down the stream: {}", err);
+                    //         error!("Error shutting down the stream: {}", err);
                     //     }
 
-                    // eprintln!("Request timed out: {}", res);
+                    // error!("Request timed out: {}", res);
                     // }
                 }
-                Err(err) => eprintln!("Invalid TCP stream: {}", err),
+                Err(err) => error!("Invalid TCP stream: {}", err),
             }
         }
     }
@@ -193,7 +175,8 @@ pub mod tcp_handlers {
             method: Some(method.clone()),
         };
 
-        println!("Incoming: {:?}", route_key);
+        // println!("Incoming: {:?}", route_key);
+        info!("Incoming request: #{:?}", route_key);
 
         // To resolve the double mutable reference to headers we will move the ownership of headers
         // that is cheap operation.

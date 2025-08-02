@@ -217,31 +217,42 @@ ISSUES
     -> as literals, otherwise, it could allow file system traversal. It is not an issue with the consecutive slashes check in `get_request_target`
     -> the issue could occur when we decode the URL and parse it to `Path`. Maybe we should never convert to `Path` and do the logic 
     -> on some abstracted interfaces via `url` crate. Look up the `url::Url::make_relative`.
-20. There may be an issue related to how router is made, it uses String as paths given in the URL from the client, that may lose some information if 
+20. <RESOLVED> There may be an issue related to how router is made, it uses String as paths given in the URL from the client, that may lose some information if 
     => the path is not valid UTF-8, the problem is also applicable of how we walk the directories in SpecialDirectories::walk_dir, because we will be using
     => the data that is given to us in the handle_client, that would means that we are working already on that UTF-8 decoded String. Currently if string is not 
     => valid UTF-8 we are throwing an error in the HttpRequestHeaders::get_request_target_path and of course in its alias HttpRequest::get_request_target_path.
     => I don't think we will refactor that, we will just keep the server UTF-8 compliant.
-21. While adding the PathBuf in the RouteTableKey we should percent encode it, as paths like "asd/asd asd" would not match
+21. <RESOLVED> While adding the PathBuf in the RouteTableKey we should percent encode it, as paths like "asd/asd asd" would not match
     -> because browser would encode the space.
-22. Redirection does not work with new router, probably because the path that would be registered to redirect does not exists in the 
+22. <RESOLVED> Redirection does not work with new router, probably because the path that would be registered to redirect does not exists in the 
     -> routes table and are throwing early without trying to parse the request when the redirection logic triggers.
-23. Refactor RouteHandlerContext to struct with fields not tuple struct as it become to ambiguous.
+23. <RESOLVED> Refactor RouteHandlerContext to struct with fields not tuple struct as it become to ambiguous.
 24. Make sure the .html, .css, and .js cannot be declared outside SpecialDirectories,
 25. Requesting a collection crates it if not exists, api/database/list?collection=asd => That should not create the given collection and throw early.
-26. There is a way to walk file system using http://localhost:5000/api/database/list?collection=../../../../, in query parameters.
+    => Solving that would require to define some static source of the allowed, declared, collections, currently that is done in the typetag macro, and ideally that would be single source of truth
+    => but I imaging it could not be possible because it is evaluated at runtime.
+26. <RESOLVED> There is a way to walk file system using http://localhost:5000/api/database/list?collection=../../../../, in query parameters.
+
     
 IDEAS
 1. It would be nice to have a command on the server that could show incoming request, as they get queued,
     -> or abort them early, just for debugging purposes.
+2. Goals for RouterCache:
+    -> Store the result of the [route handler] to avoid recomputing it for the same key.
+    -> Use the cache to speed up the response time for frequently accessed routes.
+    -> Ensure that the cache is thread-safe and can be accessed concurrently, we are using DashMap for that.
+    -> Provide a way of caching not only the route results, but the API that is exposed through AppController. That would be a challenge, as the AppController does not have
+     => a fixed signature and we cannot easily type it. Also we would have to define some wrapper for the AppController methods and the route handlers, as I would imagine that
+     => they would not share the signature, also we need some differentiation for those, likely an enum. By signature I mean the return type, of course we do not want to cache the
+     => function pointers itself, just the result of those.
 
 
 ON THE AGENDA: 
 1. Multithreading is on the agenda which will enable us to handle multiple requests simultaneously but far away and we do not bother just know <DONE>
-2. Logger is next on the agenda, because we need to measure failed and successful requests that happen.
+2. Logger is next on the agenda, because we need to measure failed and successful requests that happen <DONE>.
 
 
-DREAMLAND
+DREAMLAND <DREAM CAME TRUE>
 Let's try to develop something...
 We will make a stateful todo-app with a static file as a database.
     --- Regarding that

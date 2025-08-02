@@ -1,7 +1,8 @@
 pub mod database;
 
+use crate::prelude::*;
+
 use crate::http::HttpRequestMethod;
-use crate::logger::Logger;
 use crate::router::{RouteTableKey, Router};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -25,8 +26,6 @@ pub struct Config {
     pub app: AppConfig,
     /// `NOTE`: It's not optional because in the near future we will create the file with default when the server starts
     pub config_file: config_file::ServerConfigFile,
-    /// `unimplemented!()`
-    pub logger: Logger,
     // pub database: Option<Arc<Mutex<Database>>>,
 }
 
@@ -339,7 +338,7 @@ impl SpecialDirectories {
             let path = dir.get_path();
 
             Self::walk_dir(&path, &mut paths, &path, &dir)
-                .inspect_err(|e| eprintln!("Error walking through directory {:?}: {}", path, e))?;
+                .inspect_err(|e| error!("Error walking through directory {:?}: {}", path, e))?;
         }
 
         return Ok(paths);
@@ -434,13 +433,12 @@ impl Config {
         let app = AppConfig {
             url: config_file
                 .domain_to_url(&config_file.domain, &socket_address.port())
-                .inspect_err(|e| eprintln!("Error parsing domain to URL: {}", e))?,
+                .inspect_err(|e| error!("Error parsing domain to URL: {}", e))?,
             router: Router::new()?,
             database,
         };
 
         Ok(Arc::new(Mutex::new(Config {
-            logger: Logger {},
             socket_address,
             config_file,
             options,

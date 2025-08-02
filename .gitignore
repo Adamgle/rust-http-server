@@ -6,5 +6,7 @@
 /wireshark
 /logs
 /leetcode.py
-/public
+/public/database
+error.txt
 /error.txt
+/__pycache__

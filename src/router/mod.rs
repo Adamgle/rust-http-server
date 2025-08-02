@@ -1,6 +1,15 @@
+pub mod cache;
 mod controller;
 mod middleware;
 mod routes;
+
+use crate::{
+    prelude::*,
+    router::cache::{
+        OwnedMiddlewareHandlerResult, OwnedRouteContext, OwnedRouteHandlerResult, OwnedRouteResult,
+        RouterCacheResult,
+    },
+};
 
 use std::{
     collections::HashMap,
@@ -12,19 +21,14 @@ use std::{
     sync::Arc,
 };
 
-use dashmap::DashMap;
-use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
 
 use crate::{
     config::{Config, SpecialDirectories, config_file::DatabaseConfigEntry, database::Database},
-    http::{
-        HttpRequestError, HttpRequestHeaders, HttpRequestMethod, HttpResponseHeaders,
-        OwnedHttpResponseHeaders,
-    },
-    http_request::{HttpRequest, OwnedHttpRequest},
+    http::{HttpRequestError, HttpRequestHeaders, HttpRequestMethod, HttpResponseHeaders},
+    http_request::HttpRequest,
     router::{
-        middleware::{Middleware, MiddlewareHandlerResult, OwnedMiddlewareHandlerResult},
+        middleware::{Middleware, MiddlewareHandlerResult},
         routes::Routes,
     },
 };
@@ -37,33 +41,6 @@ use crate::{
 pub struct Router {
     routes: Routes,
     middleware: Middleware,
-}
-
-pub struct RouterCache;
-
-// NOTE: Not sure if we would ever use the full output of the RouteResult, but technically we could
-// thought as always with caching we have to be careful to not return stale data for routes that are doing validation or something
-// that require fresh data.
-pub static CACHE: Lazy<DashMap<RouteTableKey, OwnedRouteResult>> = Lazy::new(DashMap::new);
-
-impl RouterCache {
-    pub fn get(key: &RouteTableKey) -> Option<OwnedRouteResult> {
-        println!("Returning from cache for key: {:?}", key);
-
-        // Get the value from the cache by key.
-        CACHE.get(key).map(|entry| entry.value().clone())
-    }
-
-    /// We are storing the `RouteResult` for given key and using it later to avoid recomputing the route.
-    pub fn set(key: RouteTableKey, value: OwnedRouteResult) {
-        // Set the value in the cache by key.
-        CACHE.insert(key, value);
-    }
-
-    pub fn clear() {
-        // Clear the cache.
-        CACHE.clear();
-    }
 }
 
 /// Represents an entry in the route table, which can be either a route handler or a middleware handler.
@@ -259,15 +236,6 @@ impl std::fmt::Debug for RouteTableKey {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct OwnedRouteContext {
-    pub request: OwnedHttpRequest,
-    pub response_headers: OwnedHttpResponseHeaders,
-    pub key: RouteTableKey,
-    pub database: Option<Arc<Mutex<Database>>>,
-    pub database_config: Option<DatabaseConfigEntry>,
-}
-
 /// Context for the route handler that takes a reference `HttpRequest`, a mutable reference to `HttpResponseHeaders, and a
 
 /// reference to `RouteTableKey`.
@@ -344,19 +312,9 @@ impl<'ctx> RouteContext<'ctx> {
     }
 }
 
-/// Take an owned version of headers that was previously moved from `handle_client` and the result of the
-/// request consisting of the body.
-///
-/// Applies changes to headers as defined in the handler for a given path.
 #[derive(Clone, Debug)]
 pub struct RouteHandlerResult<'ctx> {
     pub headers: HttpResponseHeaders<'ctx>,
-    pub body: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct OwnedRouteHandlerResult {
-    pub headers: OwnedHttpResponseHeaders,
     pub body: String,
 }
 
@@ -380,12 +338,6 @@ impl RouteResult<'_> {
             }
         }
     }
-}
-
-#[derive(Clone, Debug)]
-pub enum OwnedRouteResult {
-    Route(OwnedRouteHandlerResult),
-    Middleware(OwnedMiddlewareHandlerResult),
 }
 
 // UPDATE: Callback cannot live for 'static as the Context gets moved in to a closure
@@ -469,16 +421,6 @@ impl Router {
         &mut self.routes
     }
 
-    // pub fn get_middleware_routes(&self) -> &RouteTable {
-    //     // Returns the middleware of the router.
-    //     &self.middleware.get_routes()
-    // }
-
-    // pub fn get_middleware_segments(&self) -> &RouteTable {
-    //     // Returns the middleware segments of the router.
-    //     &self.middleware.get_segments()
-    // }
-
     /// `NOTE`: I am a mistakenly implementing the RouteResult as an enum that could standalone return the result of the middleware handler.
     /// That is not the case as middleware does not produce the body and if the handler does not exists we cannot respond with data.
     /// We will keep the functionality, maybe we will utilize it as it is not a big deal to keep it in the code. But keep in mind
@@ -512,11 +454,20 @@ impl Router {
         if let Ok(RouteEntry::Middleware(Some(handler))) =
             self.middleware.get_segments().get(ctx.get_key())
         {
-            println!("Running middleware segment for path: {:?}", ctx.get_key());
+            // info!("Running middleware segment for path: {:?}", ctx.get_key());
+
+            let k = ctx.get_key().clone();
+            let start_time = std::time::Instant::now();
 
             let result = handler.callback(ctx).await.inspect_err(|e| {
-                eprintln!("Error in middleware segment handler: {:?}", e);
+                error!("Error in middleware segment handler for {k:?} | {:?}", e);
             })?;
+
+            info!(
+                "Middleware segment for path: {:?} took: {} ms",
+                k,
+                start_time.elapsed().as_millis()
+            );
 
             match result {
                 RouteResult::Middleware(MiddlewareHandlerResult { ctx: context }) => {
@@ -542,10 +493,20 @@ impl Router {
         if let Some(RouteEntry::Middleware(Some(middleware))) =
             self.middleware.get_routes().get_routes().get(ctx.get_key())
         {
-            println!("Running middleware for path: {:?}", ctx.get_key());
+            // info!("Running middleware for path: {:?}", ctx.get_key());
+
+            let k = ctx.get_key().clone();
+            let start_time = std::time::Instant::now();
+
             let result = middleware.callback(ctx).await.inspect_err(|e| {
-                eprintln!("Error in middleware handler: {:?}", e);
+                error!("Error in middleware handler for {k:?} | {:?}", e);
             })?;
+
+            info!(
+                "Middleware for path: {:?} took: {} ms",
+                k,
+                start_time.elapsed().as_millis()
+            );
 
             match result {
                 RouteResult::Middleware(MiddlewareHandlerResult { ctx: context }) => ctx = context,
@@ -566,7 +527,25 @@ impl Router {
         if let RouteEntry::Route(route) = route {
             // If the route exists, we run the handler for the path.
             // We do not want to propagate the error here, as we want to return the context back to the route handler.
+
+            // TODO: Check if there is a cache entry for the route, if so, return it.
+            if let Some(RouterCacheResult::RouteResult(cached)) =
+                crate::router::cache::RouterCache::get(&ctx.get_key())
+            {
+                // That has to be converted to_borrowed, as we are returning the owned result.
+                return Ok(RouteResult::Route(cached));
+            }
+
+            let k = ctx.get_key().clone();
+            let start_time = std::time::Instant::now();
+
             let result = route.callback(ctx).await?;
+
+            info!(
+                "Route handler for path: {:?} took: {} ms",
+                k,
+                start_time.elapsed().as_millis()
+            );
 
             match result {
                 RouteResult::Route(result) => return Ok(RouteResult::Route(result)),

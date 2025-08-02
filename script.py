@@ -5,6 +5,7 @@ import functools
 import json
 import os
 import pprint
+import re
 import socket
 import threading
 import time
@@ -42,11 +43,8 @@ def write_note(payload: str) -> None:
         f.write(payload)
 
 
-### adds id to the payload if id is not None
-# NOTE: To be invoked inside the send_custom function only.
-def idifiy_payload(value: str = "test", id: str = None) -> str:
-    if id is not None:
-        return json.dumps({"id": id, "value": value})
+def build_task(value: str) -> str:
+    return json.dumps({ "value": value })
 
 
 def test_post(path: str, payload: str) -> int:
@@ -75,24 +73,15 @@ def send_custom(
     injected_header = f"malicious-value{'x' * inject_size}"
 
     response_timestamps: Optional[List[float]] = kwargs.get("response_timestamps", None)
-    # path = quote(path)
 
     match request:
         case HttpMethod.POST:
-            if payload and kwargs.get("id") is None:
-                uid = uuid.uuid4()
-                # print(f"Generated UID: {uid}")
-                payload = idifiy_payload(payload, id=str(uid))
-            elif payload:
-                # Self defined id
-                payload = idifiy_payload(payload, id=kwargs.get("id"))
-
             headers = (
                 f"POST {path} HTTP/1.1\r\n"
                 f"Content-Length: {len(payload) if payload else 0}\r\n"
                 "Content-Type: application/json\r\n"
                 "User-Agent: Mozilla/5.0\r\n"
-                f"Cookie: sessionId={sessionId}\r\n"
+                f"{f'Cookie: sessionId={sessionId}\r\n' if sessionId else ''}"
                 f"Host: {host}:{DEFAULT_PORT}\r\n"
                 "X-Custom-Header: valid-value\r\n"
                 f"Injected-Header{injected_header}: {injected_header}\r\n\r\n"
@@ -102,7 +91,7 @@ def send_custom(
             headers = (
                 f"GET {path} HTTP/1.1\r\n"
                 "User-Agent: Mozilla/5.0\r\n"
-                f"Cookie: sessionId={sessionId}\r\n"
+                f"{f'Cookie: sessionId={sessionId}\r\n' if sessionId else ''}"
                 f"Host: {host}:{DEFAULT_PORT}\r\n"
                 "X-Custom-Header: valid-value\r\n"
                 f"Injected-Header: {injected_header}\r\n\r\n"
@@ -112,7 +101,7 @@ def send_custom(
                 f"{request.value} {path} HTTP/1.1\r\n"
                 "User-Agent: Mozilla/5.0\r\n"
                 f"Host: {host}:{DEFAULT_PORT}\r\n"
-                f"Cookie: sessionId={sessionId}\r\n"
+                f"{f'Cookie: sessionId={sessionId}\r\n' if sessionId else ''}"
                 "X-Custom-Header: valid-value\r\n"
                 f"Injected-Header: {injected_header}\r\n\r\n"
                 f"{payload if payload else ''}"
@@ -353,7 +342,7 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
     # count = 1, threads_count = 10, requests_count = 10000, empty db
     quadratic_approx = (
         7.064454015189068e-08 * xs**2
-        +  0.00035391819927912033 * xs
+        + 0.00035391819927912033 * xs
         + 0.07135582499828524
     )
 
@@ -376,20 +365,48 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
     plt.show()
 
 
+def parse_logs(log_file: str = "./logs/logs.log") -> None:
+    with open(log_file, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    durations = []
+    WAL_durations = []
+
+    for line in lines:
+        time = re.search(r"took: ([0-9]+) ms", line)
+
+        if "INFO" in line and time:
+            time = float(time.group(1))
+            if time > 0:
+                durations.append(time)
+
+        if "INFO" in line and "Total flush time" in line:
+            WAL_durations.append(
+                float(line.split("Total flush time: ")[-1].strip().replace("ms", ""))
+            )
+
+    print(WAL_durations, sum(WAL_durations))
+    print(durations)
+
+
 def main():
     run_benchmark(
         callback=functools.partial(
             run_multithreaded,
             callback=send_custom,
             threads_count=10,
-            requests_count=10000,
-            payload="test",
-            sessionId="f6fdabce-5fed-4645-b9df-93af3ece5fd5",
+            requests_count=100,
+            # payload=json.dumps({"email": "test@example.com", "password": "test123"}),
+            payload=build_task("test"),
+            sessionId="8ecb1cb2-4f36-463a-af9d-0dd27dc2e751",
         ),
         request=HttpMethod.POST,
+        # path="/database/users.json",
         path="/database/tasks.json",
         count=1,
     )
+
+    parse_logs()
 
 
 if __name__ == "__main__":

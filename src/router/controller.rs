@@ -1,14 +1,20 @@
 use std::{borrow::Cow, error::Error};
 
+use log::info;
+
 use crate::{
     config::database::{
         DatabaseEntryTrait, DatabaseUser,
         collections::{ClientSession, ClientTask, ClientUser, DatabaseSession},
     },
-    http::{HttpHeaders, HttpRequestError},
+    http::{HttpHeaders, HttpRequestError, HttpRequestMethod},
     router::{
-        CACHE, OwnedRouteResult, RouteContext, RouteHandlerFuture, RouteHandlerResult, RouteResult,
-        RouterCache, middleware::MiddlewareHandlerResult,
+        RouteContext, RouteHandlerFuture, RouteHandlerResult, RouteResult, RouteTableKey,
+        cache::{
+            OptionalOwnedRouteHandlerResult, OptionalRouteResult, OwnedHttpResponseHeaders,
+            OwnedRouteResult, RouterCache, RouterCacheResult,
+        },
+        middleware::MiddlewareHandlerResult,
     },
 };
 
@@ -71,17 +77,111 @@ impl Controller {
     /// Wrapper around the `AppController::get_session_user` method that will be used to get the session user from the route handler.
     ///
     /// Register a route handler that will be used to get the session user. Will be called by the client to get the user information based on the sessionId cookie.
-    pub fn get_session_user(ctx: RouteContext) -> RouteHandlerFuture {
+    pub fn get_session_user(mut ctx: RouteContext) -> RouteHandlerFuture {
         Box::pin(async move {
             Ok(RouteResult::Route(RouteHandlerResult {
-                body: serde_json::to_string(&AppController::get_session_user(&ctx).await?)?,
+                body: serde_json::to_string(&AppController::get_session_user(&mut ctx).await?)?,
                 headers: ctx.response_headers,
             }))
         })
     }
 
+    pub fn register_user(mut ctx: RouteContext) -> RouteHandlerFuture {
+        Box::pin(async move {
+            let database = ctx.get_database()?;
+
+            // That is kind off stupid and not even necessary in the first place, but we wan't to disallow calls to that route if
+            // session for the user already exists and is valid.
+            if let Ok(cookies) = ctx.request.get_cookies() {
+                if let Some(session_id) = cookies.get("sessionId") {
+                    let mut database = database.lock().await;
+
+                    let session = database
+                        .collections
+                        .select::<DatabaseSession, ClientSession>("sessions", session_id)
+                        .await
+                        .map_err(|e| HttpRequestError {
+                            status_code: 404,
+                            status_text: "Not Found".into(),
+                            message: Some(format!(
+                                "Session not found for sessionId: {}",
+                                session_id
+                            )),
+                            internals: Some(Box::<dyn Error + Send + Sync>::from(e.to_string())),
+                            content_type: Some("application/json".into()),
+                            ..Default::default()
+                        })?;
+
+                    // If the session exists, and is not expired, we won't create a new one, so error.
+                    if session.expires > std::time::SystemTime::now() {
+                        database.collections.delete("sessions", session_id).await?;
+
+                        return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
+                            status_code: 400,
+                            status_text: "Bad Request".into(),
+                            message: Some(format!(
+                                "Session is already active for sessionId: {}",
+                                session_id
+                            )),
+                            content_type: Some("application/json".into()),
+                            internals: None,
+                            ..Default::default()
+                        }));
+                    }
+
+                    // Since session is expired, we cannot save it like that, that is the stale session, we have to create a new one.
+                    // session = Some(session);
+                }
+            }
+
+            if let Some(body) = ctx.request.get_body() {
+                let mut database = database.lock().await;
+
+                let user = database
+                    .collections
+                    .insert::<DatabaseUser, ClientUser>(&body.clone())
+                    .await
+                    .map_err(|e| HttpRequestError {
+                        status_code: 400,
+                        status_text: "Bad Request".into(),
+                        message: Some(format!("Failed to create user: {}", e)),
+                        internals: Some(Box::<dyn Error + Send + Sync>::from(e.to_string())),
+                        content_type: Some("application/json".into()),
+                        ..Default::default()
+                    })?;
+
+                // Drop the lock before creating a session.
+                drop(database);
+
+                AppController::create_user_session(&mut ctx, &user).await?;
+
+                let database = ctx.get_database()?;
+                let mut database = database.lock().await;
+
+                database.collections.flush().await?;
+
+                return Ok(RouteResult::Route(RouteHandlerResult {
+                    headers: ctx.response_headers,
+                    body: user.serialize()?,
+                }));
+            } else {
+                return Err(Box::<dyn Error + Send + Sync>::from("Task cannot be empty"));
+            }
+        })
+    }
+
     pub fn sign_out_user(ctx: RouteContext) -> RouteHandlerFuture {
         Box::pin(async move {
+            info!("State of cache before: {:#?}", crate::router::cache::CACHE);
+
+            // Invalidate the cached session user.
+            RouterCache::remove(&RouteTableKey::new(
+                "/api/getSessionUser",
+                Some(HttpRequestMethod::GET),
+            ));
+
+            info!("State of cache after: {:#?}", crate::router::cache::CACHE);
+
             // We will just delete the session from the database, so the user will be logged out.
             let database = ctx.get_database()?;
 
@@ -225,7 +325,7 @@ impl MiddlewareController {
         Box::pin(async move {
             println!("Preprocessing request body to include userId...");
 
-            let user = AppController::get_session_user(&ctx).await?;
+            let user = AppController::get_session_user(&mut ctx).await?;
 
             let body = ctx.request.get_body_mut().ok_or_else(|| {
                 Box::<dyn Error + Send + Sync>::from(HttpRequestError {
@@ -268,6 +368,8 @@ impl MiddlewareController {
                 })
             })?;
 
+            println!("body: {:?}", String::from_utf8_lossy(body));
+
             // Data from the client comes in the format of { value: String }, we need to parse it to that type
             // and then add the userId to it.
 
@@ -281,14 +383,42 @@ impl MiddlewareController {
 impl AppController {
     /// Returns the user object based on the sessionId cookie, if session happens to be valid.
     pub async fn get_session_user(
-        ctx: &RouteContext<'_>,
+        ctx: &mut RouteContext<'_>,
     ) -> Result<DatabaseUser, Box<dyn Error + Send + Sync>> {
-        if let Some(result) = RouterCache::get(ctx.key) {
+        // debug!("Cache state: {:#?}", crate::router::cache::CACHE);
+
+        let start_time = std::time::Instant::now();
+
+        // ctx there could be misleading, as we are not caching what is for the ctx.key, as the ctx.key could be anything that uses that abstraction
+        // for the route handlers defined here in the AppController. If we would cache for the ctx.key and want to return from the cache for that ctx.key that iw points to,
+        // that we be and error, as the ctx.key would have different expected return type.
+        // Consider ctx.key: /database/tasks.json, it could come from that route handler, but we are caching the result for returning the session user, so the ctx.key would be invalid
+        // output for the ctx.key = /database/tasks.json. So actually we are caching for the /api/getSessionUser, that is the route handler that is basically as wrapper for the route handler
+        // of /api/getSessionUser, thought only for the body of that handler, see Controller::get_session_user.
+
+        if let Some(result) = RouterCache::get(&RouteTableKey::new(
+            "/api/getSessionUser",
+            Some(HttpRequestMethod::GET),
+        )) {
             match result {
-                OwnedRouteResult::Route(user) => {
-                    return Ok(serde_json::from_str::<DatabaseUser>(&user.body)?);
-                }
-                OwnedRouteResult::Middleware(_) => unreachable!(),
+                RouterCacheResult::AppControllerResult(OptionalRouteResult::Route(
+                    OptionalOwnedRouteHandlerResult { body, .. },
+                )) => return Ok(serde_json::from_str::<DatabaseUser>(&body)?),
+                RouterCacheResult::RouteResult(route) => match route {
+                    OwnedRouteResult::Route(user) => {
+                        let r = Ok(serde_json::from_str::<DatabaseUser>(&user.body)?);
+
+                        info!(
+                            "Returning user from cache for key: {:?} took: {} ms",
+                            ctx.key,
+                            start_time.elapsed().as_millis()
+                        );
+
+                        return r;
+                    }
+                    OwnedRouteResult::Middleware(_) => unreachable!(),
+                },
+                _ => unreachable!(),
             }
         }
 
@@ -303,15 +433,31 @@ impl AppController {
             .select::<DatabaseUser, ClientUser>("users", &session.get_user_id())
             .await?;
 
+        ctx.response_headers
+            .add(Cow::from("X-Session-User"), Cow::from("true"));
+
         // Cache the output.
 
         RouterCache::set(
-            ctx.key.to_owned(),
-            RouteResult::Route(RouteHandlerResult {
-                body: user.serialize()?,
-                headers: ctx.response_headers.clone(),
-            })
-            .into_owned(),
+            // api/getSessionUser | /database/tasks.json
+            RouteTableKey::new("/api/getSessionUser", Some(HttpRequestMethod::GET)),
+            RouterCacheResult::AppControllerResult(OptionalRouteResult::Route(
+                OptionalOwnedRouteHandlerResult {
+                    body: user.serialize()?,
+                    headers: None,
+                    // headers: Some(ctx.response_headers.clone().into_owned()),
+                    // headers: Some(OwnedHttpResponseHeaders {
+                    //     start_line: ctx.response_headers.start_line.clone(),
+                    //     headers: ctx.response_headers.headers.clone(),
+                    // }
+                },
+            )),
+        );
+
+        info!(
+            "Returning user from database for key: {:?} took: {} ms",
+            ctx.key,
+            start_time.elapsed().as_millis()
         );
 
         return Ok(user);

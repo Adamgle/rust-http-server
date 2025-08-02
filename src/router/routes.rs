@@ -1,16 +1,16 @@
-use std::{collections::HashMap, error::Error};
-
 use serde_json::json;
+use std::{collections::HashMap, error::Error};
 
 use crate::{
     config::{
         SpecialDirectories,
         database::{
             DatabaseEntryTrait, DatabaseTask, DatabaseUser,
-            collections::{ClientSession, ClientTask, ClientUser, DatabaseSession},
+            collections::{ClientTask, ClientUser},
         },
     },
     http::{HttpRequestError, HttpRequestMethod},
+    prelude::*,
     router::{
         RouteContext, RouteEntry, RouteHandler, RouteHandlerResult, RouteResult, RouteTable,
         RouteTableKey,
@@ -76,7 +76,7 @@ impl Routes {
 
         let static_routes =
             SpecialDirectories::collect().inspect_err(|e: &Box<dyn Error + Send + Sync>| {
-                eprintln!("Failed to collect static routes: {}", e);
+                error!("Failed to collect static routes: {}", e);
             })?;
 
         for key in static_routes {
@@ -180,16 +180,14 @@ impl Routes {
 
         self.insert(
             RouteTableKey::new("/database/tasks.json", Some(HttpRequestMethod::GET)),
-            RouteEntry::Route(RouteHandler::new(|ctx: RouteContext| {
+            RouteEntry::Route(RouteHandler::new(|mut ctx| {
                 Box::pin(async move {
                     // If we would want to lay some abstraction on the database we would have "select_all" from the database
                     // and then parse it to the JSON format. Currently we just read the file from the disk.
 
-                    // let body = ctx
-                    //     .request
-                    //     .read_requested_resource(&mut response_headers, key.get_prefixed_path())?;
+                    let user = AppController::get_session_user(&mut ctx).await?;
 
-                    let user = AppController::get_session_user(&ctx).await?;
+                    info!("User authenticated: {:?}", user);
 
                     let database = ctx.get_database()?;
                     let mut database = database.lock().await;
@@ -247,11 +245,6 @@ impl Routes {
         )?;
 
         self.insert(
-            // api/database/tasks/create
-            // api/database/tasks/delete?id=123
-            // api/database/tasks/get?id=123
-            // api/database/tasks/update?id=123
-            // api/database/tasks/list?userId=321
             RouteTableKey::new("/database/tasks.json", Some(HttpRequestMethod::POST)),
             RouteEntry::Route(RouteHandler::new(|ctx| {
                 Box::pin(async move {
@@ -262,6 +255,8 @@ impl Routes {
 
                     if let Some(body) = ctx.request.get_body() {
                         let mut database = database.lock().await;
+
+                        println!("Parsed body: {:?}", String::from_utf8_lossy(body));
 
                         let entry = database
                             .collections
@@ -320,95 +315,7 @@ impl Routes {
             // api/database/users/get?
             // ...
             RouteTableKey::new("/database/users.json", Some(HttpRequestMethod::POST)),
-            RouteEntry::Route(RouteHandler::new(|mut ctx| {
-                return Box::pin(async move {
-                    let database = ctx.get_database()?;
-
-                    // That is kind off stupid and not even necessary in the first place, but we wan't to disallow calls to that route if
-                    // session for the user already exists and is valid.
-                    if let Ok(cookies) = ctx.request.get_cookies() {
-                        if let Some(session_id) = cookies.get("sessionId") {
-                            let mut database = database.lock().await;
-
-                            let session = database
-                                .collections
-                                .select::<DatabaseSession, ClientSession>("sessions", session_id)
-                                .await
-                                .map_err(|e| HttpRequestError {
-                                    status_code: 404,
-                                    status_text: "Not Found".into(),
-                                    message: Some(format!(
-                                        "Session not found for sessionId: {}",
-                                        session_id
-                                    )),
-                                    internals: Some(Box::<dyn Error + Send + Sync>::from(
-                                        e.to_string(),
-                                    )),
-                                    content_type: Some("application/json".into()),
-                                    ..Default::default()
-                                })?;
-
-                            // If the session exists, and is not expired, we won't create a new one, so error.
-                            if session.expires > std::time::SystemTime::now() {
-                                database.collections.delete("sessions", session_id).await?;
-
-                                return Err(Box::<dyn Error + Send + Sync>::from(
-                                    HttpRequestError {
-                                        status_code: 400,
-                                        status_text: "Bad Request".into(),
-                                        message: Some(format!(
-                                            "Session is already active for sessionId: {}",
-                                            session_id
-                                        )),
-                                        content_type: Some("application/json".into()),
-                                        internals: None,
-                                        ..Default::default()
-                                    },
-                                ));
-                            }
-
-                            // Since session is expired, we cannot save it like that, that is the stale session, we have to create a new one.
-                            // session = Some(session);
-                        }
-                    }
-
-                    if let Some(body) = ctx.request.get_body() {
-                        let mut database = database.lock().await;
-
-                        let user = database
-                            .collections
-                            .insert::<DatabaseUser, ClientUser>(&body.clone())
-                            .await
-                            .map_err(|e| HttpRequestError {
-                                status_code: 400,
-                                status_text: "Bad Request".into(),
-                                message: Some(format!("Failed to create user: {}", e)),
-                                internals: Some(Box::<dyn Error + Send + Sync>::from(
-                                    e.to_string(),
-                                )),
-                                content_type: Some("application/json".into()),
-                                ..Default::default()
-                            })?;
-
-                        // Drop the lock before creating a session.
-                        drop(database);
-
-                        AppController::create_user_session(&mut ctx, &user).await?;
-
-                        let database = ctx.get_database()?;
-                        let mut database = database.lock().await;
-
-                        database.collections.flush().await?;
-
-                        return Ok(RouteResult::Route(RouteHandlerResult {
-                            headers: ctx.response_headers,
-                            body: user.serialize()?,
-                        }));
-                    } else {
-                        return Err(Box::<dyn Error + Send + Sync>::from("Task cannot be empty"));
-                    }
-                });
-            })),
+            RouteEntry::Route(RouteHandler::new(Controller::register_user)),
         )?;
 
         return Ok(());

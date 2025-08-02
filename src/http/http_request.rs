@@ -1,5 +1,6 @@
 use crate::config::Config;
-use crate::http::{HttpResponseHeaders, OwnedHttpRequestHeaders, RequestRedirected};
+use crate::http::{HttpResponseHeaders, RequestRedirected};
+use crate::router::cache::OwnedHttpRequest;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -27,12 +28,6 @@ pub struct HttpRequest<'a> {
     body: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Debug)]
-pub struct OwnedHttpRequest {
-    pub headers: OwnedHttpRequestHeaders,
-    pub body: Option<Vec<u8>>,
-}
-
 impl<'a> HttpRequest<'a> {
     /// Creates new HttpRequest instance from TcpStream, reads the stream to UTF-8 String and parses the headers
     ///
@@ -51,7 +46,7 @@ impl<'a> HttpRequest<'a> {
             body: self.body,
         }
     }
-    
+
     /// Parses to HTTP/1.1 from the TcpStream, relying on Content-Length headers, no chunked transfer encoding
     /// is supported. It will read the stream and allocate as much as Content-Length header specifies.
     async fn parse_request(
@@ -72,7 +67,7 @@ impl<'a> HttpRequest<'a> {
         timeout(Duration::from_secs(5), reader.readable())
             .await
             .inspect_err(|e| {
-                eprintln!("Error waiting for the stream to be readable: {:?}", e);
+                error!("Error waiting for the stream to be readable: {:?}", e);
             })??;
 
         let reader = BufReader::new(reader);
@@ -81,7 +76,7 @@ impl<'a> HttpRequest<'a> {
         let mut host_validated = false;
 
         while let Some(line) = lines.next_line().await.inspect_err(|e| {
-            eprintln!("Error reading line from the stream: {}", e);
+            error!("Error reading line from the stream: {}", e);
         })? {
             if line.is_empty() {
                 if headers.is_some() {
@@ -212,7 +207,7 @@ impl<'a> HttpRequest<'a> {
         if let Some(headers) = headers {
             if let Some(content_length) = headers.get("Content-Length") {
                 let content_length = content_length.parse::<usize>().inspect_err(|e| {
-                    eprintln!("Could not parse the Content-Length header as a valid integer: {e}")
+                    error!("Could not parse the Content-Length header as a valid integer: {e}")
                 })?;
 
                 if content_length != 0 {
@@ -247,7 +242,7 @@ impl<'a> HttpRequest<'a> {
                 headers,
             });
         } else {
-            eprintln!("Headers are not initialized");
+            error!("Headers are not initialized");
             return Err("Invalid request".into());
         }
     }
@@ -357,7 +352,7 @@ impl<'a> HttpRequest<'a> {
                 if path.is_absolute()
                     || ((path.starts_with("/") || path.starts_with("\\")) && path.is_relative())
                 {
-                    eprintln!("Path is absolute, not allowed: {:?}", path);
+                    error!("Path is absolute, not allowed: {:?}", path);
                     return Err(HttpRequestError {
                         status_code: 400,
                         status_text: "Bad Request".into(),

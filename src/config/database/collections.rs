@@ -149,7 +149,7 @@ impl DatabaseCollections {
 
                     _ => Err("Unsupported command.")?,
                 } {
-                    eprintln!("Failed to execute command: {:?}, error: {}", c, err);
+                    error!("Failed to execute command: {:?}, error: {}", c, err);
                 };
             }
 
@@ -160,7 +160,7 @@ impl DatabaseCollections {
 
             WAL.reset_size().await?;
 
-            println!("Total flush time: {:?}", start_time.elapsed());
+            info!("Total flush time: {:?}", start_time.elapsed());
         }
 
         return Ok(());
@@ -481,7 +481,7 @@ impl DatabaseCollection {
         collection_path.set_extension("json");
 
         if !collection_path.starts_with(database_path) {
-            println!("Collection path: {collection_path:?} is not inside the database root: ");
+            info!("Collection path: {collection_path:?} is not inside the database root: ");
 
             return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
                 status_code: 400,

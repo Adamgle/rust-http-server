@@ -3,6 +3,9 @@ pub mod http_response;
 
 use crate::config::SpecialDirectories;
 use crate::prelude::*;
+use crate::router::cache::{
+    OwnedHeaderMap, OwnedHttpRequestHeaders, OwnedHttpResponseHeaders, OwnedHttpResponseStartLine,
+};
 use crate::{config::Config, http_response::HttpResponse};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -218,14 +221,6 @@ impl Display for HttpRequestMethod {
 }
 
 #[derive(Clone, Debug)]
-pub struct OwnedHttpResponseStartLine {
-    protocol: HttpProtocol,
-    // status_code should be typed for all available status codes
-    status_code: u16,
-    status_text: Option<String>,
-}
-
-#[derive(Clone, Debug)]
 pub struct HttpResponseStartLine<'a> {
     protocol: HttpProtocol,
     // status_code should be typed for all available status codes
@@ -430,12 +425,12 @@ impl HttpRequestError {
         // and we just propagate the error up the stack if any occurs.
         else if let Some(sentinel_redirection) = err.as_ref().downcast_ref::<RequestRedirected>()
         {
-            eprintln!("Sentinel redirection: {}", sentinel_redirection);
+            info!("Sentinel redirection: {}", sentinel_redirection);
 
             return Ok(());
         }
 
-        eprintln!("Error while responding: {}", err);
+        error!("Error while responding: {}", err);
 
         if let Some(mut headers) = headers {
             // Error message can have no body, for some status codes
@@ -544,12 +539,6 @@ pub trait HttpHeaders<'a> {
 
         self.add(key.into(), value.into());
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct OwnedHttpRequestHeaders {
-    headers: OwnedHeaderMap,
-    request_line: HttpRequestRequestLine,
 }
 
 #[derive(Debug, Clone)]
@@ -828,17 +817,6 @@ impl<'a> HeaderMap<'a> {
                 .collect(),
         }
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct OwnedHeaderMap {
-    pub headers: HashMap<String, String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct OwnedHttpResponseHeaders {
-    headers: OwnedHeaderMap,
-    start_line: OwnedHttpResponseStartLine,
 }
 
 #[derive(Clone, Debug)]
