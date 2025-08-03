@@ -222,10 +222,10 @@ impl Display for HttpRequestMethod {
 
 #[derive(Clone, Debug)]
 pub struct HttpResponseStartLine<'a> {
-    protocol: HttpProtocol,
+    pub protocol: HttpProtocol,
     // status_code should be typed for all available status codes
-    status_code: u16,
-    status_text: Option<&'a str>,
+    pub status_code: u16,
+    pub status_text: Option<&'a str>,
 }
 
 impl Default for HttpResponseStartLine<'_> {
@@ -413,11 +413,6 @@ impl HttpRequestError {
                         .unwrap_or(String::from("text/html")),
                 ),
             );
-
-            let headers = headers.unwrap();
-            let mut response = HttpResponse::new(&headers, body);
-
-            return response.write(&config, &mut writer).await;
         }
         // This is used to control the flow of the program, not really an error.
         // It is used to early return from the request parsing when the Host header is invalid or is configured for an redirection
@@ -432,7 +427,7 @@ impl HttpRequestError {
 
         error!("Error while responding: {}", err);
 
-        if let Some(mut headers) = headers {
+        if let Some(headers) = headers.as_mut() {
             // Error message can have no body, for some status codes
             // the body is forbidden.
             if let Some(body) = body.as_ref() {
@@ -442,9 +437,8 @@ impl HttpRequestError {
                 );
             }
 
-            let mut response = HttpResponse::new(&headers, body);
-
-            return response.write(&config, &mut writer).await;
+            // let mut response = HttpResponse::new(&headers, body);
+            // return response.write(&config, &mut writer).await;
         } else {
             // If there is no headers and body we cannot sent full custom response, as without it
             // it is just a malformed response. We will return a base error response.
@@ -468,12 +462,12 @@ impl HttpRequestError {
                 Cow::from("Content-Length"),
                 Cow::from(body.as_ref().unwrap().len().to_string()),
             );
-
-            let headers = headers.unwrap();
-            let mut response = HttpResponse::new(&headers, body);
-
-            return response.write(&config, &mut writer).await;
         }
+
+        let headers = headers.unwrap();
+        let mut response = HttpResponse::new(&headers, body.as_deref());
+
+        return response.write(&config, &mut writer).await;
     }
 }
 
@@ -798,7 +792,7 @@ impl<'a> HttpRequestHeaders<'a> {
 
 #[derive(Clone, Debug)]
 pub struct HeaderMap<'a> {
-    headers: HashMap<Cow<'a, str>, Cow<'a, str>>,
+    pub headers: HashMap<Cow<'a, str>, Cow<'a, str>>,
 }
 
 impl<'a> HeaderMap<'a> {
@@ -821,8 +815,8 @@ impl<'a> HeaderMap<'a> {
 
 #[derive(Clone, Debug)]
 pub struct HttpResponseHeaders<'a> {
-    headers: HeaderMap<'a>,
-    start_line: HttpResponseStartLine<'a>,
+    pub headers: HeaderMap<'a>,
+    pub start_line: HttpResponseStartLine<'a>,
 }
 
 impl<'a> HttpHeaders<'a> for HttpResponseHeaders<'a> {

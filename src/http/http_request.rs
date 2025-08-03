@@ -24,8 +24,8 @@ use super::{HttpHeaders, HttpRequestHeaders, HttpRequestMethod};
 #[derive(Clone, Debug)]
 pub struct HttpRequest<'a> {
     // headers: String,
-    headers: HttpRequestHeaders<'a>,
-    body: Option<Vec<u8>>,
+    pub headers: HttpRequestHeaders<'a>,
+    pub body: Option<Vec<u8>>,
 }
 
 impl<'a> HttpRequest<'a> {
@@ -315,10 +315,7 @@ impl<'a> HttpRequest<'a> {
     /// `NOTE`: Paths `/pages/index.html` and `/index.html` and "/" are valid paths that point to `/pages` directory on `index.html` file.
     ///
     /// `TODO`: Query parsing is not implemented
-    pub fn get_absolute_resource_path(
-        &self,
-        // config: &MutexGuard<'_, Config>,
-    ) -> Result<PathBuf, HttpRequestError> {
+    pub fn get_absolute_resource_path(&self) -> Result<PathBuf, HttpRequestError> {
         match self.get_request_target_path() {
             Ok(path) => {
                 // We will map specialized directories to the extension of the file requested, so if the file is requested with .html extension

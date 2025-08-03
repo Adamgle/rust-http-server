@@ -45,22 +45,6 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    /// Creates a new AppConfig
-    // pub fn new(url: url::Url) -> Result<Self, Box<dyn Error + Send + Sync>> {
-    //     Ok(AppConfig {
-    //         routes: Self::create_routes()?,
-    //         url,
-    //     })
-    // }
-
-    /// Creates a new routes HashMap, that is used to store the routes of the application.
-    /// Routes are defined statically in the code, and are evaluated on startup.
-    ///
-    /// Since the function could get big, we will use a wrapper function to create the routes.
-    // pub fn create_routes() -> Result<RouteTable, Box<dyn Error + Send + Sync>> {
-    //     crate::routes::RouteTable::create_routes()
-    // }
-
     pub fn get_database(&self) -> Option<Arc<Mutex<Database>>> {
         // self.database.as_ref().map(Arc::clone)
         self.database.clone()

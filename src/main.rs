@@ -1,5 +1,4 @@
-#[allow(unused_imports)]
-use log::{LevelFilter, debug, error, info, warn};
+use log::{LevelFilter, error, info};
 use rust_http_server::config::Config;
 use rust_http_server::tcp_handlers::run_tcp_server;
 use std::{env, error::Error};

@@ -10,10 +10,7 @@ use crate::{
     http::{HttpHeaders, HttpRequestError, HttpRequestMethod},
     router::{
         RouteContext, RouteHandlerFuture, RouteHandlerResult, RouteResult, RouteTableKey,
-        cache::{
-            OptionalOwnedRouteHandlerResult, OptionalRouteResult, OwnedHttpResponseHeaders,
-            OwnedRouteResult, RouterCache, RouterCacheResult,
-        },
+        cache::{OptionalRouteHandlerResult, OptionalRouteResult, RouterCacheResult},
         middleware::MiddlewareHandlerResult,
     },
 };
@@ -32,10 +29,10 @@ pub struct MiddlewareController;
 
 impl Controller {
     /// A static route handler that reads the requested resource from the `/public` directory.
-    pub fn static_route_handler(
+    pub fn static_route_handler<'ctx>(
         // Pin<Box<dyn Future<Output = RouteResult<'ctx>> + Send + 'ctx>>;
-        ctx: RouteContext,
-    ) -> RouteHandlerFuture {
+        ctx: RouteContext<'ctx>,
+    ) -> RouteHandlerFuture<'ctx> {
         Box::pin(async move {
             // Extract what we need before any mutable borrows
             let RouteContext {
@@ -55,7 +52,7 @@ impl Controller {
         })
     }
 
-    pub fn handle_root_render(mut ctx: RouteContext) -> RouteHandlerFuture {
+    pub fn handle_root_render(mut ctx: RouteContext<'_>) -> RouteHandlerFuture {
         Box::pin(async move {
             // We want to flush the database on the load of that route.
 
@@ -77,7 +74,7 @@ impl Controller {
     /// Wrapper around the `AppController::get_session_user` method that will be used to get the session user from the route handler.
     ///
     /// Register a route handler that will be used to get the session user. Will be called by the client to get the user information based on the sessionId cookie.
-    pub fn get_session_user(mut ctx: RouteContext) -> RouteHandlerFuture {
+    pub fn get_session_user(mut ctx: RouteContext<'_>) -> RouteHandlerFuture {
         Box::pin(async move {
             Ok(RouteResult::Route(RouteHandlerResult {
                 body: serde_json::to_string(&AppController::get_session_user(&mut ctx).await?)?,
@@ -86,7 +83,7 @@ impl Controller {
         })
     }
 
-    pub fn register_user(mut ctx: RouteContext) -> RouteHandlerFuture {
+    pub fn register_user(mut ctx: RouteContext<'_>) -> RouteHandlerFuture {
         Box::pin(async move {
             let database = ctx.get_database()?;
 
@@ -170,17 +167,22 @@ impl Controller {
         })
     }
 
-    pub fn sign_out_user(ctx: RouteContext) -> RouteHandlerFuture {
+    pub fn sign_out_user(ctx: RouteContext<'_>) -> RouteHandlerFuture {
         Box::pin(async move {
-            info!("State of cache before: {:#?}", crate::router::cache::CACHE);
+            // info!("State of cache before: {:#?}", crate::router::cache::CACHE);
 
             // Invalidate the cached session user.
-            RouterCache::remove(&RouteTableKey::new(
+            // RouterCache::remove(&RouteTableKey::new(
+            //     "/api/getSessionUser",
+            //     Some(HttpRequestMethod::GET),
+            // ));
+
+            ctx.cache.remove(&RouteTableKey::new(
                 "/api/getSessionUser",
                 Some(HttpRequestMethod::GET),
             ));
 
-            info!("State of cache after: {:#?}", crate::router::cache::CACHE);
+            // info!("State of cache after: {:#?}", crate::router::cache::CACHE);
 
             // We will just delete the session from the database, so the user will be logged out.
             let database = ctx.get_database()?;
@@ -223,7 +225,7 @@ impl Controller {
         })
     }
 
-    pub fn sign_in_user(mut ctx: RouteContext) -> RouteHandlerFuture {
+    pub fn sign_in_user(mut ctx: RouteContext<'_>) -> RouteHandlerFuture {
         Box::pin(async move {
             // We will just delete the session from the database, so the user will be logged out.
             let database = ctx.get_database()?;
@@ -287,7 +289,7 @@ impl MiddlewareController {
     ///
     /// Validates the database "connection" for path that requested it and utilizes it.
     /// It won't run on every single path, but only on the paths that start with the `:database/` segment.
-    pub fn validate_database(mut ctx: RouteContext) -> RouteHandlerFuture {
+    pub fn validate_database(mut ctx: RouteContext<'_>) -> RouteHandlerFuture {
         Box::pin(async move {
             // Here we could initialize the database connection or any other resource
             // that we need for the middleware.
@@ -321,9 +323,9 @@ impl MiddlewareController {
     /// Also we could just keep that id in the cookies or local storage.
     ///
     /// We will pre-process the request body to also include the userId derived from the sessionId cookie.
-    pub fn preprocess_create_task(mut ctx: RouteContext) -> RouteHandlerFuture {
+    pub fn preprocess_create_task(mut ctx: RouteContext<'_>) -> RouteHandlerFuture {
         Box::pin(async move {
-            println!("Preprocessing request body to include userId...");
+            // info!("Preprocessing request body to include userId...");
 
             let user = AppController::get_session_user(&mut ctx).await?;
 
@@ -368,8 +370,6 @@ impl MiddlewareController {
                 })
             })?;
 
-            println!("body: {:?}", String::from_utf8_lossy(body));
-
             // Data from the client comes in the format of { value: String }, we need to parse it to that type
             // and then add the userId to it.
 
@@ -385,8 +385,6 @@ impl AppController {
     pub async fn get_session_user(
         ctx: &mut RouteContext<'_>,
     ) -> Result<DatabaseUser, Box<dyn Error + Send + Sync>> {
-        // debug!("Cache state: {:#?}", crate::router::cache::CACHE);
-
         let start_time = std::time::Instant::now();
 
         // ctx there could be misleading, as we are not caching what is for the ctx.key, as the ctx.key could be anything that uses that abstraction
@@ -396,29 +394,32 @@ impl AppController {
         // output for the ctx.key = /database/tasks.json. So actually we are caching for the /api/getSessionUser, that is the route handler that is basically as wrapper for the route handler
         // of /api/getSessionUser, thought only for the body of that handler, see Controller::get_session_user.
 
-        if let Some(result) = RouterCache::get(&RouteTableKey::new(
+        if let Some(result) = ctx.cache.get(&RouteTableKey::new(
             "/api/getSessionUser",
             Some(HttpRequestMethod::GET),
         )) {
             match result {
                 RouterCacheResult::AppControllerResult(OptionalRouteResult::Route(
-                    OptionalOwnedRouteHandlerResult { body, .. },
-                )) => return Ok(serde_json::from_str::<DatabaseUser>(&body)?),
-                RouterCacheResult::RouteResult(route) => match route {
-                    OwnedRouteResult::Route(user) => {
-                        let r = Ok(serde_json::from_str::<DatabaseUser>(&user.body)?);
+                    OptionalRouteHandlerResult { body, .. },
+                ))
+                | RouterCacheResult::RouteResult(RouteResult::Route(RouteHandlerResult {
+                    body,
+                    ..
+                })) => {
+                    let u = Ok(serde_json::from_str::<DatabaseUser>(&body)?);
 
-                        info!(
-                            "Returning user from cache for key: {:?} took: {} ms",
-                            ctx.key,
-                            start_time.elapsed().as_millis()
-                        );
+                    info!(
+                        "Returning user from cache for key: {:?} took: {} ms",
+                        ctx.key,
+                        start_time.elapsed().as_millis()
+                    );
 
-                        return r;
-                    }
-                    OwnedRouteResult::Middleware(_) => unreachable!(),
-                },
-                _ => unreachable!(),
+                    return u;
+                }
+                RouterCacheResult::RouteResult(RouteResult::Middleware(_)) => {
+                    unreachable!("Unexpected middleware result")
+                }
+                _ => unreachable!("Unexpected cache result type"),
             }
         }
 
@@ -438,18 +439,13 @@ impl AppController {
 
         // Cache the output.
 
-        RouterCache::set(
+        ctx.cache.set(
             // api/getSessionUser | /database/tasks.json
             RouteTableKey::new("/api/getSessionUser", Some(HttpRequestMethod::GET)),
             RouterCacheResult::AppControllerResult(OptionalRouteResult::Route(
-                OptionalOwnedRouteHandlerResult {
+                OptionalRouteHandlerResult {
                     body: user.serialize()?,
                     headers: None,
-                    // headers: Some(ctx.response_headers.clone().into_owned()),
-                    // headers: Some(OwnedHttpResponseHeaders {
-                    //     start_line: ctx.response_headers.start_line.clone(),
-                    //     headers: ctx.response_headers.headers.clone(),
-                    // }
                 },
             )),
         );
@@ -532,6 +528,11 @@ impl AppController {
         ctx: &mut RouteContext<'_>,
         user: &DatabaseUser,
     ) -> Result<DatabaseSession, Box<dyn Error + Send + Sync>> {
+        // let ctx = match &mut ctx {
+        //     RouteContextWrapper::Borrowed(ctx) => ctx,
+        //     RouteContextWrapper::Owned(ctx) => &mut ctx.to_borrowed(),
+        // };
+
         let database = ctx.get_database()?;
 
         let mut database = database.lock().await;

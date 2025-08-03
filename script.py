@@ -44,7 +44,7 @@ def write_note(payload: str) -> None:
 
 
 def build_task(value: str) -> str:
-    return json.dumps({ "value": value })
+    return json.dumps({"value": value})
 
 
 def test_post(path: str, payload: str) -> int:
@@ -136,6 +136,7 @@ def run_multithreaded(
     callback: SendCustomCallable,
     threads_count: int = 10,
     requests_count: int = 100,
+    plot_results: bool = True,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """
@@ -146,11 +147,13 @@ def run_multithreaded(
         callback (SendCustomCallable): The function to be executed by each thread. Must accept keyword arguments and return a dict with "payload_size" and "status" keys.
         threads_count (int, optional): Number of threads to spawn. Defaults to 10.
         requests_count (int, optional): Number of requests distributes across thread to perform. Defaults to 100.
+        plot_results (bool, optional): Whether to plot response timestamps. Defaults to True.
         **kwargs (Any): Additional keyword arguments to pass to the callback function.
     Returns:
         dict[str, Any]: A dictionary containing:
             - "results": List of boolean status results from all requests.
             - "request_size": The payload size from the first callback result.
+            - "response_timestamps": List of timestamp lists for each thread.
     Notes:
         - The function prints the number of failures after each thread completes.
         - The "request_size" is determined from the first callback invocation.
@@ -162,27 +165,32 @@ def run_multithreaded(
     results: list[bool] = []
     request_size: int = 0
     thread_list = []
-
-    # response_timestamps: Optional[List[time.time]] = kwargs.get(
-    #     "response_timestamp", None
-    # )
+    all_response_timestamps: List[List[float]] = []
+    start_time = time.time()
 
     def worker() -> None:
         nonlocal request_size
         thread_results: list[bool] = []
+        thread_timestamps: List[float] = [start_time]
+
 
         for _ in range(requests_count // threads_count):
-            # Invokes send_custom presumably
+            # Add response_timestamps to kwargs for this thread
+            kwargs_with_timestamps = kwargs.copy()
+            kwargs_with_timestamps["response_timestamps"] = thread_timestamps
 
-            result = callback(**kwargs)
+            result = callback(**kwargs_with_timestamps)
 
             if request_size == 0:
                 request_size = result["payload_size"]
             thread_results.append(result["status"])
 
+        # Convert absolute timestamps to relative timestamps from start
+        relative_timestamps = [ts - start_time for ts in thread_timestamps]
+        all_response_timestamps.append(relative_timestamps)
         results.extend(thread_results)
 
-    for _ in range(threads_count):
+    for i in range(threads_count):
         thread = threading.Thread(target=worker)
         thread_list.append(thread)
         thread.start()
@@ -190,9 +198,16 @@ def run_multithreaded(
     for idx, thread in enumerate(thread_list):
         thread.join()
         print(f"Thread {idx} done. Failures: {results.count(False)}")
-        results.clear()
 
-    return {"results": results, "request_size": request_size}
+    # Plot results if requested
+    if plot_results:
+        plot_response_timestamps(all_response_timestamps)
+
+    return {
+        "results": results,
+        "request_size": request_size,
+        "response_timestamps": all_response_timestamps,
+    }
 
 
 def run_benchmark(
@@ -272,6 +287,7 @@ def run_benchmark(
     print("\n".join(log_entry))
 
 
+
 # TODO: This could happen on DatabaseWAL execution, or other side effects that will trigger substantial difference
 # between the adjacent requests in time.
 def determine_performance_loss(timestamps: List[List[float]]) -> Dict[int, List[float]]:
@@ -316,7 +332,7 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
     # plt.show()
 
     for i, ts in enumerate(timestamps):
-        plt.plot(ts, marker=".", label=f"Benchmark {i + 1}")
+        plt.plot(ts, marker=".", label=f"Thread {i + 1}")
 
     timestamps_avg = np.mean(timestamps, axis=0)
     xs = np.arange(len(timestamps_avg))
@@ -390,20 +406,31 @@ def parse_logs(log_file: str = "./logs/logs.log") -> None:
 
 
 def main():
-    run_benchmark(
-        callback=functools.partial(
-            run_multithreaded,
-            callback=send_custom,
-            threads_count=10,
-            requests_count=100,
-            # payload=json.dumps({"email": "test@example.com", "password": "test123"}),
-            payload=build_task("test"),
-            sessionId="8ecb1cb2-4f36-463a-af9d-0dd27dc2e751",
-        ),
-        request=HttpMethod.POST,
-        # path="/database/users.json",
+    # run_benchmark(
+    #     callback=functools.partial(
+    #         run_multithreaded,
+    #         callback=send_custom,
+    #         threads_count=10,
+    #         requests_count=10000,
+    #         # payload=json.dumps({"email": "test@example.com", "password": "test123"}),
+    #         payload=build_task("test"),
+    #         sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
+    #     ),
+    #     request=HttpMethod.POST,
+    #     # path="/database/users.json",
+    #     path="/database/tasks.json",
+    #     count=1,
+    # )
+
+    run_multithreaded(
+        callback=send_custom,
+        threads_count=10,
+        requests_count=10,
+        # payload=build_task("test"),
+        sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
+        request=HttpMethod.GET,
+        # path="/database/tasks.json",
         path="/database/tasks.json",
-        count=1,
     )
 
     parse_logs()
@@ -411,3 +438,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

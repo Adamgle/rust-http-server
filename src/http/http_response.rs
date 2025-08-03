@@ -10,14 +10,14 @@ use tokio::net::tcp::OwnedWriteHalf;
 
 #[derive(Debug)]
 pub struct HttpResponse<'a> {
-    body: Option<String>, // This could be [u8] bytes Or just `Bytes` struct, because that is at the lower level and actually every resource in TCP is stream as chunks of u8 bytes.
+    body: Option<&'a str>, // This could be [u8] bytes Or just `Bytes` struct, because that is at the lower level and actually every resource in TCP is stream as chunks of u8 bytes.
     /// Headers are created in the `handle_client` and we are referencing that data.
     headers: &'a HttpResponseHeaders<'a>,
     // serialized: Option<Vec<u8>>,
 }
 
 impl<'a> HttpResponse<'a> {
-    pub fn new(headers: &'a HttpResponseHeaders<'a>, body: Option<String>) -> Self {
+    pub fn new(headers: &'a HttpResponseHeaders<'a>, body: Option<&'a str>) -> Self {
         Self {
             body,
             headers,

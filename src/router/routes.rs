@@ -14,6 +14,7 @@ use crate::{
     router::{
         RouteContext, RouteEntry, RouteHandler, RouteHandlerResult, RouteResult, RouteTable,
         RouteTableKey,
+        cache::RouterCacheResult,
         controller::{AppController, Controller},
     },
 };
@@ -211,17 +212,24 @@ impl Routes {
 
                     let body = serde_json::to_string(&collection)?;
 
-                    return Ok(RouteResult::Route(RouteHandlerResult {
+                    let result = RouteResult::Route(RouteHandlerResult {
                         body,
-                        headers: ctx.response_headers,
-                    }));
+                        headers: ctx.response_headers.clone(),
+                    });
+
+                    // ctx.cache.set(
+                    //     ctx.get_key().clone(),
+                    //     RouterCacheResult::RouteResult(result.clone()),
+                    // );
+
+                    return Ok(result);
                 })
             })),
         )?;
 
         self.insert(
             RouteTableKey::new("/database/users.json", Some(HttpRequestMethod::GET)),
-            RouteEntry::Route(RouteHandler::new(|ctx: RouteContext| {
+            RouteEntry::Route(RouteHandler::new(|ctx| {
                 Box::pin(async move {
                     let database = ctx.get_database()?;
                     let mut database = database.lock().await;
@@ -255,8 +263,6 @@ impl Routes {
 
                     if let Some(body) = ctx.request.get_body() {
                         let mut database = database.lock().await;
-
-                        println!("Parsed body: {:?}", String::from_utf8_lossy(body));
 
                         let entry = database
                             .collections

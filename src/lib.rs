@@ -164,12 +164,15 @@ pub mod tcp_handlers {
 
         let (path, method) = (request.get_request_target_path()?, request.get_method());
 
+        // info!("State of cache: {:#?}", config.get_router().get_cache());
+
         // NOTE: We could just create those headers while doing route and then return the ownership.
         // it would be the same actually, we would still return it from the route handler, but maybe more idiomatic.
         let headers: HttpResponseHeaders<'_> =
             HttpResponseHeaders::new(HttpResponseStartLine::default());
 
         let router = config.get_router();
+
         let route_key = RouteTableKey {
             path: PathBuf::from(path),
             method: Some(method.clone()),
@@ -180,6 +183,7 @@ pub mod tcp_handlers {
 
         // To resolve the double mutable reference to headers we will move the ownership of headers
         // that is cheap operation.
+
         let ctx = RouteContext::new(
             request,
             headers,
@@ -187,20 +191,47 @@ pub mod tcp_handlers {
             config.app.get_database(),
             // We are cloning the database config
             config.get_database_config().cloned(),
+            config.app.router.get_cache(),
         );
 
         // I know that is very stupid, but I have thought that middleware could also be run standalone,
         // but that does not make any sense, as it is no producing body, we will keep the code because it does not hurt.
         // IDEA: Maybe the return type of the middleware could be used a redirect, as that does not require route handler.
-        if let RouteResult::Route(RouteHandlerResult { mut headers, body }) =
-            router.route(ctx).await?
-        {
-            // Set default headers, if any.
-            headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
 
-            let mut response = HttpResponse::new(&headers, Some(body));
+        // That is impossible due to lifetime issues.
+        // let result = match router.route(ctx).await? {
+        //     AnyRouteResult::RouteResult(result) => result,
+        //     AnyRouteResult::OwnedRouteResult(result) => result.to_borrowed(),
+        // };
 
-            response.write(&config, &mut writer).await?;
+        // We have to match it explicitly
+
+        let mut result = router.route(ctx).await?;
+
+        // let result = match &mut result {
+        //     AnyRouteResult::RouteResult(r) => r,
+        //     AnyRouteResult::OwnedRouteResult(r) => &mut r.to_borrowed(),
+        // };
+
+        match result {
+            RouteResult::Route(RouteHandlerResult {
+                ref mut headers,
+                ref body,
+            }) => {
+                // Add the connection header to the response
+                headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
+
+                // Create the response with the headers and body
+                let mut response: HttpResponse<'_> = HttpResponse::new(&headers, Some(body));
+
+                // Write the response to the writer
+                response.write(&config, &mut writer).await?;
+            }
+            _ => {
+                // If we reach here, it means that the middleware handlers should not return any other result.
+                error!("Unexpected route result: {:?}", result);
+                unreachable!("")
+            }
         }
 
         Ok(())

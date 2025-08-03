@@ -7,7 +7,7 @@ use crate::{
     prelude::*,
     router::cache::{
         OwnedMiddlewareHandlerResult, OwnedRouteContext, OwnedRouteHandlerResult, OwnedRouteResult,
-        RouterCacheResult,
+        RouterCache, RouterCacheResult,
     },
 };
 
@@ -41,6 +41,7 @@ use crate::{
 pub struct Router {
     routes: Routes,
     middleware: Middleware,
+    cache: Arc<RouterCache>,
 }
 
 /// Represents an entry in the route table, which can be either a route handler or a middleware handler.
@@ -251,8 +252,9 @@ pub struct RouteContext<'ctx> {
     pub key: &'ctx RouteTableKey,
     pub database: Option<Arc<Mutex<Database>>>,
     pub database_config: Option<DatabaseConfigEntry>, // Config cannot be used here as Config itself contains the RouteTable, that would be a circular reference.
-                                                      // Maybe we would have no issues with that as Config is in Arc<Mutex<_>>, but we won't do that.
-                                                      // If we would access that field we would have a problem.
+    // Maybe we would have no issues with that as Config is in Arc<Mutex<_>>, but we won't do that.
+    // If we would access that field we would have a problem.
+    pub cache: Arc<RouterCache>,
 }
 
 impl<'ctx> RouteContext<'ctx> {
@@ -262,6 +264,7 @@ impl<'ctx> RouteContext<'ctx> {
         key: &'ctx RouteTableKey,
         database: Option<Arc<Mutex<Database>>>,
         database_config: Option<DatabaseConfigEntry>,
+        cache: Arc<RouterCache>,
     ) -> Self {
         Self {
             request,
@@ -269,6 +272,7 @@ impl<'ctx> RouteContext<'ctx> {
             key,
             database,
             database_config,
+            cache,
         }
     }
 
@@ -280,6 +284,7 @@ impl<'ctx> RouteContext<'ctx> {
             key: self.key.clone(),
             database: self.database,
             database_config: self.database_config,
+            cache: Arc::clone(&self.cache),
         }
     }
 
@@ -290,7 +295,7 @@ impl<'ctx> RouteContext<'ctx> {
 
     // Returns the key of the route handler context.
     pub fn get_key(&self) -> &RouteTableKey {
-        self.key
+        &self.key
     }
 
     pub fn get_database(&self) -> Result<Arc<Mutex<Database>>, Box<dyn Error + Send + Sync>> {
@@ -324,12 +329,18 @@ pub enum RouteResult<'ctx> {
     Middleware(MiddlewareHandlerResult<'ctx>),
 }
 
+/// Wrapper around Owned and Borrowed route handler results.
+// pub enum AnyRouteResult<'ctx> {
+//     RouteResult(RouteResult<'ctx>),
+//     OwnedRouteResult(OwnedRouteResult),
+// }
+
 impl RouteResult<'_> {
     pub fn into_owned(self) -> OwnedRouteResult {
         match self {
             RouteResult::Route(result) => OwnedRouteResult::Route(OwnedRouteHandlerResult {
-                headers: result.headers.into_owned(),
-                body: result.body,
+                headers: result.headers.clone().into_owned(),
+                body: result.body.clone(),
             }),
             RouteResult::Middleware(result) => {
                 OwnedRouteResult::Middleware(OwnedMiddlewareHandlerResult {
@@ -351,8 +362,8 @@ pub type RouteHandlerFuture<'ctx> = Pin<
 // TODO: The struct of RouteHandlerValue is already behind Arc, check how to avoid one of the Arc's.
 // A closure of the route handler
 
-// NOTE: Check if that 'static fits there, as of my logic, closure is computed at runtime and lives for the duration of the program,
-// so it should be 'static, but maybe I am wrong.
+// NOTE: Using 'static here because the closure itself lives for the program duration,
+// but it can work with any lifetime 'ctx through the for<'ctx> bound
 pub type RouteHandlerClosure =
     Arc<dyn for<'ctx> Fn(RouteContext<'ctx>) -> RouteHandlerFuture<'ctx> + Send + Sync + 'static>;
 
@@ -408,7 +419,16 @@ impl Router {
         middleware.create_middleware()?;
         middleware.generate_middleware_segments(&routes)?;
 
-        Ok(Self { middleware, routes })
+        Ok(Self {
+            middleware,
+            routes,
+            cache: Arc::new(RouterCache::new()),
+        })
+    }
+
+    pub fn get_cache(&self) -> Arc<RouterCache> {
+        // Returns the cache of the router.
+        Arc::clone(&self.cache)
     }
 
     pub fn get_routes(&self) -> &Routes {
@@ -431,17 +451,20 @@ impl Router {
     pub async fn route<'ctx>(
         &self,
         mut ctx: RouteContext<'ctx>,
+        // mut ctx: RouteContext<'ctx>,
         // RouteResult<'ctx>
     ) -> Result<RouteResult<'ctx>, Box<dyn Error + Send + Sync>> {
         // Check if the path matches any of the middleware segments.
 
         let routes = self.routes.get_routes();
 
-        // Route has to exist for middleware segment to run, as if not, if path is given as invalid there, that would just return an error,
-        // but despite that middleware segment could run.
-        let route = routes.get(ctx.get_key()).map_err(|message| {
-            // Check if middleware is defined for the path, to inform about a possible mistake in the code.
+        let key = ctx.get_key().clone();
 
+        // The route must exist for the middleware segment to run.
+        // If the path is invalid, an error will be returned, and the middleware segment should not execute.
+        // The same applies to the actual middleware handler—if the route does not exist, the middleware should not run either.
+
+        let route = routes.get(&key).map_err(|message| {
             Box::<dyn Error + Send + Sync>::from(HttpRequestError {
                 status_code: 404,
                 status_text: "Not Found".to_string(),
@@ -450,75 +473,93 @@ impl Router {
             })
         })?;
 
-        // We don't want to propagate the error here if there is not segment handler for the route.
-        if let Ok(RouteEntry::Middleware(Some(handler))) =
-            self.middleware.get_segments().get(ctx.get_key())
+        // If the segment exists, we run the middleware for that segment.
+        // We don't want to propagate the error here if there is no segment handler for the route.
+
+        if let Ok(RouteEntry::Middleware(Some(handler))) = self.middleware.get_segments().get(&key)
         {
-            // info!("Running middleware segment for path: {:?}", ctx.get_key());
-
-            let k = ctx.get_key().clone();
-            let start_time = std::time::Instant::now();
-
-            let result = handler.callback(ctx).await.inspect_err(|e| {
-                error!("Error in middleware segment handler for {k:?} | {:?}", e);
-            })?;
-
-            info!(
-                "Middleware segment for path: {:?} took: {} ms",
-                k,
-                start_time.elapsed().as_millis()
-            );
-
-            match result {
-                RouteResult::Middleware(MiddlewareHandlerResult { ctx: context }) => {
-                    // If the middleware segment exists, we run the middleware for that segment.
-                    // We do not want to propagate the error here, as we want to return the context back to the route handler.
+            match ctx.cache.get(&key) {
+                // If there is a cache entry for the middleware segment, we save it in the `ctx` for the later use in either middleware handler or route handler, or both.
+                Some(RouterCacheResult::RouteResult(RouteResult::Middleware(
+                    MiddlewareHandlerResult { ctx: context },
+                ))) => {
                     ctx = context;
                 }
-                // This branch would only evaluate if the wrong enum variant is returned from the handler
                 _ => {
-                    return Err(Box::from(HttpRequestError {
-                        internals: Some(Box::from(
-                            "Middleware segment handler should evaluate to RouteResult::Middleware",
-                        )),
-                        ..Default::default()
-                    }));
-                } // _ => unreachable!("Middleware segment handler should evaluate to RouteResult::Middleware"),
-            }
+                    let k = ctx.get_key().clone();
+                    let start_time = std::time::Instant::now();
 
-            // If the segment exists, we run the middleware for that segment.
-            // We do not want to propagate the error here, as we want to return the context back to the route handler.
+                    let result = handler.callback(ctx).await.inspect_err(|e| {
+                        error!("Error in middleware segment handler for {k:?} | {:?}", e);
+                    })?;
+
+                    info!(
+                        "Middleware segment for path: {:?} took: {} ms",
+                        k,
+                        start_time.elapsed().as_millis()
+                    );
+
+                    match result {
+                        RouteResult::Middleware(MiddlewareHandlerResult { ctx: context }) => {
+                            // If the middleware segment exists, we run the middleware for that segment.
+                            // We do not want to propagate the error here, as we want to return the context back to the route handler.
+                            ctx = context;
+                        }
+                        // This branch would only evaluate if the wrong enum variant is returned from the handler
+                        _ => {
+                            return Err(Box::from(HttpRequestError {
+                                internals: Some(Box::from(
+                                    "Middleware segment handler should evaluate to RouteResult::Middleware",
+                                )),
+                                ..Default::default()
+                            }));
+                        }
+                    }
+                }
+            }
         }
 
         if let Some(RouteEntry::Middleware(Some(middleware))) =
-            self.middleware.get_routes().get_routes().get(ctx.get_key())
+            self.middleware.get_routes().get_routes().get(&key)
         {
-            // info!("Running middleware for path: {:?}", ctx.get_key());
+            match ctx.cache.get(&key) {
+                Some(cached) => {
+                    if let RouterCacheResult::RouteResult(RouteResult::Middleware(
+                        MiddlewareHandlerResult { ctx: context },
+                    )) = cached
+                    {
+                        ctx = context;
+                    }
+                }
+                None => {
+                    let k = ctx.get_key().clone();
+                    let start_time = std::time::Instant::now();
 
-            let k = ctx.get_key().clone();
-            let start_time = std::time::Instant::now();
+                    let result = middleware.callback(ctx).await.inspect_err(|e| {
+                        error!("Error in middleware handler for {k:?} | {:?}", e);
+                    })?;
 
-            let result = middleware.callback(ctx).await.inspect_err(|e| {
-                error!("Error in middleware handler for {k:?} | {:?}", e);
-            })?;
+                    info!(
+                        "Middleware for path: {:?} took: {} ms",
+                        k,
+                        start_time.elapsed().as_millis()
+                    );
 
-            info!(
-                "Middleware for path: {:?} took: {} ms",
-                k,
-                start_time.elapsed().as_millis()
-            );
-
-            match result {
-                RouteResult::Middleware(MiddlewareHandlerResult { ctx: context }) => ctx = context,
-                // This branch would only evaluate if the wrong enum variant is returned from the handler
-                _ => {
-                    return Err(Box::from(HttpRequestError {
-                        internals: Some(Box::from(
-                            "Middleware handler should evaluate to RouteResult::Middleware",
-                        )),
-                        ..Default::default()
-                    }));
-                } // _ => unreachable!("Middleware handler should evaluate to RouteResult::Middleware"),
+                    match result {
+                        RouteResult::Middleware(MiddlewareHandlerResult { ctx: context }) => {
+                            ctx = context;
+                        }
+                        // This branch would only evaluate if the wrong enum variant is returned from the handler
+                        _ => {
+                            return Err(Box::from(HttpRequestError {
+                                internals: Some(Box::from(
+                                    "Middleware handler should evaluate to RouteResult::Middleware",
+                                )),
+                                ..Default::default()
+                            }));
+                        }
+                    }
+                }
             }
         }
 
@@ -529,35 +570,35 @@ impl Router {
             // We do not want to propagate the error here, as we want to return the context back to the route handler.
 
             // TODO: Check if there is a cache entry for the route, if so, return it.
-            if let Some(RouterCacheResult::RouteResult(cached)) =
-                crate::router::cache::RouterCache::get(&ctx.get_key())
-            {
-                // That has to be converted to_borrowed, as we are returning the owned result.
-                return Ok(RouteResult::Route(cached));
-            }
-
-            let k = ctx.get_key().clone();
-            let start_time = std::time::Instant::now();
-
-            let result = route.callback(ctx).await?;
-
-            info!(
-                "Route handler for path: {:?} took: {} ms",
-                k,
-                start_time.elapsed().as_millis()
-            );
-
-            match result {
-                RouteResult::Route(result) => return Ok(RouteResult::Route(result)),
-                // This branch would only evaluate if the wrong enum variant is returned from the handler
+            match ctx.cache.get(&key) {
+                Some(RouterCacheResult::RouteResult(cached)) => return Ok(cached),
                 _ => {
-                    return Err(Box::from(HttpRequestError {
-                        internals: Some(Box::from(
-                            "Route handler should evaluate to RouteResult::Route",
-                        )),
-                        ..Default::default()
-                    }));
-                } // _ => unreachable!("Route handler should evaluate to RouteResult::Route"),
+                    let k = ctx.get_key().clone();
+                    let start_time = std::time::Instant::now();
+
+                    let result = route.callback(ctx).await?;
+
+                    info!(
+                        "Route handler for path: {:?} took: {} ms",
+                        k,
+                        start_time.elapsed().as_millis()
+                    );
+
+                    match result {
+                        RouteResult::Route(result) => {
+                            return Ok(RouteResult::Route(result));
+                        }
+                        // This branch would only evaluate if the wrong enum variant is returned from the handler
+                        _ => {
+                            return Err(Box::from(HttpRequestError {
+                                internals: Some(Box::from(
+                                    "Route handler should evaluate to RouteResult::Route",
+                                )),
+                                ..Default::default()
+                            }));
+                        }
+                    }
+                }
             }
         }
 
@@ -566,7 +607,8 @@ impl Router {
             status_text: "Not Found".to_string(),
             message: Some(format!(
                 "Route not found for path: {:?} with method: {:?}",
-                ctx.key.path, ctx.key.path
+                ctx.get_key().path,
+                ctx.get_key().method
             )),
             ..Default::default()
         }));
