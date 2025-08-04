@@ -25,7 +25,7 @@ use super::{HttpHeaders, HttpRequestHeaders, HttpRequestMethod};
 pub struct HttpRequest<'a> {
     // headers: String,
     pub headers: HttpRequestHeaders<'a>,
-    pub body: Option<Vec<u8>>,
+    pub body: Option<Cow<'a, [u8]>>,
 }
 
 impl<'a> HttpRequest<'a> {
@@ -43,7 +43,7 @@ impl<'a> HttpRequest<'a> {
     pub fn into_owned(self) -> OwnedHttpRequest {
         OwnedHttpRequest {
             headers: self.headers.into_owned(),
-            body: self.body,
+            body: self.body.map(|b| b.into_owned()),
         }
     }
 
@@ -238,7 +238,7 @@ impl<'a> HttpRequest<'a> {
             };
 
             return Ok(Self {
-                body: body_buffer,
+                body: body_buffer.map(|b| Cow::from(b)),
                 headers,
             });
         } else {
@@ -287,12 +287,12 @@ impl<'a> HttpRequest<'a> {
         });
     }
 
-    pub fn get_body(&self) -> Option<&Vec<u8>> {
-        self.body.as_ref()
+    pub fn get_body(&self) -> Option<&[u8]> {
+        self.body.as_deref()
     }
 
     pub fn get_body_mut(&mut self) -> Option<&mut Vec<u8>> {
-        self.body.as_mut()
+        self.body.as_mut().map(|b| b.to_mut())
     }
 
     pub fn get_method(&self) -> &HttpRequestMethod {
@@ -424,6 +424,8 @@ impl<'a> HttpRequest<'a> {
         // Read the file
         let requested_resource = fs::read_to_string(resource_path)?;
 
+        println!("requested_resource: {}", requested_resource);
+        
         headers.add(
             Cow::from("Content-Length"),
             Cow::from(requested_resource.len().to_string()),

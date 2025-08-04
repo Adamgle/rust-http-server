@@ -41,7 +41,6 @@ pub struct Middleware {
 /// is owned by value with headers also owned by value.
 #[derive(Clone, Debug)]
 pub struct MiddlewareHandlerResult<'ctx> {
-    // headers: HttpResponseHeaders<'b>,
     pub ctx: RouteContext<'ctx>,
 }
 

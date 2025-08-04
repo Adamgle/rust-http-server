@@ -1,6 +1,7 @@
-use std::{borrow::Cow, collections::HashMap};
+use std::{borrow::Cow, collections::HashMap, error::Error};
 
 use dashmap::DashMap;
+use once_cell::sync::Lazy;
 
 use crate::{
     config::{config_file::DatabaseConfigEntry, database::Database},
@@ -10,10 +11,7 @@ use crate::{
     },
     http_request::HttpRequest,
     prelude::*,
-    router::{
-        RouteContext, RouteHandlerResult, RouteResult, RouteTableKey,
-        middleware::MiddlewareHandlerResult,
-    },
+    router::{RouteContext, RouteHandlerResult, RouteTableKey},
 };
 
 // Goals for RouterCache:
@@ -47,53 +45,74 @@ enum RouterCacheResult {
 ///
 /// If the body of the AppControllerResult and the RouteResult is the same, then this API is fine, if not, it would be disaster.
 #[derive(Clone, Debug)]
-pub enum RouterCacheResult<'ctx> {
-    AppControllerResult(OptionalRouteResult<'ctx>),
-    RouteResult(RouteResult<'ctx>),
+pub enum RouterCacheResult {
+    AppControllerResult(OptionalOwnedRouteHandlerResult),
+    RouteResult(OwnedRouteHandlerResult),
 }
+
+static ROUTES_CACHE: Lazy<DashMap<RouteTableKey, RouterCacheResult>> = Lazy::new(DashMap::new);
+static MIDDLEWARE_CACHE: Lazy<DashMap<RouteTableKey, OwnedMiddlewareHandlerResult>> =
+    Lazy::new(DashMap::new);
 
 // NOTE: Not sure if we would ever use the full output of the RouteResult, but technically we could
 // thought as always with caching we have to be careful to not return stale data for routes that are doing validation or something
 // that require fresh data.
-// pub(in crate::router) static CACHE: Lazy<DashMap<RouteTableKey, RouterCacheResult>> =
-// Lazy::new(DashMap::new);
+// pub(in crate::router) static CACHE: Lazy<RouteTableResults> = Lazy::new(|| RouteTableResults {
+//     routes: &ROUTES_CACHE,
+//     middleware: &MIDDLEWARE_CACHE,
+// });
 
 /// A cache for storing route results. We had to declare the Owned API types here to avoid lifetimes issues, as the cache needs to live for static lifetime.
 /// and we cannot guarantee that with the `RouteResult` type.
-#[derive(Debug)]
-pub struct RouterCache(DashMap<RouteTableKey, RouterCacheResult<'static>>);
+// #[derive(Debug)]
+pub struct RouterCache;
 
-// impl<'ctx> RouterCache<'ctx> {
+impl std::fmt::Debug for RouterCache {
+    // This just provides a debug representation of the RouterCache, which includes the static caches for ROUTES_CACHE and MIDDLEWARE_CACHE.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RouterCache")
+            .field("ROUTES_CACHE", &ROUTES_CACHE)
+            .field("MIDDLEWARE_CACHE", &MIDDLEWARE_CACHE)
+            .finish()
+    }
+}
+
+pub(in crate::router) struct RoutesCache;
+pub(in crate::router) struct MiddlewareCache;
+
 impl RouterCache {
-    pub fn new() -> Self {
-        RouterCache(DashMap::new())
+    // Encapsulates the static caches for routes and middleware.
+
+    pub(in crate::router) const ROUTES_CACHE: RoutesCache = RoutesCache;
+    pub(in crate::router) const MIDDLEWARE_CACHE: MiddlewareCache = MiddlewareCache;
+}
+
+// NOTE: The redundancy should be handled in each RoutesCache and MiddlewareCache impl.
+impl RoutesCache {
+    pub fn get(&self, key: &RouteTableKey) -> Option<RouterCacheResult> {
+        ROUTES_CACHE.get(key).map(|r| r.clone())
     }
 
-    pub fn get(&self, key: &RouteTableKey) -> Option<RouterCacheResult<'static>> {
-        // Get the value from the cache by key.
-        // CACHE.get(key).map(|entry| entry.value().clone())
-        // CACHE.get(key).map(|entry| entry.value().clone())
-        // todo!()
-
-        self.0.get(key).map(|entry| entry.value().clone())
-    }
-
-    /// We are storing the `RouteResult` for given key and using it later to avoid recomputing the route.
-    pub fn set(&self, key: RouteTableKey, value: RouterCacheResult<'static>) {
-        // Set the value in the cache by key.
-        // CACHE.insert(key, value);
-        self.0.insert(key, value);
+    pub fn set(self, key: RouteTableKey, value: RouterCacheResult) {
+        ROUTES_CACHE.insert(key, value);
     }
 
     pub fn remove(&self, key: &RouteTableKey) {
-        // Remove the value from the cache by key.
-        self.0.remove(key);
+        ROUTES_CACHE.remove(key);
+    }
+}
+
+impl MiddlewareCache {
+    pub fn get(&self, key: &RouteTableKey) -> Option<OwnedMiddlewareHandlerResult> {
+        MIDDLEWARE_CACHE.get(key).map(|r| r.clone())
     }
 
-    pub fn clear(&self) {
-        // Clear the cache.
-        // CACHE.clear();
-        self.0.clear();
+    pub fn set(&self, key: RouteTableKey, value: OwnedMiddlewareHandlerResult) {
+        MIDDLEWARE_CACHE.insert(key, value);
+    }
+
+    pub fn remove(&self, key: &RouteTableKey) {
+        MIDDLEWARE_CACHE.remove(key);
     }
 }
 
@@ -107,7 +126,7 @@ impl OwnedHttpRequest {
     pub fn to_borrowed<'a>(&'a self) -> HttpRequest<'a> {
         HttpRequest {
             headers: self.headers.to_borrowed(),
-            body: self.body.clone(),
+            body: self.body.as_ref().map(|b| Cow::from(b.as_slice())),
         }
     }
 }
@@ -169,6 +188,24 @@ pub struct OwnedHttpResponseHeaders {
     pub start_line: OwnedHttpResponseStartLine,
 }
 
+// impl<'a> HttpHeaders<'a> for OwnedHttpResponseHeaders {
+//     fn get_headers(&'a self) -> &'a HashMap<Cow<'a, str>, Cow<'a, str>> {
+//         self.headers
+//             .headers
+//             .iter()
+//             .map(|(k, v)| (Cow::Borrowed(k.as_str()), Cow::Borrowed(v.as_str())))
+//             .collect()
+//     }
+
+//     fn get_headers_mut(&mut self) -> &mut HashMap<Cow<'a, str>, Cow<'a, str>> {
+//         self.headers
+//             .headers
+//             .iter_mut()
+//             .map(|(k, v)| (Cow::Borrowed(k.as_str()), Cow::Borrowed(v.as_str())))
+//             .collect()
+//     }
+// }
+
 impl OwnedHttpResponseHeaders {
     pub fn to_borrowed<'a>(&'a self) -> HttpResponseHeaders<'a> {
         HttpResponseHeaders {
@@ -183,13 +220,13 @@ pub struct OwnedMiddlewareHandlerResult {
     pub ctx: OwnedRouteContext,
 }
 
-impl OwnedMiddlewareHandlerResult {
-    pub fn to_borrowed<'a>(&'a self) -> MiddlewareHandlerResult<'a> {
-        MiddlewareHandlerResult {
-            ctx: self.ctx.to_borrowed(),
-        }
-    }
-}
+// impl OwnedMiddlewareHandlerResult {
+//     pub fn to_borrowed<'a>(&'a self) -> MiddlewareHandlerResult<'a> {
+//         MiddlewareHandlerResult {
+//             ctx: self.ctx.to_borrowed(),
+//         }
+//     }
+// }
 
 #[derive(Clone, Debug)]
 pub struct OwnedRouteContext {
@@ -198,7 +235,6 @@ pub struct OwnedRouteContext {
     pub key: RouteTableKey,
     pub database: Option<Arc<Mutex<Database>>>,
     pub database_config: Option<DatabaseConfigEntry>,
-    pub cache: Arc<RouterCache>,
 }
 
 impl OwnedRouteContext {
@@ -209,7 +245,6 @@ impl OwnedRouteContext {
             key: &self.key,
             database: self.database.as_ref().map(|d| Arc::clone(&d)),
             database_config: self.database_config.clone(),
-            cache: Arc::clone(&self.cache),
         }
     }
 
@@ -269,26 +304,26 @@ pub struct OptionalOwnedRouteHandlerResult {
     pub body: String,
 }
 
+// #[derive(Clone, Debug)]
+// pub enum OwnedRouteResult {
+//     Route(OwnedRouteHandlerResult),
+//     // Middleware(OwnedMiddlewareHandlerResult),
+// }
+
+// impl OwnedRouteResult {
+//     pub fn to_borrowed<'a>(&'a self) -> RouteResult<'a> {
+//         match self {
+//             OwnedRouteResult::Route(result) => RouteResult::Route(result.to_borrowed()),
+//             OwnedRouteResult::Middleware(result) => RouteResult::Middleware(result.to_borrowed()),
+//         }
+//     }
+// }
+
 #[derive(Clone, Debug)]
-pub enum OwnedRouteResult {
-    Route(OwnedRouteHandlerResult),
+pub enum OptionalRouteResult {
+    Route(OptionalOwnedRouteHandlerResult),
     Middleware(OwnedMiddlewareHandlerResult),
 }
-
-impl OwnedRouteResult {
-    pub fn to_borrowed<'a>(&'a self) -> RouteResult<'a> {
-        match self {
-            OwnedRouteResult::Route(result) => RouteResult::Route(result.to_borrowed()),
-            OwnedRouteResult::Middleware(result) => RouteResult::Middleware(result.to_borrowed()),
-        }
-    }
-}
-
-// #[derive(Clone, Debug)]
-// pub enum OptionalRouteResult {
-//     Route(OptionalOwnedRouteHandlerResult),
-//     Middleware(OwnedMiddlewareHandlerResult),
-// }
 
 #[derive(Clone, Debug)]
 pub struct OptionalRouteHandlerResult<'ctx> {
@@ -300,24 +335,88 @@ pub struct OptionalRouteHandlerResult<'ctx> {
     pub body: String,
 }
 
-#[derive(Clone, Debug)]
-pub enum OptionalRouteResult<'ctx> {
-    Route(OptionalRouteHandlerResult<'ctx>),
-    Middleware(MiddlewareHandlerResult<'ctx>),
-}
-
-// // // Wrapper around RouteContext and OwnedRouteContext to allow storing both borrowed and owned contexts in the same enum.
 // #[derive(Clone, Debug)]
-// pub enum RouteContextWrapper<'ctx> {
-//     Borrowed(RouteContext<'ctx>),
-//     Owned(OwnedRouteContext),
+// pub enum OptionalOwnedRouteResult {
+// Route(OptionalOwnedRouteHandlerResult),
+// Middleware(OwnedMiddlewareHandlerResult),
 // }
 
-// impl<'ctx> RouteContextWrapper<'ctx> {
-//     pub fn to_borrowed(&self) -> RouteContext<'_> {
-//         match self {
-//             RouteContextWrapper::Borrowed(ctx) => ctx.clone(),
-//             RouteContextWrapper::Owned(ctx) => ctx.to_borrowed(),
-//         }
-//     }
+// #[derive(Debug)]
+// pub enum AnyRouteResult<'ctx> {
+//     Owned(OwnedRouteResult),
+//     Borrowed(RouteResult<'ctx>),
+// }
+
+/// Wrapper around RouteContext and OwnedRouteContext to allow storing both borrowed and owned contexts in the same enum.
+#[derive(Clone, Debug)]
+pub enum AnyRouteContext<'ctx> {
+    Borrowed(RouteContext<'ctx>),
+    Owned(OwnedRouteContext),
+}
+
+impl AnyRouteContext<'_> {
+    /// Converts the `AnyRouteContext` to a borrowed `RouteContext` (the `Borrowed` variant).
+    /// It clones the context in the `Borrowed` variant to avoid lifetime issues — which might be costly.
+    ///
+    /// Example structure of `RouteContext<'_>`:
+    ///
+    /// ```rust
+    /// pub struct RouteContext<'ctx> {
+    ///     pub request: HttpRequest<'ctx>,
+    ///     pub response_headers: HttpResponseHeaders<'ctx>,
+    ///     pub key: &'ctx RouteTableKey,
+    ///     pub database: Option<Arc<Mutex<Database>>>,
+    ///     pub database_config: Option<DatabaseConfigEntry>, // Config cannot be used here as Config itself contains the RouteTable, that would be a circular reference.
+    /// }
+    /// ```
+    ///
+    /// Clone would need to clone the request and response_headers, which is the biggest cost here, especially if the payload of the request is large in POST requests.
+    /// The actual body of the request is not initialized yet only in `GET` method, thought POST'S, PUT'S can get cloned.
+    /// Note that the `key` clone is mostly cheap, database is not cloned, just the Arc reference is cloned,
+    /// and the database_config is cloned as well.
+    pub fn to_borrowed(&self) -> RouteContext<'_> {
+        match self {
+            AnyRouteContext::Borrowed(ctx) => ctx.clone(),
+            AnyRouteContext::Owned(ctx) => ctx.to_borrowed(),
+        }
+    }
+
+    pub fn get_key(&self) -> &RouteTableKey {
+        match self {
+            AnyRouteContext::Borrowed(ctx) => ctx.get_key(),
+            AnyRouteContext::Owned(ctx) => &ctx.key,
+        }
+    }
+
+    pub fn get_database(&self) -> Result<Arc<Mutex<Database>>, Box<dyn Error + Send + Sync>> {
+        match self {
+            AnyRouteContext::Borrowed(ctx) => ctx.get_database(),
+            AnyRouteContext::Owned(ctx) => ctx
+                .database
+                .clone()
+                .ok_or("Database is not initialized in the route handler context".into()),
+        }
+    }
+
+    pub fn get_database_config(&self) -> Result<DatabaseConfigEntry, Box<dyn Error + Send + Sync>> {
+        match self {
+            AnyRouteContext::Borrowed(ctx) => ctx.get_database_config(),
+            AnyRouteContext::Owned(ctx) => ctx
+                .database_config
+                .clone()
+                .ok_or("Database config is not initialized in the route handler context".into()),
+        }
+    }
+
+    // pub fn get_response_headers(&self) -> &dyn HttpHeaders {
+    //     match self {
+    //         AnyRouteContext::Borrowed(ctx) => ctx.get_response_headers(),
+    //         AnyRouteContext::Owned(ctx) => ctx.response_headers.as_ref(),
+    //     }
+    // }
+}
+
+// pub struct RouteTableResults {
+//     pub routes: &'static Lazy<DashMap<RouteTableKey, OwnedRouteResult>>,
+//     pub middleware: &'static Lazy<DashMap<RouteTableKey, OwnedRouteResult>>,
 // }

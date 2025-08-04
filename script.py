@@ -173,7 +173,6 @@ def run_multithreaded(
         thread_results: list[bool] = []
         thread_timestamps: List[float] = [start_time]
 
-
         for _ in range(requests_count // threads_count):
             # Add response_timestamps to kwargs for this thread
             kwargs_with_timestamps = kwargs.copy()
@@ -285,7 +284,6 @@ def run_benchmark(
         f.write("\n".join(log_entry) + "\n")
 
     print("\n".join(log_entry))
-
 
 
 # TODO: This could happen on DatabaseWAL execution, or other side effects that will trigger substantial difference
@@ -425,11 +423,10 @@ def main():
     run_multithreaded(
         callback=send_custom,
         threads_count=10,
-        requests_count=10,
-        # payload=build_task("test"),
+        requests_count=1000,
+        payload=build_task("test"),
         sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
-        request=HttpMethod.GET,
-        # path="/database/tasks.json",
+        request=HttpMethod.POST,
         path="/database/tasks.json",
     )
 
@@ -438,4 +435,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

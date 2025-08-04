@@ -10,7 +10,10 @@ use crate::{
     http::{HttpHeaders, HttpRequestError, HttpRequestMethod},
     router::{
         RouteContext, RouteHandlerFuture, RouteHandlerResult, RouteResult, RouteTableKey,
-        cache::{OptionalRouteHandlerResult, OptionalRouteResult, RouterCacheResult},
+        cache::{
+            OptionalOwnedRouteHandlerResult, OwnedRouteHandlerResult, RouterCache,
+            RouterCacheResult,
+        },
         middleware::MiddlewareHandlerResult,
     },
 };
@@ -22,9 +25,12 @@ pub struct Controller;
 ///
 /// NOTE: We are separating those as they are not route handlers since we are not registering them in the router.
 /// Also they could take arbitrary signatures and return types, so we cannot treat them as routes handlers and we do not want to
-/// pollute the controller with non route handler definitions.
+/// pollute the controller with non-route handler definitions.
 pub struct AppController;
 
+/// MiddlewareController unlike the AppController does have to match the signature of the MiddlewareHandler,
+/// and we won't separate the caching logic for the function declared there and the Middleware::create_middleware as they are the same.
+/// It is just a wrapper around the middleware handlers that keeps it organized and encapsulated through that union struct.
 pub struct MiddlewareController;
 
 impl Controller {
@@ -61,11 +67,12 @@ impl Controller {
 
             database.collections.flush().await?;
 
+            let body = ctx
+                .request
+                .read_requested_resource(&mut ctx.response_headers, ctx.key.get_prefixed_path())?;
+
             return Ok(RouteResult::Route(RouteHandlerResult {
-                body: ctx.request.read_requested_resource(
-                    &mut ctx.response_headers,
-                    ctx.key.get_prefixed_path(),
-                )?,
+                body,
                 headers: ctx.response_headers,
             }));
         })
@@ -136,7 +143,7 @@ impl Controller {
 
                 let user = database
                     .collections
-                    .insert::<DatabaseUser, ClientUser>(&body.clone())
+                    .insert::<DatabaseUser, ClientUser>(&body)
                     .await
                     .map_err(|e| HttpRequestError {
                         status_code: 400,
@@ -177,7 +184,12 @@ impl Controller {
             //     Some(HttpRequestMethod::GET),
             // ));
 
-            ctx.cache.remove(&RouteTableKey::new(
+            // RouterCache::remove(&RouteTableKey::new(
+            //     "/api/getSessionUser",
+            //     Some(HttpRequestMethod::GET),
+            // ));
+
+            RouterCache::ROUTES_CACHE.remove(&RouteTableKey::new(
                 "/api/getSessionUser",
                 Some(HttpRequestMethod::GET),
             ));
@@ -394,18 +406,16 @@ impl AppController {
         // output for the ctx.key = /database/tasks.json. So actually we are caching for the /api/getSessionUser, that is the route handler that is basically as wrapper for the route handler
         // of /api/getSessionUser, thought only for the body of that handler, see Controller::get_session_user.
 
-        if let Some(result) = ctx.cache.get(&RouteTableKey::new(
+        if let Some(result) = RouterCache::ROUTES_CACHE.get(&RouteTableKey::new(
             "/api/getSessionUser",
             Some(HttpRequestMethod::GET),
         )) {
             match result {
-                RouterCacheResult::AppControllerResult(OptionalRouteResult::Route(
-                    OptionalRouteHandlerResult { body, .. },
-                ))
-                | RouterCacheResult::RouteResult(RouteResult::Route(RouteHandlerResult {
+                RouterCacheResult::AppControllerResult(OptionalOwnedRouteHandlerResult {
                     body,
                     ..
-                })) => {
+                })
+                | RouterCacheResult::RouteResult(OwnedRouteHandlerResult { body, .. }) => {
                     let u = Ok(serde_json::from_str::<DatabaseUser>(&body)?);
 
                     info!(
@@ -416,10 +426,6 @@ impl AppController {
 
                     return u;
                 }
-                RouterCacheResult::RouteResult(RouteResult::Middleware(_)) => {
-                    unreachable!("Unexpected middleware result")
-                }
-                _ => unreachable!("Unexpected cache result type"),
             }
         }
 
@@ -439,15 +445,13 @@ impl AppController {
 
         // Cache the output.
 
-        ctx.cache.set(
+        RouterCache::ROUTES_CACHE.set(
             // api/getSessionUser | /database/tasks.json
             RouteTableKey::new("/api/getSessionUser", Some(HttpRequestMethod::GET)),
-            RouterCacheResult::AppControllerResult(OptionalRouteResult::Route(
-                OptionalRouteHandlerResult {
-                    body: user.serialize()?,
-                    headers: None,
-                },
-            )),
+            RouterCacheResult::AppControllerResult(OptionalOwnedRouteHandlerResult {
+                body: user.serialize()?,
+                headers: None,
+            }),
         );
 
         info!(
@@ -528,11 +532,6 @@ impl AppController {
         ctx: &mut RouteContext<'_>,
         user: &DatabaseUser,
     ) -> Result<DatabaseSession, Box<dyn Error + Send + Sync>> {
-        // let ctx = match &mut ctx {
-        //     RouteContextWrapper::Borrowed(ctx) => ctx,
-        //     RouteContextWrapper::Owned(ctx) => &mut ctx.to_borrowed(),
-        // };
-
         let database = ctx.get_database()?;
 
         let mut database = database.lock().await;

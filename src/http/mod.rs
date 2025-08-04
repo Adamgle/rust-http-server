@@ -465,7 +465,8 @@ impl HttpRequestError {
         }
 
         let headers = headers.unwrap();
-        let mut response = HttpResponse::new(&headers, body.as_deref());
+
+        let mut response = HttpResponse::new(&headers, body.map(Cow::from));
 
         return response.write(&config, &mut writer).await;
     }

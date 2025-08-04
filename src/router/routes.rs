@@ -14,7 +14,6 @@ use crate::{
     router::{
         RouteContext, RouteEntry, RouteHandler, RouteHandlerResult, RouteResult, RouteTable,
         RouteTableKey,
-        cache::RouterCacheResult,
         controller::{AppController, Controller},
     },
 };
@@ -266,7 +265,7 @@ impl Routes {
 
                         let entry = database
                             .collections
-                            .insert::<DatabaseTask, ClientTask>(&body.clone())
+                            .insert::<DatabaseTask, ClientTask>(&body)
                             .await?;
 
                         return Ok(RouteResult::Route(RouteHandlerResult {
@@ -296,12 +295,13 @@ impl Routes {
                         ..
                     } = ctx;
 
-                    if let Some(body) = request.get_body().cloned() {
-                        let id = String::from_utf8(body).map_err(|_| HttpRequestError {
-                            status_code: 400,
-                            message: Some("Invalid UTF-8 sequence".into()),
-                            ..Default::default()
-                        })?;
+                    if let Some(body) = request.get_body() {
+                        let id =
+                            String::from_utf8(body.to_vec()).map_err(|_| HttpRequestError {
+                                status_code: 400,
+                                message: Some("Invalid UTF-8 sequence".into()),
+                                ..Default::default()
+                            })?;
 
                         database.collections.delete("tasks", &id).await?;
 

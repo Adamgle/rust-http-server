@@ -6,8 +6,7 @@ mod routes;
 use crate::{
     prelude::*,
     router::cache::{
-        OwnedMiddlewareHandlerResult, OwnedRouteContext, OwnedRouteHandlerResult, OwnedRouteResult,
-        RouterCache, RouterCacheResult,
+        OwnedMiddlewareHandlerResult, OwnedRouteContext, OwnedRouteHandlerResult, RouterCache,
     },
 };
 
@@ -41,7 +40,6 @@ use crate::{
 pub struct Router {
     routes: Routes,
     middleware: Middleware,
-    cache: Arc<RouterCache>,
 }
 
 /// Represents an entry in the route table, which can be either a route handler or a middleware handler.
@@ -252,9 +250,8 @@ pub struct RouteContext<'ctx> {
     pub key: &'ctx RouteTableKey,
     pub database: Option<Arc<Mutex<Database>>>,
     pub database_config: Option<DatabaseConfigEntry>, // Config cannot be used here as Config itself contains the RouteTable, that would be a circular reference.
-    // Maybe we would have no issues with that as Config is in Arc<Mutex<_>>, but we won't do that.
-    // If we would access that field we would have a problem.
-    pub cache: Arc<RouterCache>,
+                                                      // Maybe we would have no issues with that as Config is in Arc<Mutex<_>>, but we won't do that.
+                                                      // If we would access that field we would have a problem.
 }
 
 impl<'ctx> RouteContext<'ctx> {
@@ -264,7 +261,6 @@ impl<'ctx> RouteContext<'ctx> {
         key: &'ctx RouteTableKey,
         database: Option<Arc<Mutex<Database>>>,
         database_config: Option<DatabaseConfigEntry>,
-        cache: Arc<RouterCache>,
     ) -> Self {
         Self {
             request,
@@ -272,7 +268,6 @@ impl<'ctx> RouteContext<'ctx> {
             key,
             database,
             database_config,
-            cache,
         }
     }
 
@@ -284,7 +279,6 @@ impl<'ctx> RouteContext<'ctx> {
             key: self.key.clone(),
             database: self.database,
             database_config: self.database_config,
-            cache: Arc::clone(&self.cache),
         }
     }
 
@@ -320,7 +314,19 @@ impl<'ctx> RouteContext<'ctx> {
 #[derive(Clone, Debug)]
 pub struct RouteHandlerResult<'ctx> {
     pub headers: HttpResponseHeaders<'ctx>,
+    // I think we will live it as a String and do not keep it as a Cow<'a, [u8]> as the data in route handlers mostly has to be owned as
+    // converting to Cow will create not benefit.
     pub body: String,
+}
+
+impl RouteHandlerResult<'_> {
+    pub fn into_owned(self) -> OwnedRouteHandlerResult {
+        // Converts the `RouteHandlerResult` into an `OwnedRouteHandlerResult`.
+        OwnedRouteHandlerResult {
+            headers: self.headers.into_owned(),
+            body: self.body.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -335,21 +341,19 @@ pub enum RouteResult<'ctx> {
 //     OwnedRouteResult(OwnedRouteResult),
 // }
 
-impl RouteResult<'_> {
-    pub fn into_owned(self) -> OwnedRouteResult {
-        match self {
-            RouteResult::Route(result) => OwnedRouteResult::Route(OwnedRouteHandlerResult {
-                headers: result.headers.clone().into_owned(),
-                body: result.body.clone(),
-            }),
-            RouteResult::Middleware(result) => {
-                OwnedRouteResult::Middleware(OwnedMiddlewareHandlerResult {
-                    ctx: result.ctx.into_owned(),
-                })
-            }
-        }
-    }
-}
+// impl RouteResult<'_> {
+//     pub fn into_owned(self) -> OwnedRouteResult {
+//         // Converts the `RouteResult` into an `OwnedRouteResult`.
+//         match self {
+//             RouteResult::Route(result) => OwnedRouteResult::Route(result.into_owned()),
+//             RouteResult::Middleware(result) => {
+//                 OwnedRouteResult::Middleware(OwnedMiddlewareHandlerResult {
+//                     ctx: result.ctx.into_owned(),
+//                 })
+//             }
+//         }
+//     }
+// }
 
 // UPDATE: Callback cannot live for 'static as the Context gets moved in to a closure
 // and then lifetime it utilizes would become invariant. That means a lifetime of context
@@ -365,7 +369,9 @@ pub type RouteHandlerFuture<'ctx> = Pin<
 // NOTE: Using 'static here because the closure itself lives for the program duration,
 // but it can work with any lifetime 'ctx through the for<'ctx> bound
 pub type RouteHandlerClosure =
-    Arc<dyn for<'ctx> Fn(RouteContext<'ctx>) -> RouteHandlerFuture<'ctx> + Send + Sync + 'static>;
+    Arc<dyn for<'ctx> Fn(RouteContext<'ctx>) -> RouteHandlerFuture<'ctx> + Send + Sync>;
+// RouteContext<'ctx>
+//  + 'static
 
 /// The idea is that the `RouteHandler` being a function pointer inside a closure stored in the `Arc` is valid for the duration of the program,
 /// and can be referenced via multiple async tasks. Only the parameters `RouteHandlerContext` passed to the handler
@@ -401,6 +407,7 @@ impl RouteHandler {
     /// Calls the function pointer with ctx.
     pub async fn callback<'ctx>(
         &self,
+        // ctx: AnyRouteContext<'ctx>,
         ctx: RouteContext<'ctx>,
     ) -> Result<RouteResult<'ctx>, Box<dyn Error + Send + Sync>> {
         (self.0)(ctx).await
@@ -419,16 +426,7 @@ impl Router {
         middleware.create_middleware()?;
         middleware.generate_middleware_segments(&routes)?;
 
-        Ok(Self {
-            middleware,
-            routes,
-            cache: Arc::new(RouterCache::new()),
-        })
-    }
-
-    pub fn get_cache(&self) -> Arc<RouterCache> {
-        // Returns the cache of the router.
-        Arc::clone(&self.cache)
+        Ok(Self { middleware, routes })
     }
 
     pub fn get_routes(&self) -> &Routes {
@@ -451,9 +449,7 @@ impl Router {
     pub async fn route<'ctx>(
         &self,
         mut ctx: RouteContext<'ctx>,
-        // mut ctx: RouteContext<'ctx>,
-        // RouteResult<'ctx>
-    ) -> Result<RouteResult<'ctx>, Box<dyn Error + Send + Sync>> {
+    ) -> Result<RouteHandlerResult<'ctx>, Box<dyn Error + Send + Sync>> {
         // Check if the path matches any of the middleware segments.
 
         let routes = self.routes.get_routes();
@@ -478,12 +474,11 @@ impl Router {
 
         if let Ok(RouteEntry::Middleware(Some(handler))) = self.middleware.get_segments().get(&key)
         {
-            match ctx.cache.get(&key) {
+            match RouterCache::MIDDLEWARE_CACHE.get(&key) {
                 // If there is a cache entry for the middleware segment, we save it in the `ctx` for the later use in either middleware handler or route handler, or both.
-                Some(RouterCacheResult::RouteResult(RouteResult::Middleware(
-                    MiddlewareHandlerResult { ctx: context },
-                ))) => {
-                    ctx = context;
+                Some(OwnedMiddlewareHandlerResult { ctx: context }) => {
+                    // ctx = context.to_borrowed();
+                    todo!()
                 }
                 _ => {
                     let k = ctx.get_key().clone();
@@ -522,16 +517,12 @@ impl Router {
         if let Some(RouteEntry::Middleware(Some(middleware))) =
             self.middleware.get_routes().get_routes().get(&key)
         {
-            match ctx.cache.get(&key) {
-                Some(cached) => {
-                    if let RouterCacheResult::RouteResult(RouteResult::Middleware(
-                        MiddlewareHandlerResult { ctx: context },
-                    )) = cached
-                    {
-                        ctx = context;
-                    }
+            match RouterCache::MIDDLEWARE_CACHE.get(&key) {
+                Some(OwnedMiddlewareHandlerResult { ctx: context }) => {
+                    // ctx = context.to_borrowed();
+                    todo!()
                 }
-                None => {
+                _ => {
                     let k = ctx.get_key().clone();
                     let start_time = std::time::Instant::now();
 
@@ -569,37 +560,65 @@ impl Router {
             // If the route exists, we run the handler for the path.
             // We do not want to propagate the error here, as we want to return the context back to the route handler.
 
-            // TODO: Check if there is a cache entry for the route, if so, return it.
-            match ctx.cache.get(&key) {
-                Some(RouterCacheResult::RouteResult(cached)) => return Ok(cached),
+            let k = ctx.get_key().clone();
+            let start_time = std::time::Instant::now();
+
+            let result = route.callback(ctx).await?;
+
+            info!(
+                "Route handler for path: {:?} took: {} ms",
+                k,
+                start_time.elapsed().as_millis()
+            );
+
+            match result {
+                RouteResult::Route(result) => {
+                    return Ok(result);
+                }
+                // This branch would only evaluate if the wrong enum variant is returned from the handler
                 _ => {
-                    let k = ctx.get_key().clone();
-                    let start_time = std::time::Instant::now();
-
-                    let result = route.callback(ctx).await?;
-
-                    info!(
-                        "Route handler for path: {:?} took: {} ms",
-                        k,
-                        start_time.elapsed().as_millis()
-                    );
-
-                    match result {
-                        RouteResult::Route(result) => {
-                            return Ok(RouteResult::Route(result));
-                        }
-                        // This branch would only evaluate if the wrong enum variant is returned from the handler
-                        _ => {
-                            return Err(Box::from(HttpRequestError {
-                                internals: Some(Box::from(
-                                    "Route handler should evaluate to RouteResult::Route",
-                                )),
-                                ..Default::default()
-                            }));
-                        }
-                    }
+                    return Err(Box::from(HttpRequestError {
+                        internals: Some(Box::from(
+                            "Route handler should evaluate to RouteResult::Route",
+                        )),
+                        ..Default::default()
+                    }));
                 }
             }
+
+            // // TODO: Check if there is a cache entry for the route, if so, return it.
+            // match RouterCache::ROUTES_CACHE.get(&key) {
+            //     Some(RouterCacheResult::RouteResult(result)) => {
+            //         return Ok(result.to_borrowed());
+            //     }
+            //     _ => {
+            //         // let k = ctx.get_key().clone();
+            //         // let start_time = std::time::Instant::now();
+
+            //         // let result = route.callback(ctx).await?;
+
+            //         // info!(
+            //         //     "Route handler for path: {:?} took: {} ms",
+            //         //     k,
+            //         //     start_time.elapsed().as_millis()
+            //         // );
+
+            //         // match result {
+            //         //     RouteResult::Route(result) => {
+            //         //         return Ok(result);
+            //         //     }
+            //         //     // This branch would only evaluate if the wrong enum variant is returned from the handler
+            //         //     _ => {
+            //         //         return Err(Box::from(HttpRequestError {
+            //         //             internals: Some(Box::from(
+            //         //                 "Route handler should evaluate to RouteResult::Route",
+            //         //             )),
+            //         //             ..Default::default()
+            //         //         }));
+            //         //     }
+            //         // }
+            //     }
+            // }
         }
 
         return Err(Box::<dyn Error + Send + Sync>::from(HttpRequestError {
