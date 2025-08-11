@@ -113,7 +113,14 @@ def send_custom(
                 s.connect((host, DEFAULT_PORT))
                 s.sendall(message.encode())
 
-                response = s.recv(1024).decode()
+                response = []
+
+                while True:
+                    chunk = s.recv(1024)
+                    if not chunk:
+                        break
+
+                    response.extend(chunk)
 
                 return response
             except OSError as e:
@@ -169,19 +176,21 @@ def run_multithreaded(
     start_time = time.time()
 
     def worker() -> None:
-        nonlocal request_size
+        nonlocal request_size, start_time
+
         thread_results: list[bool] = []
         thread_timestamps: List[float] = [start_time]
 
         for _ in range(requests_count // threads_count):
             # Add response_timestamps to kwargs for this thread
-            kwargs_with_timestamps = kwargs.copy()
-            kwargs_with_timestamps["response_timestamps"] = thread_timestamps
+            # kwargs_with_timestamps = kwargs.copy()
+            kwargs["response_timestamps"] = thread_timestamps
 
-            result = callback(**kwargs_with_timestamps)
+            result = callback(**kwargs)
 
             if request_size == 0:
                 request_size = result["payload_size"]
+
             thread_results.append(result["status"])
 
         # Convert absolute timestamps to relative timestamps from start
@@ -287,10 +296,12 @@ def run_benchmark(
 
 
 # TODO: This could happen on DatabaseWAL execution, or other side effects that will trigger substantial difference
-# between the adjacent requests in time.
-def determine_performance_loss(timestamps: List[List[float]]) -> Dict[int, List[float]]:
-    threshold = 0.01  # 10ms
-
+# between the adjacent requests in time. Defaults to 10ms, which is 0.01 seconds, anything exceeding 10ms would be considered a performance loss.
+def determine_performance_loss(
+    # timestamps: List[float],
+    timestamps: List[List[float]],
+    threshold: float = 0.01,
+) -> Dict[int, List[float]]:
     benchmarks = dict()
 
     for idx, ts in enumerate(timestamps):
@@ -313,24 +324,8 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
     plt.title("Response Timestamps per Thread")
     plt.grid()
 
-    # timestamps_avg = np.mean(timestamps, axis=0)
-    # xs = np.arange(-4000, 4000, 0.01)
-    # # count = 1, threads_count = 10, requests_count = 10000, empty db
-    # quadratic_approx = (
-    #     7.064454015189068e-08 * xs**2
-    #     + 0.00035391819927912033 * xs
-    #     + 0.07135582499828524
-    # )
-    # plt.plot(
-    #     xs,
-    #     quadratic_approx,
-    #     label="Current slope (quadratic fit x^2)",
-    #     linestyle="--",
-    # )
-    # plt.show()
-
-    for i, ts in enumerate(timestamps):
-        plt.plot(ts, marker=".", label=f"Thread {i + 1}")
+    # for i, ts in enumerate(timestamps):
+    #     plt.plot(ts, marker=".", label=f"Thread {i + 1}")
 
     timestamps_avg = np.mean(timestamps, axis=0)
     xs = np.arange(len(timestamps_avg))
@@ -340,6 +335,8 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
     # print("Current slope: ", slope)
     print("Polynomial x^2 coefficients: ", a, b, c)
+
+    print(f"Average timestamps: {timestamps_avg} | timestamps: {timestamps}")
 
     plt.plot(timestamps_avg, marker="x", linestyle="--", label="Average benchmark")
 
@@ -376,6 +373,7 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
     plt.legend(title="Legend")
 
     pprint.pprint(determine_performance_loss(timestamps))
+
     plt.show()
 
 
@@ -420,14 +418,33 @@ def main():
     #     count=1,
     # )
 
-    run_multithreaded(
-        callback=send_custom,
-        threads_count=10,
-        requests_count=1000,
-        payload=build_task("test"),
-        sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
+    # run_multithreaded(
+    #     callback=send_custom,
+    #     threads_count=10,
+    #     requests_count=100,
+    #     # payload=build_task("a" * (1024 * 1024)),
+    #     payload=build_task("test"),
+    #     sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
+    #     request=HttpMethod.POST,
+    #     path="/database/tasks.json",
+    # )
+
+    # run_multithreaded(
+    #     callback=send_custom,
+    #     threads_count=2,
+    #     requests_count=1000,
+    #     # payload=build_task("test"),
+    #     sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
+    #     request=HttpMethod.GET,
+    #     path="/database/users.json",
+    # )
+
+    send_custom(
         request=HttpMethod.POST,
         path="/database/tasks.json",
+        payload=build_task("a" * (1024 * 1024 * 1024)),
+        host="localhost",
+        sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
     )
 
     parse_logs()

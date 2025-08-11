@@ -41,6 +41,7 @@ fn init_logger() -> Result<(), Box<dyn Error + Send + Sync>> {
     env_logger::Builder::new()
         .target(env_logger::Target::Stderr) // Or Target::Stdout
         .filter(None, LevelFilter::Debug)
+        // .filter(None, LevelFilter::Off)
         .format(move |buf, record| {
             let log_line = format!(
                 "[{} {} {}:{}] {}\n",

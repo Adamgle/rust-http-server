@@ -14,6 +14,7 @@ use crate::{
     router::{
         RouteContext, RouteEntry, RouteHandler, RouteHandlerResult, RouteResult, RouteTable,
         RouteTableKey,
+        cache::{RouterCache, RouterCacheResult},
         controller::{AppController, Controller},
     },
 };
@@ -185,6 +186,8 @@ impl Routes {
                     // If we would want to lay some abstraction on the database we would have "select_all" from the database
                     // and then parse it to the JSON format. Currently we just read the file from the disk.
 
+                    info!("Requesting tasks for the logged user");
+
                     let user = AppController::get_session_user(&mut ctx).await?;
 
                     info!("User authenticated: {:?}", user);
@@ -211,17 +214,19 @@ impl Routes {
 
                     let body = serde_json::to_string(&collection)?;
 
-                    let result = RouteResult::Route(RouteHandlerResult {
+                    // Tasks => Logged User, Logged User changes, you invalidate the logged user, but so should you the tasks.
+
+                    let result = RouteHandlerResult {
                         body,
                         headers: ctx.response_headers.clone(),
-                    });
+                    };
 
-                    // ctx.cache.set(
-                    //     ctx.get_key().clone(),
-                    //     RouterCacheResult::RouteResult(result.clone()),
-                    // );
+                    RouterCache::routes().set(
+                        ctx.get_key().clone(),
+                        RouterCacheResult::RouteResult(result.clone().into_owned()),
+                    );
 
-                    return Ok(result);
+                    return Ok(RouteResult::Route(result));
                 })
             })),
         )?;
@@ -257,9 +262,6 @@ impl Routes {
                 Box::pin(async move {
                     let database = ctx.get_database()?;
 
-                    // Then destructure for owned values.
-                    // let RouteContext { request, .. } = ctx;
-
                     if let Some(body) = ctx.request.get_body() {
                         let mut database = database.lock().await;
 
@@ -270,7 +272,7 @@ impl Routes {
 
                         return Ok(RouteResult::Route(RouteHandlerResult {
                             headers: ctx.response_headers,
-                            body: DatabaseEntryTrait::serialize(&entry)?,
+                            body: entry.serialize()?,
                         }));
                     }
                     return Err(Box::<dyn Error + Send + Sync>::from("Task cannot be empty"));

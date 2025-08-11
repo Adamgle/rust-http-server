@@ -470,28 +470,7 @@ impl Config {
         self.config_file.database.as_ref()
     }
 
-    // /// Check if the database is initialized and return a clone of the Arc<Mutex<Database>> if it is.
-    // pub fn get_database(&self) -> Result<Arc<Mutex<Database>>, Box<dyn Error + Send + Sync>> {
-    //     // Database config already checked in the Config constructor, no need to check it again.
-    //     if let Some(_) = &self.config_file.database {
-    //         if let Some(database) = &self.database {
-    //             // If database is initialized, return a clone of the Arc<Mutex<Database>>
-    //             return Ok(Arc::clone(database));
-    //         }
-    //     }
-
-    //     return Err("Database not initialized".into());
-    // }
-
     pub fn get_router(&self) -> &Router {
         &self.app.router
     }
-
-    // pub fn get_routes(&self) -> &RouteTable {
-    //     &self.app.router.get_routes()
-    // }
-
-    // pub fn get_routes_mut(&mut self) -> &mut RouteTable {
-    //     self.app.router.get_routes_mut()
-    // }
 }

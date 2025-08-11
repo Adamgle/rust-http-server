@@ -23,10 +23,17 @@ pub const PATH_SEGMENT: &str = ":";
 /// for example, `:database/` would run for any path that starts with `database/`, like `database/users` or `database/transactions`.
 #[derive(Debug)]
 pub struct Middleware {
+    /// Container for Middleware handlers.
     routes: RouteTable,
     /// `NOTE`: Route entry should be of RouteEntry::Middleware variant.
     ///
     /// It provides a mapping of the route key that points to a segment middleware that it operates on and will be invoked before the actual route.
+    /// On route key can have one segment that matches the given key, so it will return the first match.
+    ///
+    /// /database/tasks/index.html => :database/tasks
+    /// /database/tasks/tasks.json => :database/tasks
+    /// /database => Will not run on the above segment.
+    /// /database/tasks.json => Will not run on the above segment.
     ///
     /// We are using the separate `RouteTable` as the segments as we do want the abstraction that it provides, like the `get` methods, matching of the
     /// paths, suffixing with `index.html`, etc. also the insert method that check for duplication, even thought the duplication
@@ -63,7 +70,7 @@ impl Middleware {
     /// inserting the route. We should do the same as we are doing there in the `Middleware::insert` to abstract it.
     /// Or we could just provide separate method for inserting the route in the `RouteTable` but I don't want to do that.
     /// So be aware that it runs O(n * m) where n is the number of routes in the `RouteTable` and m is the number of components in the path's of Routes.
-    pub fn generate_middleware_segments(
+    pub fn generate_segments(
         &mut self,
         routes: &Routes,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -96,6 +103,8 @@ impl Middleware {
 
         for key in routes.get_routes().get_routes().keys() {
             let segment = Middleware::evaluate_to_segment(key, &segments);
+
+            println!("Segment for {:?} is {:?}", key, segment);
 
             if let Some(segment) = segment {
                 // If the segment is found, we add it to the mapping.

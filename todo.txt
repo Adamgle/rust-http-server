@@ -232,6 +232,9 @@ ISSUES
     => Solving that would require to define some static source of the allowed, declared, collections, currently that is done in the typetag macro, and ideally that would be single source of truth
     => but I imaging it could not be possible because it is evaluated at runtime.
 26. <RESOLVED> There is a way to walk file system using http://localhost:5000/api/database/list?collection=../../../../, in query parameters.
+27. Not sure if that could be considered an issue but we can create middleware and middleware segments that will never resolve the the routes
+    -> as they could be not present in the RouteTable. This is more of a development issue, as it would waste memory for handler that would never resolve.
+    -> Maybe we should delegate some functionality that after the Routes and Middleware are build we would statically check if middleware resolves.
 
     
 IDEAS

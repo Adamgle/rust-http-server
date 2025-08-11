@@ -274,35 +274,43 @@ class API {
           }
 
           const data: TaskData = await res.json();
-          Object.values(data).forEach(({ value, id }) => {
-            const taskContainer = ElementCreator.createElement("div", {
-              class: "task-container",
+          
+          const render = () => {
+              Object.values(data).forEach(({ value, id }) => {
+                
+              const taskContainer = ElementCreator.createElement("div", {
+                class: "task-container",
+              });
+
+              const task = ElementCreator.createElement(
+                "div",
+                { class: "task", id },
+                value
+              );
+
+              const deleteButton = ElementCreator.createElement(
+                "button",
+                { class: "delete-button" },
+                "Delete"
+              );
+
+              taskContainer.appendChild(task);
+              taskContainer.appendChild(deleteButton);
+
+              if (!tasks) return null;
+              
+              tasks.appendChild(taskContainer);
+
+              deleteButton.addEventListener("click", async (e) => {
+                e.preventDefault();
+                if (await this.deleteTask(id)) {
+                  taskContainer.remove();
+                }
+              });
             });
-
-            const task = ElementCreator.createElement(
-              "div",
-              { class: "task", id },
-              value
-            );
-
-            const deleteButton = ElementCreator.createElement(
-              "button",
-              { class: "delete-button" },
-              "Delete"
-            );
-
-            taskContainer.appendChild(task);
-            taskContainer.appendChild(deleteButton);
-
-            tasks.appendChild(taskContainer);
-
-            deleteButton.addEventListener("click", async (e) => {
-              e.preventDefault();
-              if (await this.deleteTask(id)) {
-                taskContainer.remove();
-              }
-            });
-          });
+          }
+          
+            // render();
         } catch (error) {
           console.error("Error loading tasks:", error);
           handleError(error);

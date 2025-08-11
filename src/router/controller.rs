@@ -11,8 +11,8 @@ use crate::{
     router::{
         RouteContext, RouteHandlerFuture, RouteHandlerResult, RouteResult, RouteTableKey,
         cache::{
-            OptionalOwnedRouteHandlerResult, OwnedRouteHandlerResult, RouterCache,
-            RouterCacheResult,
+            OptionalOwnedRouteHandlerResult, OwnedMiddlewareHandlerResult, OwnedRouteHandlerResult,
+            RouterCache, RouterCacheResult,
         },
         middleware::MiddlewareHandlerResult,
     },
@@ -178,18 +178,7 @@ impl Controller {
         Box::pin(async move {
             // info!("State of cache before: {:#?}", crate::router::cache::CACHE);
 
-            // Invalidate the cached session user.
-            // RouterCache::remove(&RouteTableKey::new(
-            //     "/api/getSessionUser",
-            //     Some(HttpRequestMethod::GET),
-            // ));
-
-            // RouterCache::remove(&RouteTableKey::new(
-            //     "/api/getSessionUser",
-            //     Some(HttpRequestMethod::GET),
-            // ));
-
-            RouterCache::ROUTES_CACHE.remove(&RouteTableKey::new(
+            RouterCache::routes().remove(&RouteTableKey::new(
                 "/api/getSessionUser",
                 Some(HttpRequestMethod::GET),
             ));
@@ -306,6 +295,14 @@ impl MiddlewareController {
             // Here we could initialize the database connection or any other resource
             // that we need for the middleware.
 
+            println!(
+                "Size of ctx: request: {} | response_headers: {} | key: {} | database: {}",
+                ctx.request.get_body().map(|b| b.len()).unwrap_or(0),
+                ctx.response_headers.headers.headers.len(),
+                ctx.key.path.display(),
+                ctx.get_database().is_ok()
+            );
+
             let res = ctx.get_response_headers();
 
             res.add(
@@ -322,6 +319,13 @@ impl MiddlewareController {
                     ..Default::default()
                 })
             })?;
+
+            RouterCache::middleware_segments().set(
+                ctx.key.clone(),
+                OwnedMiddlewareHandlerResult {
+                    ctx: ctx.clone().into_owned(),
+                },
+            );
 
             return Ok(RouteResult::Middleware(MiddlewareHandlerResult { ctx }));
         })
@@ -343,8 +347,8 @@ impl MiddlewareController {
 
             let body = ctx.request.get_body_mut().ok_or_else(|| {
                 Box::<dyn Error + Send + Sync>::from(HttpRequestError {
-                    status_code: 400,
                     status_text: "Bad Request".into(),
+                    status_code: 400,
                     message: Some("Request body is missing".to_string()),
                     internals: None,
                     ..Default::default()
@@ -406,10 +410,8 @@ impl AppController {
         // output for the ctx.key = /database/tasks.json. So actually we are caching for the /api/getSessionUser, that is the route handler that is basically as wrapper for the route handler
         // of /api/getSessionUser, thought only for the body of that handler, see Controller::get_session_user.
 
-        if let Some(result) = RouterCache::ROUTES_CACHE.get(&RouteTableKey::new(
-            "/api/getSessionUser",
-            Some(HttpRequestMethod::GET),
-        )) {
+        let cache_key = RouteTableKey::new("/api/getSessionUser", Some(HttpRequestMethod::GET));
+        if let Some(result) = RouterCache::routes().get(&cache_key) {
             match result {
                 RouterCacheResult::AppControllerResult(OptionalOwnedRouteHandlerResult {
                     body,
@@ -419,7 +421,7 @@ impl AppController {
                     let u = Ok(serde_json::from_str::<DatabaseUser>(&body)?);
 
                     info!(
-                        "Returning user from cache for key: {:?} took: {} ms",
+                        "Returning cached {cache_key:?} for key: {:?} took: {} ms",
                         ctx.key,
                         start_time.elapsed().as_millis()
                     );
@@ -445,7 +447,7 @@ impl AppController {
 
         // Cache the output.
 
-        RouterCache::ROUTES_CACHE.set(
+        RouterCache::routes().set(
             // api/getSessionUser | /database/tasks.json
             RouteTableKey::new("/api/getSessionUser", Some(HttpRequestMethod::GET)),
             RouterCacheResult::AppControllerResult(OptionalOwnedRouteHandlerResult {
@@ -455,7 +457,7 @@ impl AppController {
         );
 
         info!(
-            "Returning user from database for key: {:?} took: {} ms",
+            "Returning {cache_key:?} from database for key: {:?} took: {} ms",
             ctx.key,
             start_time.elapsed().as_millis()
         );

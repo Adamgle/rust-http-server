@@ -55,9 +55,7 @@ impl<'a> HttpRequest<'a> {
         writer: &mut MutexGuard<'_, OwnedWriteHalf>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         // TODO: There is still and issue with the TCP-Keep-Alive packets, currently they are non-blocking,
-        // and quickly aborted by the timeout or by the irruption from another task.
-
-        // NOTE: There could be a potential buffer overflow here, if the request is too large for server to handle.
+        // and quickly aborted by the timeout or by the interrupt from another task.
 
         // Could be None if TcpStream is not valid HTTP message.
         let mut headers: Option<HttpRequestHeaders> = None;
@@ -407,7 +405,8 @@ impl<'a> HttpRequest<'a> {
     pub fn get_request_target_path(&self) -> Result<String, Box<dyn Error + Send + Sync>> {
         self.headers.get_request_target_path()
     }
-    // Makes a GET request to the server, returning the requested resource as a String
+
+    /// Makes a GET request to the server, returning the requested resource as a String
     ///
     /// Takes Response `HttpHeaders` and write `Content-Type` and `Content-Length` headers, returning the requested resource as a String
     ///
@@ -424,8 +423,6 @@ impl<'a> HttpRequest<'a> {
         // Read the file
         let requested_resource = fs::read_to_string(resource_path)?;
 
-        println!("requested_resource: {}", requested_resource);
-        
         headers.add(
             Cow::from("Content-Length"),
             Cow::from(requested_resource.len().to_string()),
