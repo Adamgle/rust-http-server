@@ -12,6 +12,7 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 use std::time::SystemTimeError;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use uuid::timestamp::context::ThreadLocalContext;
 
 // / We are using Strings as the keys to store uuids.
 type DatabaseStorage<T> = HashMap<String, T>;
@@ -50,26 +51,6 @@ impl DatabaseCollections {
             config,
         })
     }
-
-    /// Explicitly flushes the WAL file and returns the used instance of the `DatabaseCollections`.
-    ///
-    /// We always want to flush every single collection occurring in the WAL as queries may depend on the data being present
-    /// in the WAL, but not yet in the database, so we need to flush it to database.
-    // pub async fn flush(
-    //     &mut self,
-    //     config: DatabaseConfigEntry,
-    // ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    //     if let Some(WAL) = DatabaseWAL::load_state(&config).await? {
-    //         self.WAL = WAL;
-    //         self.flush().await?;
-    //     }
-
-    //     Ok(())
-
-    //     // `load_state` will return Ok(None) in the case of no WAL file being present,
-    //     // or if the WAL file is empty. Technically in that context of explicit flushing it would be an error
-    //     // as we except some data to be present in the WAL file.
-    // }
 
     /// Creates a new collection with the given name and returns it. If it exists, it returns the existing collection.
     ///
@@ -469,7 +450,7 @@ impl DatabaseCollection {
     /// in lowercase fashion.
     ///
     /// Does not confirm the file existence.
-    async fn create_path(
+    pub fn create_path(
         config: &DatabaseConfigEntry,
         collection_name: &str,
     ) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
@@ -503,7 +484,7 @@ impl DatabaseCollection {
         config: &DatabaseConfigEntry,
         collection_name: &str,
     ) -> Result<Arc<Mutex<File>>, Box<dyn Error + Send + Sync>> {
-        let path = Self::create_path(config, collection_name).await?;
+        let path = Self::create_path(config, collection_name)?;
 
         let mut file = OpenOptions::new()
             .read(true)
@@ -596,6 +577,10 @@ pub trait DatabaseEntryTrait: Send + Sync + Debug {
     fn as_any(&self) -> &dyn Any;
 
     fn clone_box(&self) -> Box<dyn DatabaseEntryTrait>;
+
+    /// Returns the size of the entry in bytes. Strictly for internal use, thought I will keep it in release builds, but it will come handy.
+    /// This is useful for determining the size of the entry when writing to the database and maybe to expose the size of the collection via API endpoint.
+    fn get_size(&self) -> usize;
 
     /// Serializes the entry to the JSON format, so it could be written to the file.
     fn serialize(&self) -> Result<String, serde_json::Error>
@@ -690,6 +675,10 @@ impl DatabaseEntryTrait for DatabaseTask {
     fn get_id(&self) -> String {
         self.id.clone()
     }
+
+    fn get_size(&self) -> usize {
+        return self.value.len() + self.user_id.len() + self.id.len();
+    }
 }
 
 impl From<ClientTask> for DatabaseTask {
@@ -737,6 +726,11 @@ impl DatabaseEntryTrait for DatabaseUser {
 
     fn get_id(&self) -> String {
         self.id.clone()
+    }
+
+    fn get_size(&self) -> usize {
+        // We are not hashing the password, so we can just sum the lengths of the fields.
+        self.id.len() + self.email.len() + self.password.len() + self.API_key.len()
     }
 }
 
@@ -816,6 +810,10 @@ impl DatabaseEntryTrait for DatabaseSession {
 
     fn get_id(&self) -> String {
         self.id.clone()
+    }
+
+    fn get_size(&self) -> usize {
+        self.id.len() + self.user_id.len() + std::mem::size_of_val(&self.expires)
     }
 }
 

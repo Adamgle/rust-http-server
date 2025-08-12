@@ -1,12 +1,12 @@
 use serde_json::json;
-use std::{borrow::Cow, collections::HashMap, error::Error};
+use std::{borrow::Cow, collections::HashMap, error::Error, f32::consts::E};
 
 use crate::{
     config::{
         SpecialDirectories,
         database::{
             DatabaseEntryTrait, DatabaseTask, DatabaseUser,
-            collections::{ClientTask, ClientUser},
+            collections::{ClientTask, ClientUser, DatabaseCollection},
         },
     },
     http::{HttpRequestError, HttpRequestMethod},
@@ -133,28 +133,73 @@ impl Routes {
 
                     // That is impossible as we cannot know the type of the collection at runtime.
 
-                    let collection = database.collections.select_all_any(collection_name).await?;
+                    let collection: HashMap<String, Box<dyn DatabaseEntryTrait>> =
+                        database.collections.select_all_any(collection_name).await?;
+
+                    let mut dynamic_fields = HashMap::<String, String>::new();
 
                     // Get the size of the collection if specified in the query. Acts like boolean flag.
                     // NOTE: We could also implement it to return the `size` of the entries of the collection.
                     if let Some(_) = query.get("size") {
-                        // if let Ok(_) = size.parse::<usize>() {
                         // If the size is specified, we can return the collection data with the size limit.
-                        return Ok(RouteResult::Route(RouteHandlerResult {
-                            headers: response_headers,
-                            body: Cow::Owned(serde_json::to_string(&json!({
-                                "collection": collection_name,
-                                "size": collection.len().to_string(),
-                            }))?),
-                        }));
+
+                        dynamic_fields.insert("size".to_string(), collection.len().to_string());
+
+                        // return Ok(RouteResult::Route(RouteHandlerResult {
+                        //     headers: response_headers,
+                        //     body: Cow::Owned(serde_json::to_string(&json!({
+                        //         "collection": collection_name,
+                        //         "size": collection.len().to_string(),
+                        //     }))?),
+                        // }));
                     }
 
-                    let body = serde_json::to_string(&collection)?;
+                    // Return the size in bytes of the collection as the file and as stored in the database when deserialized.
+                    if let (Some(_), Some(config)) = (query.get("bytes"), &ctx.database_config) {
+                        let metadata = std::fs::metadata(DatabaseCollection::create_path(
+                            config,
+                            collection_name,
+                        )?)?;
 
-                    return Ok(RouteResult::Route(RouteHandlerResult {
-                        headers: response_headers,
-                        body: Cow::Owned(body),
-                    }));
+                        dynamic_fields.insert("file_size".to_string(), metadata.len().to_string());
+                        dynamic_fields.insert(
+                            "collection_size".to_string(),
+                            collection
+                                .iter()
+                                .fold(0, |mut acc, (_, entry)| {
+                                    acc += entry.get_size();
+                                    acc
+                                })
+                                .to_string(),
+                        );
+
+                        // return Ok(RouteResult::Route(RouteHandlerResult {
+                        //     headers: response_headers,
+                        //     body: Cow::Owned(serde_json::to_string(&json!({
+                        //         "collection": collection_name,
+                        //         "file_size": file_size.to_string(),
+                        //         "collection_size":
+                        //     }))?),
+                        // }));
+                    }
+
+                    match dynamic_fields.is_empty() {
+                        true => {
+                            // If there are no dynamic fields, we can return the collection as is.
+                            let body = serde_json::to_string(&collection)?;
+
+                            return Ok(RouteResult::Route(RouteHandlerResult {
+                                headers: response_headers,
+                                body: Cow::Owned(body),
+                            }));
+                        }
+                        false => {
+                            return Ok(RouteResult::Route(RouteHandlerResult {
+                                headers: response_headers,
+                                body: Cow::Owned(serde_json::to_string(&dynamic_fields)?),
+                            }));
+                        }
+                    }
                 })
             })),
         )?;

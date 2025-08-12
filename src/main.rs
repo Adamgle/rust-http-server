@@ -153,7 +153,7 @@ fn save_previous_logs() -> Result<(), Box<dyn Error + Send + Sync>> {
                         let path = std::path::Path::new(source)
                             .strip_prefix(std::env::current_dir()?)
                             .unwrap_or_else(|_| {
-                                eprintln!("Failed to strip prefix from path: {}", source);
+                                // eprintln!("Failed to strip prefix from path: {}", source);
 
                                 std::path::Path::new(source)
                             });

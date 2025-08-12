@@ -4,6 +4,9 @@
 */
 #![allow(non_snake_case)]
 
+// SIDE NOTE: The main issue of why the performance of this web server is soo bad, is because of this database, which does have to read => deserialize => write to deserialize 
+// => write serialized every WAL_COMMAND_SIZE constant, making it roughly run in quadratic complexity of WAL file flush.
+
 // ### NOTES ###
 // This database is deeply flawed, as insertions are not done in O(1) append only time, since we have to parse the file to
 // add a new entry. Implementing the WAL file, which is append only, we could postpone that process, but that is not even the

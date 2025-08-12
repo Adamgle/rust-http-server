@@ -379,22 +379,22 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
 
 def main():
-    # run_multithreaded(
-    #     callback=send_custom,
-    #     request=HttpMethod.POST,
-    #     path="/database/tasks.json",
-    #     payload=build_task("a" * (1024 * 1024)),
-    #     sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
-    #     threads_count=10,
-    #     requests_count=100,
-    # )
-
-    send_custom(
+    run_multithreaded(
+        callback=send_custom,
         request=HttpMethod.POST,
         path="/database/tasks.json",
-        payload=build_task("a" * (1024 * 1024 * 24)),
+        payload=build_task("a" * (1)),
         sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
+        threads_count=10,
+        requests_count=1000,
     )
+
+    # send_custom(
+    #     request=HttpMethod.POST,
+    #     path="/database/tasks.json",
+    #     payload=build_task("a" * (1024 * 1024 * 500)),
+    #     sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
+    # )
 
 
 if __name__ == "__main__":
