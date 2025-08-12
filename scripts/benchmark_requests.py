@@ -57,7 +57,7 @@ def test_get(path: str) -> int:
     return response.status_code
 
 
-SendCustomCallable = Callable[[str, str, Optional[str], Optional[str]], SendResult]
+SendCustomCallable = Callable[..., SendResult]
 
 
 def send_custom(
@@ -122,7 +122,8 @@ def send_custom(
 
                     response.extend(chunk)
 
-                return response
+                # , errors='ignore'
+                return bytes(response).decode("utf-8")
             except OSError as e:
                 print(f"Socket error: {e}")
                 return "500"
@@ -223,7 +224,7 @@ def run_benchmark(
     count: int = 1,
     request: HttpMethod = HttpMethod.GET,
     path: str = "/",
-    response_timestamps: List[float] = [],
+    response_timestamps: List[List[float]] = [],
 ) -> None:
     """Runs n benchmarks on a given path and request. Default's to one benchmark on "/" path with 'GET'.
 
@@ -239,7 +240,7 @@ def run_benchmark(
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
     # arguments of the run_multithreaded built with functools.partial
-    callback_args = callback.keywords
+    callback_args = callback.keywords  # type: ignore
 
     threads_count, requests_count = (
         callback_args["threads_count"],
@@ -316,7 +317,7 @@ def determine_performance_loss(
 
 
 def plot_response_timestamps(timestamps: List[List[float]]) -> None:
-    timestamps = np.array(timestamps, dtype=np.float64)
+    timestamps_array = np.array(timestamps, dtype=np.float64)
 
     plt.figure(figsize=(10, 6))
     plt.xlabel("Request Number")
@@ -327,7 +328,7 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
     # for i, ts in enumerate(timestamps):
     #     plt.plot(ts, marker=".", label=f"Thread {i + 1}")
 
-    timestamps_avg = np.mean(timestamps, axis=0)
+    timestamps_avg = np.mean(timestamps_array, axis=0)
     xs = np.arange(len(timestamps_avg))
 
     # slope, intercept = np.polyfit(xs, timestamps_avg, deg=1)
@@ -377,77 +378,22 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
     plt.show()
 
 
-def parse_logs(log_file: str = "./logs/logs.log") -> None:
-    with open(log_file, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-
-    durations = []
-    WAL_durations = []
-
-    for line in lines:
-        time = re.search(r"took: ([0-9]+) ms", line)
-
-        if "INFO" in line and time:
-            time = float(time.group(1))
-            if time > 0:
-                durations.append(time)
-
-        if "INFO" in line and "Total flush time" in line:
-            WAL_durations.append(
-                float(line.split("Total flush time: ")[-1].strip().replace("ms", ""))
-            )
-
-    print(WAL_durations, sum(WAL_durations))
-    print(durations)
-
-
 def main():
-    # run_benchmark(
-    #     callback=functools.partial(
-    #         run_multithreaded,
-    #         callback=send_custom,
-    #         threads_count=10,
-    #         requests_count=10000,
-    #         # payload=json.dumps({"email": "test@example.com", "password": "test123"}),
-    #         payload=build_task("test"),
-    #         sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
-    #     ),
-    #     request=HttpMethod.POST,
-    #     # path="/database/users.json",
-    #     path="/database/tasks.json",
-    #     count=1,
-    # )
-
-    # run_multithreaded(
-    #     callback=send_custom,
-    #     threads_count=10,
-    #     requests_count=100,
-    #     # payload=build_task("a" * (1024 * 1024)),
-    #     payload=build_task("test"),
-    #     sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
-    #     request=HttpMethod.POST,
-    #     path="/database/tasks.json",
-    # )
-
-    # run_multithreaded(
-    #     callback=send_custom,
-    #     threads_count=2,
-    #     requests_count=1000,
-    #     # payload=build_task("test"),
-    #     sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
-    #     request=HttpMethod.GET,
-    #     path="/database/users.json",
-    # )
-
-    send_custom(
-        request=HttpMethod.POST,
+    run_multithreaded(
+        callback=send_custom,
         path="/database/tasks.json",
-        payload=build_task("a" * (1024 * 1024 * 1024)),
-        host="localhost",
+        payload=build_task("a" * (1024 * 1024)),
         sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
+        threads_count=10,
+        requests_count=100
     )
-
-    parse_logs()
+    
+    # send_custom(
+    #     request=HttpMethod.POST,
+    #     path="/database/tasks.json",
+    #     payload=build_task("a" * (1024 * 1024 * 24)),
+    #     sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
+    # )
 
 
 if __name__ == "__main__":

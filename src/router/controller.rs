@@ -176,14 +176,17 @@ impl Controller {
 
     pub fn sign_out_user(ctx: RouteContext<'_>) -> RouteHandlerFuture {
         Box::pin(async move {
-            // info!("State of cache before: {:#?}", crate::router::cache::CACHE);
-
+            // Remove user from cache registered as session user.
             RouterCache::routes().remove(&RouteTableKey::new(
                 "/api/getSessionUser",
                 Some(HttpRequestMethod::GET),
             ));
 
-            // info!("State of cache after: {:#?}", crate::router::cache::CACHE);
+            // Remove cached tasks for user
+            RouterCache::routes().remove(&RouteTableKey::new(
+                "database/tasks.json",
+                Some(HttpRequestMethod::GET),
+            ));
 
             // We will just delete the session from the database, so the user will be logged out.
             let database = ctx.get_database()?;
@@ -295,13 +298,13 @@ impl MiddlewareController {
             // Here we could initialize the database connection or any other resource
             // that we need for the middleware.
 
-            println!(
-                "Size of ctx: request: {} | response_headers: {} | key: {} | database: {}",
-                ctx.request.get_body().map(|b| b.len()).unwrap_or(0),
-                ctx.response_headers.headers.headers.len(),
-                ctx.key.path.display(),
-                ctx.get_database().is_ok()
-            );
+            // println!(
+            //     "Size of ctx: request: {} | response_headers: {} | key: {} | database: {}",
+            //     ctx.request.get_body().map(|b| b.len()).unwrap_or(0),
+            //     ctx.response_headers.headers.headers.len(),
+            //     ctx.key.path.display(),
+            //     ctx.get_database().is_ok()
+            // );
 
             let res = ctx.get_response_headers();
 
@@ -320,12 +323,16 @@ impl MiddlewareController {
                 })
             })?;
 
-            RouterCache::middleware_segments().set(
-                ctx.key.clone(),
-                OwnedMiddlewareHandlerResult {
-                    ctx: ctx.clone().into_owned(),
-                },
-            );
+            // Caching that route, as it is a segment, would basically capture every route
+            // that is of :database/, and as it works on each method, it would cache basically ANY request.
+            // That is of course deeply flawed.
+
+            // RouterCache::middleware_segments().set(
+            //     ctx.key.clone(),
+            //     OwnedMiddlewareHandlerResult {
+            //         ctx: ctx.into_owned(),
+            //     },
+            // );
 
             return Ok(RouteResult::Middleware(MiddlewareHandlerResult { ctx }));
         })
@@ -421,7 +428,7 @@ impl AppController {
                     let u = Ok(serde_json::from_str::<DatabaseUser>(&body)?);
 
                     info!(
-                        "Returning cached {cache_key:?} for key: {:?} took: {} ms",
+                        "[CACHED] Returning cached {cache_key:?} for key: {:?} took: {} ms",
                         ctx.key,
                         start_time.elapsed().as_millis()
                     );

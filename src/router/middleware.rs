@@ -104,8 +104,6 @@ impl Middleware {
         for key in routes.get_routes().get_routes().keys() {
             let segment = Middleware::evaluate_to_segment(key, &segments);
 
-            println!("Segment for {:?} is {:?}", key, segment);
-
             if let Some(segment) = segment {
                 // If the segment is found, we add it to the mapping.
 

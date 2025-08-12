@@ -535,7 +535,6 @@ impl<'a> HttpRequest<'a> {
         // Redirection is done based on config file deps under redirect/domains declared
         // as the Vector of RedirectDomainEntry structs
 
-        // for (key, value) in self.get_headers() {
         if let Some(host) = headers.get("Host") {
             if let Some(Some(domains)) = config.config_file.redirect.as_ref().map(|r| &r.domains) {
                 // NOTE: That Would make sens if the domains would be a HashMap, domain.from would be key and domain.to a value
@@ -574,7 +573,6 @@ impl<'a> HttpRequest<'a> {
                         )?;
 
                         // Could be problems if the path is not valid UTF-8
-                        // let path = path.to_string_lossy();
 
                         println!("Redirecting from: {} | {}", domain.from, path);
                         println!("Redirecting to: {} | {}", location, path);
@@ -596,9 +594,7 @@ impl<'a> HttpRequest<'a> {
                     }
                 }
             }
-            // _ => (),
         }
-        // }
 
         Ok(false)
     }

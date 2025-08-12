@@ -310,7 +310,7 @@ class API {
             });
           }
           
-            // render();
+            render();
         } catch (error) {
           console.error("Error loading tasks:", error);
           handleError(error);

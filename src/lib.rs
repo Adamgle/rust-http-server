@@ -14,9 +14,8 @@ pub mod tcp_handlers {
     use super::http_request::HttpRequest;
     use crate::config::Config::{self};
     use crate::http::{HttpHeaders, HttpResponseHeaders, HttpResponseStartLine};
-    use crate::http_response::HttpResponse;
-    use crate::router::cache::{OwnedMiddlewareHandlerResult, RouterCache};
-    use crate::router::{RouteContext, RouteHandlerResult, RouteResult, RouteTableKey};
+    use crate::router::RouteTableKey;
+    use crate::router::cache::RouterCache;
     use crate::*;
     use http::HttpRequestError;
     use log::{error, info};
@@ -149,117 +148,82 @@ pub mod tcp_handlers {
         }
     }
 
+    // Technically that is only related to HttpResponseHeaders, but I would delegate that as a library code.
+    pub fn set_default_headers(headers: &mut HttpResponseHeaders<'_>) {
+        headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
+    }
+
     /// Handles incoming request from the client.
     async fn handle_client(
         reader: &mut OwnedReadHalf,
         writer: Arc<Mutex<OwnedWriteHalf>>,
         config: Arc<Mutex<Config>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // let start = std::time::Instant::now();
+
         let config = Arc::clone(&config);
         let config = config.lock().await;
 
-        let writer: Arc<Mutex<OwnedWriteHalf>> = Arc::clone(&writer);
+        let writer = Arc::clone(&writer);
         let mut writer = writer.lock().await;
 
         let request = HttpRequest::new(&config, reader, &mut writer).await?;
 
-        let (path, method) = (request.get_request_target_path()?, request.get_method());
+        let key = RouteTableKey {
+            path: PathBuf::from(request.get_request_target_path()?),
+            method: Some(request.get_method().clone()),
+        };
 
+        info!("Incoming request: #{:?}", key);
         info!("State of cache: {}", RouterCache::debug());
 
         // NOTE: We could just create those headers while doing route and then return the ownership.
         // it would be the same actually, we would still return it from the route handler, but maybe more idiomatic.
-        let headers = HttpResponseHeaders::new(HttpResponseStartLine::default());
+        let mut headers = HttpResponseHeaders::new(HttpResponseStartLine::default());
 
         let router = config.get_router();
 
-        let key = RouteTableKey {
-            path: PathBuf::from(path),
-            method: Some(method.clone()),
-        };
+        // info!(
+        //     "Recursive size of the context: request: {:#?} | response_headers: {:#?} | body: {} | Sum of both: {:?}",
+        //     ctx.request
+        //         .headers
+        //         .headers
+        //         .headers
+        //         .iter()
+        //         .map(|(k, v)| (k, k.len() + v.len()))
+        //         .collect::<std::collections::HashMap<_, _>>(),
+        //     ctx.response_headers
+        //         .headers
+        //         .headers
+        //         .iter()
+        //         .map(|(k, v)| (k, k.len() + v.len()))
+        //         .collect::<std::collections::HashMap<_, _>>(),
+        //     ctx.request.body.as_ref().map(|v| v.len()).unwrap_or(0),
+        //     ctx.request
+        //         .headers
+        //         .headers
+        //         .headers
+        //         .iter()
+        //         .map(|(k, v)| (k.len() + v.len()))
+        //         .sum::<usize>()
+        //         + ctx
+        //             .response_headers
+        //             .headers
+        //             .headers
+        //             .iter()
+        //             .map(|(k, v)| (k.len() + v.len()))
+        //             .sum::<usize>()
+        //         + ctx.request.body.as_ref().map(|v| v.len()).unwrap_or(0),
+        // );
 
-        // println!("Incoming: {:?}", key);
-        info!("Incoming request: #{:?}", key);
+        // response.write(&config, &mut writer).await?;
 
-        // To resolve the double mutable reference to headers we will move the ownership of headers,
-        // that is cheap operation.
+        // info!("Route of {key:?} took: {} ms", start.elapsed().as_millis());
 
-        let mut ctx = RouteContext::new(
-            request,
-            headers,
-            &key,
-            config.app.get_database(),
-            // We are cloning the database config
-            config.get_database_config().cloned(),
-        );
+        // return Ok(());
 
-        // let c = if let Some(OwnedMiddlewareHandlerResult { ctx: context }) =
-        //     RouterCache::middleware().get(&key)
-        // {
-        //     // If the route is cached, we can use the cached context.
-        //     // We assume that the cached context is valid for the lifetime of the request.
-        //     context
-        // } else {
-        //     panic!()
-        // };
+        tcp_handlers::set_default_headers(&mut headers);
 
-        // ctx = c.to_borrowed();
-
-        info!(
-            "Recursive size of the context: request: {:#?} | response_headers: {:#?} | body: {} | Sum of both: {:?}",
-            ctx.request
-                .headers
-                .headers
-                .headers
-                .iter()
-                .map(|(k, v)| (k, k.len() + v.len()))
-                .collect::<std::collections::HashMap<_, _>>(),
-            ctx.response_headers
-                .headers
-                .headers
-                .iter()
-                .map(|(k, v)| (k, k.len() + v.len()))
-                .collect::<std::collections::HashMap<_, _>>(),
-            ctx.request.body.as_ref().map(|v| v.len()).unwrap_or(0),
-            ctx.request
-                .headers
-                .headers
-                .headers
-                .iter()
-                .map(|(k, v)| (k.len() + v.len()))
-                .sum::<usize>()
-                + ctx
-                    .response_headers
-                    .headers
-                    .headers
-                    .iter()
-                    .map(|(k, v)| (k.len() + v.len()))
-                    .sum::<usize>()
-                + ctx.request.body.as_ref().map(|v| v.len()).unwrap_or(0),
-        );
-
-        let start = std::time::Instant::now();
-
-        let ctx = ctx.into_owned();
-
-        info!(
-            "Converting context from RouteContext to OwnedRouteContext took: {}ms",
-            start.elapsed().as_millis()
-        );
-
-        let start = std::time::Instant::now();
-
-        let result = router.route(ctx).await?;
-        let RouteHandlerResult { mut headers, body } = result.to_borrowed();
-
-        headers.add(Cow::from("Connection"), Cow::from("keep-alive"));
-
-        let mut response: HttpResponse<'_> = HttpResponse::new(&headers, Some(Cow::from(body)));
-
-        response.write(&config, &mut writer).await?;
-
-        info!("Route of {key:?} took: {} ms", start.elapsed().as_millis());
-
-        Ok(())
+        return Ok(router.route(&config, &mut writer, request, headers).await?);
     }
 }

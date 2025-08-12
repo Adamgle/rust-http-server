@@ -4,14 +4,16 @@ mod middleware;
 mod routes;
 
 use crate::{
+    http_response::HttpResponse,
     prelude::*,
     router::cache::{
-        CacheEntry, OwnedMiddlewareHandlerResult, OwnedRouteContext, OwnedRouteHandlerResult,
-        RouterCache, RouterCacheResult,
+        OwnedMiddlewareHandlerResult, OwnedRouteContext, OwnedRouteHandlerResult, RouterCache,
+        RouterCacheResult,
     },
 };
 
 use std::{
+    borrow::Cow,
     collections::HashMap,
     error::Error,
     future::Future,
@@ -21,8 +23,7 @@ use std::{
     sync::Arc,
 };
 
-use tokio::sync::Mutex;
-use uuid::timestamp::context;
+use tokio::{net::tcp::OwnedWriteHalf, sync::Mutex};
 
 use crate::{
     config::{Config, SpecialDirectories, config_file::DatabaseConfigEntry, database::Database},
@@ -266,12 +267,6 @@ impl<'ctx> RouteContext<'ctx> {
     ) -> Self {
         // We could set the context from the Cache there.
 
-        // if let Some(OwnedMiddlewareHandlerResult { ctx }) = RouterCache::middleware().get(&key) {
-        //     // If the route is cached, we can use the cached context.
-        //     // We assume that the cached context is valid for the lifetime of the request.
-        //     return ctx.to_borrowed();
-        // }
-
         Self {
             request,
             response_headers,
@@ -281,16 +276,24 @@ impl<'ctx> RouteContext<'ctx> {
         }
     }
 
-    pub fn into_owned(self) -> OwnedRouteContext {
+    pub fn into_owned(&self) -> OwnedRouteContext {
+        let start = std::time::Instant::now();
+
         // Converts the `RouteContext` into an `OwnedRouteContext`.
-        OwnedRouteContext {
-            request: self.request.into_owned(),
-            response_headers: self.response_headers.into_owned(),
+        let c = OwnedRouteContext {
+            request: self.request.clone().into_owned(),
+            response_headers: self.response_headers.clone().into_owned(),
             key: self.key.clone(),
-            // .map(|d| Arc::clone(&d)),
-            database: self.database,
-            database_config: self.database_config,
-        }
+            database: self.database.clone(),
+            database_config: self.database_config.clone(),
+        };
+
+        info!(
+            "Converted RouteContext to OwnedRouteContext took: {} µs",
+            start.elapsed().as_micros()
+        );
+
+        return c;
     }
 
     pub fn get_response_headers(&mut self) -> &mut HttpResponseHeaders<'ctx> {
@@ -331,12 +334,21 @@ pub struct RouteHandlerResult<'ctx> {
 }
 
 impl RouteHandlerResult<'_> {
-    pub fn into_owned(self) -> OwnedRouteHandlerResult {
+    pub fn into_owned(&self) -> OwnedRouteHandlerResult {
+        let start = std::time::Instant::now();
+
         // Converts the `RouteHandlerResult` into an `OwnedRouteHandlerResult`.
-        OwnedRouteHandlerResult {
-            headers: self.headers.into_owned(),
+        let r = OwnedRouteHandlerResult {
+            headers: self.headers.clone().into_owned(),
             body: self.body.clone(),
-        }
+        };
+
+        info!(
+            "Converted RouteHandlerResult to OwnedRouteHandlerResult took: {} µs",
+            start.elapsed().as_micros()
+        );
+
+        r
     }
 }
 
@@ -345,19 +357,6 @@ pub enum RouteResult<'ctx> {
     Route(RouteHandlerResult<'ctx>),
     Middleware(MiddlewareHandlerResult<'ctx>),
 }
-
-/// Wrapper around Owned and Borrowed route handler results.
-// pub enum AnyRouteResult<'ctx> {
-//     RouteResult(RouteResult<'ctx>),
-//     OwnedRouteResult(OwnedRouteResult),
-// }
-
-// impl RouteResult<'_> {
-//     pub fn into_owned(self) -> OwnedRouteHandlerResult {
-//         // Converts the `RouteResult` into an `OwnedRouteResult`.
-
-//     }
-// }
 
 // UPDATE: Callback cannot live for 'static as the Context gets moved in to a closure
 // and then lifetime it utilizes would become invariant. That means a lifetime of context
@@ -443,6 +442,145 @@ impl Router {
         &mut self.routes
     }
 
+    pub async fn execute_middleware_segment<'ctx>(
+        &self,
+        ctx: RouteContext<'ctx>,
+    ) -> Result<OwnedMiddlewareHandlerResult, Box<dyn Error + Send + Sync>> {
+        match self.middleware.get_segments().get(&ctx.get_key()) {
+            Ok(RouteEntry::Middleware(Some(handler))) => {
+                let k = ctx.get_key().clone();
+                let start_time = std::time::Instant::now();
+
+                let result = handler.callback(ctx).await.inspect_err(|e| {
+                    error!("Error in middleware segment handler for {k:?} | {:?}", e);
+                })?;
+
+                info!(
+                    "Middleware segment for path: {:?} took: {} ms",
+                    k,
+                    start_time.elapsed().as_millis()
+                );
+                match result {
+                    RouteResult::Middleware(MiddlewareHandlerResult { ctx: context }) => {
+                        // If the middleware segment exists, we run the middleware for that segment.
+                        // We do not want to propagate the error here, as we want to return the context back to the route handler.
+                        let start = std::time::Instant::now();
+
+                        let ctx = context.into_owned();
+
+                        info!(
+                            "Converting context in Middleware Segment from MiddlewareHandlerResult to OwnedRouteContext took: {}ms",
+                            start.elapsed().as_millis()
+                        );
+
+                        return Ok(OwnedMiddlewareHandlerResult { ctx });
+                    }
+                    // This branch would only evaluate if the wrong enum variant is returned from the handler
+                    _ => {
+                        return Err(Box::from(HttpRequestError {
+                            internals: Some(Box::from(
+                                "Middleware segment handler should evaluate to RouteResult::Middleware",
+                            )),
+                            ..Default::default()
+                        }));
+                    }
+                }
+            }
+            _ => Ok(OwnedMiddlewareHandlerResult {
+                ctx: ctx.into_owned(),
+            }),
+        }
+    }
+
+    pub async fn execute_middleware_handler<'ctx>(
+        &self,
+        ctx: RouteContext<'ctx>,
+    ) -> Result<OwnedMiddlewareHandlerResult, Box<dyn Error + Send + Sync>> {
+        let key = ctx.get_key().clone();
+
+        match self.middleware.get_routes().get_routes().get(&key) {
+            Some(RouteEntry::Middleware(Some(middleware))) => {
+                let k = ctx.get_key().clone();
+
+                let start_time = std::time::Instant::now();
+
+                let result = middleware.callback(ctx).await.inspect_err(|e| {
+                    error!("Error in middleware handler for {k:?} | {:?}", e);
+                })?;
+
+                info!(
+                    "Middleware for path: {:?} took: {} ms",
+                    k,
+                    start_time.elapsed().as_millis()
+                );
+
+                match result {
+                    RouteResult::Middleware(MiddlewareHandlerResult { ctx: context }) => {
+                        let start = std::time::Instant::now();
+
+                        let ctx = context.into_owned();
+
+                        info!(
+                            "Converting context in Middleware Handler from MiddlewareHandlerResult to OwnedRouteContext took: {} ms",
+                            start.elapsed().as_millis()
+                        );
+
+                        return Ok(OwnedMiddlewareHandlerResult { ctx });
+                    }
+                    // This branch would only evaluate if the wrong enum variant is returned from the handler
+                    _ => {
+                        return Err(Box::from(HttpRequestError {
+                            internals: Some(Box::from(
+                                "Middleware handler should evaluate to RouteResult::Middleware",
+                            )),
+                            ..Default::default()
+                        }));
+                    }
+                }
+            }
+            _ => Ok(OwnedMiddlewareHandlerResult {
+                ctx: ctx.into_owned(),
+            }),
+        }
+    }
+
+    pub async fn execute_middleware<'ctx>(
+        &self,
+        ctx: RouteContext<'ctx>,
+    ) -> Result<OwnedMiddlewareHandlerResult, Box<dyn Error + Send + Sync>> {
+        let key = ctx.get_key().clone();
+
+        match (
+            RouterCache::middleware_segments().get(&key),
+            RouterCache::middleware().get(&key),
+        ) {
+            (Some(OwnedMiddlewareHandlerResult { ctx: context }), None) => {
+                info!("[CACHED] Using cached middleware segment for {key:?}");
+
+                return self.execute_middleware_handler(context.to_borrowed()).await;
+            }
+            // This is just to log that the segment is also used, if there is context for the route handler, we do not need
+            // to save ctx = segment.context as the handler will carry over the changes that happen in the segment.
+            (Some(_), Some(result)) => {
+                info!("[CACHED] Using cached middleware segment for {key:?}");
+                info!("[CACHED] Using cached middleware handler for {key:?}");
+
+                return Ok(result);
+            }
+            (None, Some(result)) => {
+                info!("[CACHED] Using cached middleware handler for {key:?}");
+
+                return Ok(result);
+                // return self.execute_middleware_handler(context.to_borrowed()).await;
+            }
+            (None, None) => {
+                let OwnedMiddlewareHandlerResult { ctx } =
+                    self.execute_middleware_segment(ctx).await?;
+                self.execute_middleware_handler(ctx.to_borrowed()).await
+            }
+        }
+    }
+
     /// `NOTE`: I am a mistakenly implementing the RouteResult as an enum that could standalone return the result of the middleware handler.
     /// That is not the case as middleware does not produce the body and if the handler does not exists we cannot respond with data.
     /// We will keep the functionality, maybe we will utilize it as it is not a big deal to keep it in the code. But keep in mind
@@ -450,11 +588,33 @@ impl Router {
     ///
     /// `NOTE`: Route with defined middleware and undefined handler could only be valid if the middleware is a segment, given that special case
     /// we need to keep the `RouteHandler` as `Option<RouteHandler>` in the `RouteTableValue` struct.
-    pub async fn route(
+    pub async fn route<'ctx>(
         &self,
-        mut ctx: OwnedRouteContext,
-    ) -> Result<OwnedRouteHandlerResult, Box<dyn Error + Send + Sync>> {
+        config: &MutexGuard<'_, Config>,
+        mut writer: &mut MutexGuard<'_, OwnedWriteHalf>,
+        req: HttpRequest<'ctx>,
+        res: HttpResponseHeaders<'ctx>,
+        // ctx: OwnedRouteContext,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Check if the path matches any of the middleware segments.
+
+        let (path, method) = (req.get_request_target_path()?, req.get_method());
+
+        let key = RouteTableKey {
+            path: PathBuf::from(path),
+            method: Some(method.clone()),
+        };
+
+        // println!("Incoming: {:?}", key);
+        info!("Incoming request: #{:?}", key);
+
+        let ctx = RouteContext {
+            request: req,
+            response_headers: res,
+            key: &key,
+            database: config.app.get_database(),
+            database_config: config.get_database_config().cloned(),
+        };
 
         let routes = self.routes.get_routes();
 
@@ -473,144 +633,35 @@ impl Router {
             })
         })?;
 
-        // Middleware segments |  Middleware handlers | Route handlers, => 2^3 Possible combinations of caching. |
-        // At each point you can have cached result of those.
-        // Cached Middleware segment and not cached any of the other two.
-        // Cached Middleware handler and not cached any of the other two.
-        // Cached Route handler and not cached any of the other two.
-        // Cached Route handler and cached Middleware handler, but not cached the Middleware segment.
+        let OwnedMiddlewareHandlerResult { ctx } = self.execute_middleware(ctx).await?;
 
-        // We are matching only the middleware segments and middleware handlers here, and updating the context accordingly.
-
-        // If the segment exists, we run the middleware for that segment.
-        // We don't want to propagate the error here if there is no segment handler for the route.
-
-        if let Ok(RouteEntry::Middleware(Some(handler))) = self.middleware.get_segments().get(&key)
-        {
-            match RouterCache::middleware_segments().get(&key) {
-                // If there is a cache entry for the middleware segment, we save it in the `ctx` for the later use in either middleware handler or route handler, or both.
-                Some(OwnedMiddlewareHandlerResult { ctx: context }) => {
-                    info!("Using cached middleware segment for {key:?}");
-
-                    ctx = context;
-                }
-                _ => {
-                    let k = ctx.get_key().clone();
-                    let start_time = std::time::Instant::now();
-
-                    let result = handler.callback(ctx.to_borrowed()).await.inspect_err(|e| {
-                        error!("Error in middleware segment handler for {k:?} | {:?}", e);
-                    })?;
-
-                    info!(
-                        "Middleware segment for path: {:?} took: {} ms",
-                        k,
-                        start_time.elapsed().as_millis()
-                    );
-
-                    match result {
-                        RouteResult::Middleware(MiddlewareHandlerResult { ctx: context }) => {
-                            // If the middleware segment exists, we run the middleware for that segment.
-                            // We do not want to propagate the error here, as we want to return the context back to the route handler.
-                            let start = std::time::Instant::now();
-                            ctx = context.into_owned();
-
-                            info!(
-                                "Converting context in Middleware Segment from MiddlewareHandlerResult to OwnedRouteContext took: {}ms",
-                                start.elapsed().as_millis()
-                            );
-                        }
-                        // This branch would only evaluate if the wrong enum variant is returned from the handler
-                        _ => {
-                            return Err(Box::from(HttpRequestError {
-                                internals: Some(Box::from(
-                                    "Middleware segment handler should evaluate to RouteResult::Middleware",
-                                )),
-                                ..Default::default()
-                            }));
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(RouteEntry::Middleware(Some(middleware))) =
-            self.middleware.get_routes().get_routes().get(&key)
-        {
-            match RouterCache::middleware().get(&key) {
-                Some(OwnedMiddlewareHandlerResult { ctx: context }) => {
-                    info!("Using cached middleware handler for {key:?}");
-
-                    ctx = context;
-                }
-                _ => {
-                    let k = ctx.get_key().clone();
-                    let start_time = std::time::Instant::now();
-
-                    let result = middleware
-                        .callback(ctx.to_borrowed())
-                        .await
-                        .inspect_err(|e| {
-                            error!("Error in middleware handler for {k:?} | {:?}", e);
-                        })?;
-
-                    info!(
-                        "Middleware for path: {:?} took: {} ms",
-                        k,
-                        start_time.elapsed().as_millis()
-                    );
-
-                    match result {
-                        RouteResult::Middleware(MiddlewareHandlerResult { ctx: context }) => {
-                            let start = std::time::Instant::now();
-
-                            ctx = context.into_owned();
-
-                            info!(
-                                "Converting context in Middleware Handler from MiddlewareHandlerResult to OwnedRouteContext took: {}ms",
-                                start.elapsed().as_millis()
-                            );
-                        }
-                        // This branch would only evaluate if the wrong enum variant is returned from the handler
-                        _ => {
-                            return Err(Box::from(HttpRequestError {
-                                internals: Some(Box::from(
-                                    "Middleware handler should evaluate to RouteResult::Middleware",
-                                )),
-                                ..Default::default()
-                            }));
-                        }
-                    }
-                }
-            }
-        }
-
-        // If the handler exists, we call it with the context and return the result.
+        // If the handler exists, we call it with the context and return the `result.
 
         if let RouteEntry::Route(route) = route {
-            // If the route exists, we run the handler for the path.
-            // We do not want to propagate the error here, as we want to return the context back to the route handler.
-
             match RouterCache::routes().get(&key) {
                 Some(RouterCacheResult::RouteResult(result)) => {
-                    info!("Using cached route handler for {key:?}");
+                    info!("[CACHED] Using cached route handler for {key:?}");
 
-                    return Ok(result);
+                    let RouteHandlerResult { headers, body } = result.to_borrowed();
+
+                    // Technically if something was cached, that it should already contains the default headers.
+                    // set_default_headers(&mut headers);
+
+                    // fn from(s: String) -> Cow<'a, str> => Converts a String into an [Owned] variant. No heap allocation is performed, and the string is not copied.
+
+                    let mut response = HttpResponse::new(&headers, Some(Cow::from(body)));
+                    return response.write(&config, &mut writer).await;
                 }
                 _ => {
-                    let k = ctx.get_key().clone();
-                    let start_time = std::time::Instant::now();
-
                     let result = route.callback(ctx.to_borrowed()).await?;
 
-                    info!(
-                        "Route handler for path: {:?} took: {} ms",
-                        k,
-                        start_time.elapsed().as_millis()
-                    );
-
                     match result {
-                        RouteResult::Route(result) => return Ok(result.into_owned()),
+                        RouteResult::Route(RouteHandlerResult { headers, body }) => {
+                            // crate::tcp_handlers::set_default_headers(&mut headers);
+
+                            let mut response = HttpResponse::new(&headers, Some(Cow::from(body)));
+                            return response.write(&config, &mut writer).await;
+                        }
                         // This branch would only evaluate if the wrong enum variant is returned from the handler
                         _ => {
                             return Err(Box::from(HttpRequestError {

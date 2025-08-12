@@ -186,11 +186,7 @@ impl Routes {
                     // If we would want to lay some abstraction on the database we would have "select_all" from the database
                     // and then parse it to the JSON format. Currently we just read the file from the disk.
 
-                    info!("Requesting tasks for the logged user");
-
                     let user = AppController::get_session_user(&mut ctx).await?;
-
-                    info!("User authenticated: {:?}", user);
 
                     let database = ctx.get_database()?;
                     let mut database = database.lock().await;
@@ -223,7 +219,7 @@ impl Routes {
 
                     RouterCache::routes().set(
                         ctx.get_key().clone(),
-                        RouterCacheResult::RouteResult(result.clone().into_owned()),
+                        RouterCacheResult::RouteResult(result.into_owned()),
                     );
 
                     return Ok(RouteResult::Route(result));

@@ -1,20 +1,17 @@
-use std::{borrow::Cow, collections::HashMap, error::Error};
+use std::{borrow::Cow, collections::HashMap};
 
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 
 use crate::{
-    config::{
-        config_file::DatabaseConfigEntry,
-        database::{Database, DatabaseEntryTrait},
-    },
+    config::{config_file::DatabaseConfigEntry, database::Database},
     http::{
         HeaderMap, HttpProtocol, HttpRequestHeaders, HttpRequestRequestLine, HttpResponseHeaders,
         HttpResponseStartLine,
     },
     http_request::HttpRequest,
     prelude::*,
-    router::{RouteContext, RouteHandlerResult, RouteTableKey},
+    router::{RouteContext, RouteHandlerResult, RouteResult, RouteTableKey},
 };
 
 // Goals for RouterCache:
@@ -100,7 +97,9 @@ where
 {
     /// We have to clone as we cannot return something from the Cache as a reference as it could be removed from the cache in the meantime.
     pub fn get(&self, key: &RouteTableKey) -> Option<V> {
-        self.inner.get(key).map(|v| v.clone())
+        self.inner.get(key).map(|v| v.clone()).inspect(|_| {
+            info!("[CACHE] Getting value for key: {:?}", key);
+        })
     }
 
     pub fn set(&self, key: RouteTableKey, value: V) -> Option<V> {
@@ -289,13 +288,22 @@ impl std::fmt::Debug for OwnedRouteContext {
 
 impl OwnedRouteContext {
     pub fn to_borrowed(&self) -> RouteContext {
-        RouteContext {
+        let start = std::time::Instant::now();
+
+        let ctx = RouteContext {
             request: self.request.to_borrowed(),
             response_headers: self.response_headers.to_borrowed(),
             key: &self.key,
             database: self.database.as_ref().map(|d| Arc::clone(&d)),
             database_config: self.database_config.clone(),
-        }
+        };
+
+        info!(
+            "Converted OwnedRouteContext to RouteContext took: {:?} µs",
+            start.elapsed().as_micros()
+        );
+
+        ctx
     }
 
     pub fn get_key(&self) -> &RouteTableKey {
@@ -311,10 +319,19 @@ pub struct OwnedRouteHandlerResult {
 
 impl OwnedRouteHandlerResult {
     pub fn to_borrowed<'a>(&'a self) -> RouteHandlerResult<'a> {
-        RouteHandlerResult {
+        let start = std::time::Instant::now();
+
+        let r = RouteHandlerResult {
             headers: self.headers.to_borrowed(),
             body: self.body.clone(),
-        }
+        };
+
+        info!(
+            "Converted OwnedRouteHandlerResult to RouteHandlerResult took: {:?} µs",
+            start.elapsed().as_micros()
+        );
+
+        r
     }
 }
 
@@ -337,65 +354,7 @@ pub struct OptionalRouteHandlerResult<'ctx> {
     /// We actually have to keep the body as mandatory, and we will treat it in the AppController as the return type of the particular handler.
     pub body: String,
 }
-
-// // /// Wrapper around RouteContext and OwnedRouteContext to allow storing both borrowed and owned contexts in the same enum.
-// // #[derive(Clone, Debug)]
-// // pub enum AnyRouteContext<'ctx> {
-// //     Borrowed(RouteContext<'ctx>),
-// //     Owned(OwnedRouteContext),
-// // }
-
-// impl AnyRouteContext<'_> {
-//     /// Converts the `AnyRouteContext` to a borrowed `RouteContext` (the `Borrowed` variant).
-//     /// It clones the context in the `Borrowed` variant to avoid lifetime issues — which might be costly.
-//     ///
-//     /// Example structure of `RouteContext<'_>`:
-//     ///
-//     /// ```rust
-//     /// pub struct RouteContext<'ctx> {
-//     ///     pub request: HttpRequest<'ctx>,
-//     ///     pub response_headers: HttpResponseHeaders<'ctx>,
-//     ///     pub key: &'ctx RouteTableKey,
-//     ///     pub database: Option<Arc<Mutex<Database>>>,
-//     ///     pub database_config: Option<DatabaseConfigEntry>, // Config cannot be used here as Config itself contains the RouteTable, that would be a circular reference.
-//     /// }
-//     /// ```
-//     ///
-//     /// Clone would need to clone the request and response_headers, which is the biggest cost here, especially if the payload of the request is large in POST requests.
-//     /// The actual body of the request is not initialized yet only in `GET` method, thought POST'S, PUT'S can get cloned.
-//     /// Note that the `key` clone is mostly cheap, database is not cloned, just the Arc reference is cloned,
-//     /// and the database_config is cloned as well.
-//     pub fn to_borrowed(&self) -> RouteContext<'_> {
-//         match self {
-//             AnyRouteContext::Borrowed(ctx) => ctx.clone(),
-//             AnyRouteContext::Owned(ctx) => ctx.to_borrowed(),
-//         }
-//     }
-
-//     pub fn get_key(&self) -> &RouteTableKey {
-//         match self {
-//             AnyRouteContext::Borrowed(ctx) => ctx.get_key(),
-//             AnyRouteContext::Owned(ctx) => &ctx.key,
-//         }
-//     }
-
-//     pub fn get_database(&self) -> Result<Arc<Mutex<Database>>, Box<dyn Error + Send + Sync>> {
-//         match self {
-//             AnyRouteContext::Borrowed(ctx) => ctx.get_database(),
-//             AnyRouteContext::Owned(ctx) => ctx
-//                 .database
-//                 .clone()
-//                 .ok_or("Database is not initialized in the route handler context".into()),
-//         }
-//     }
-
-//     pub fn get_database_config(&self) -> Result<DatabaseConfigEntry, Box<dyn Error + Send + Sync>> {
-//         match self {
-//             AnyRouteContext::Borrowed(ctx) => ctx.get_database_config(),
-//             AnyRouteContext::Owned(ctx) => ctx
-//                 .database_config
-//                 .clone()
-//                 .ok_or("Database config is not initialized in the route handler context".into()),
-//         }
-//     }
-// }
+pub enum AnyRouteResult<'ctx> {
+    RouteResult(RouteResult<'ctx>),
+    OwnedRouteResult(OwnedRouteHandlerResult),
+}
