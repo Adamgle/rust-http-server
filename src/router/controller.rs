@@ -11,8 +11,8 @@ use crate::{
     router::{
         RouteContext, RouteHandlerFuture, RouteHandlerResult, RouteResult, RouteTableKey,
         cache::{
-            OptionalOwnedRouteHandlerResult, OwnedMiddlewareHandlerResult, OwnedRouteHandlerResult,
-            RouterCache, RouterCacheResult,
+            OptionalOwnedRouteHandlerResult, OwnedRouteHandlerResult, RouterCache,
+            RouterCacheResult,
         },
         middleware::MiddlewareHandlerResult,
     },
@@ -53,7 +53,7 @@ impl Controller {
 
             return Ok(RouteResult::Route(RouteHandlerResult {
                 headers: response_headers,
-                body,
+                body: Cow::Owned(body),
             }));
         })
     }
@@ -72,7 +72,7 @@ impl Controller {
                 .read_requested_resource(&mut ctx.response_headers, ctx.key.get_prefixed_path())?;
 
             return Ok(RouteResult::Route(RouteHandlerResult {
-                body,
+                body: Cow::Owned(body),
                 headers: ctx.response_headers,
             }));
         })
@@ -84,7 +84,9 @@ impl Controller {
     pub fn get_session_user(mut ctx: RouteContext<'_>) -> RouteHandlerFuture {
         Box::pin(async move {
             Ok(RouteResult::Route(RouteHandlerResult {
-                body: serde_json::to_string(&AppController::get_session_user(&mut ctx).await?)?,
+                body: Cow::Owned(serde_json::to_string(
+                    &AppController::get_session_user(&mut ctx).await?,
+                )?),
                 headers: ctx.response_headers,
             }))
         })
@@ -166,7 +168,7 @@ impl Controller {
 
                 return Ok(RouteResult::Route(RouteHandlerResult {
                     headers: ctx.response_headers,
-                    body: user.serialize()?,
+                    body: Cow::Owned(user.serialize()?),
                 }));
             } else {
                 return Err(Box::<dyn Error + Send + Sync>::from("Task cannot be empty"));
@@ -260,7 +262,7 @@ impl Controller {
                         AppController::create_user_session(&mut ctx, &user).await?;
 
                         return Ok(RouteResult::Route(RouteHandlerResult {
-                            body: user.serialize()?,
+                            body: Cow::Owned(user.serialize()?),
                             headers: ctx.response_headers,
                         }));
                     }

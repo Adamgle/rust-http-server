@@ -330,7 +330,7 @@ pub struct RouteHandlerResult<'ctx> {
     pub headers: HttpResponseHeaders<'ctx>,
     // I think we will live it as a String and do not keep it as a Cow<'a, [u8]> as the data in route handlers mostly has to be owned as
     // converting to Cow will create not benefit.
-    pub body: String,
+    pub body: Cow<'ctx, str>,
 }
 
 impl RouteHandlerResult<'_> {
@@ -340,7 +340,7 @@ impl RouteHandlerResult<'_> {
         // Converts the `RouteHandlerResult` into an `OwnedRouteHandlerResult`.
         let r = OwnedRouteHandlerResult {
             headers: self.headers.clone().into_owned(),
-            body: self.body.clone(),
+            body: self.body.to_string(),
         };
 
         info!(
@@ -642,6 +642,7 @@ impl Router {
                 Some(RouterCacheResult::RouteResult(result)) => {
                     info!("[CACHED] Using cached route handler for {key:?}");
 
+                    // `.to_borrowed`, despite it's name, does .clone() the body.
                     let RouteHandlerResult { headers, body } = result.to_borrowed();
 
                     // Technically if something was cached, that it should already contains the default headers.
@@ -649,7 +650,7 @@ impl Router {
 
                     // fn from(s: String) -> Cow<'a, str> => Converts a String into an [Owned] variant. No heap allocation is performed, and the string is not copied.
 
-                    let mut response = HttpResponse::new(&headers, Some(Cow::from(body)));
+                    let mut response = HttpResponse::new(&headers, Some(body));
                     return response.write(&config, &mut writer).await;
                 }
                 _ => {
@@ -659,7 +660,7 @@ impl Router {
                         RouteResult::Route(RouteHandlerResult { headers, body }) => {
                             // crate::tcp_handlers::set_default_headers(&mut headers);
 
-                            let mut response = HttpResponse::new(&headers, Some(Cow::from(body)));
+                            let mut response = HttpResponse::new(&headers, Some(body));
                             return response.write(&config, &mut writer).await;
                         }
                         // This branch would only evaluate if the wrong enum variant is returned from the handler

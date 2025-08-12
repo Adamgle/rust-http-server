@@ -337,7 +337,7 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
     # print("Current slope: ", slope)
     print("Polynomial x^2 coefficients: ", a, b, c)
 
-    print(f"Average timestamps: {timestamps_avg} | timestamps: {timestamps}")
+    # print(f"Average timestamps: {timestamps_avg} | timestamps: {timestamps}")
 
     plt.plot(timestamps_avg, marker="x", linestyle="--", label="Average benchmark")
 
@@ -373,27 +373,28 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 
     plt.legend(title="Legend")
 
-    pprint.pprint(determine_performance_loss(timestamps))
+    # pprint.pprint(determine_performance_loss(timestamps))
 
     plt.show()
 
 
 def main():
-    run_multithreaded(
-        callback=send_custom,
-        path="/database/tasks.json",
-        payload=build_task("a" * (1024 * 1024)),
-        sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
-        threads_count=10,
-        requests_count=100
-    )
-    
-    # send_custom(
+    # run_multithreaded(
+    #     callback=send_custom,
     #     request=HttpMethod.POST,
     #     path="/database/tasks.json",
-    #     payload=build_task("a" * (1024 * 1024 * 24)),
+    #     payload=build_task("a" * (1024 * 1024)),
     #     sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
+    #     threads_count=10,
+    #     requests_count=100,
     # )
+
+    send_custom(
+        request=HttpMethod.POST,
+        path="/database/tasks.json",
+        payload=build_task("a" * (1024 * 1024 * 24)),
+        sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
+    )
 
 
 if __name__ == "__main__":

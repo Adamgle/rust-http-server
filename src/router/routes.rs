@@ -1,5 +1,5 @@
 use serde_json::json;
-use std::{collections::HashMap, error::Error};
+use std::{borrow::Cow, collections::HashMap, error::Error};
 
 use crate::{
     config::{
@@ -142,10 +142,10 @@ impl Routes {
                         // If the size is specified, we can return the collection data with the size limit.
                         return Ok(RouteResult::Route(RouteHandlerResult {
                             headers: response_headers,
-                            body: serde_json::to_string(&json!({
+                            body: Cow::Owned(serde_json::to_string(&json!({
                                 "collection": collection_name,
                                 "size": collection.len().to_string(),
-                            }))?,
+                            }))?),
                         }));
                     }
 
@@ -153,7 +153,7 @@ impl Routes {
 
                     return Ok(RouteResult::Route(RouteHandlerResult {
                         headers: response_headers,
-                        body,
+                        body: Cow::Owned(body),
                     }));
                 })
             })),
@@ -213,7 +213,7 @@ impl Routes {
                     // Tasks => Logged User, Logged User changes, you invalidate the logged user, but so should you the tasks.
 
                     let result = RouteHandlerResult {
-                        body,
+                        body: Cow::Owned(body),
                         headers: ctx.response_headers.clone(),
                     };
 
@@ -246,7 +246,7 @@ impl Routes {
 
                     return Ok(RouteResult::Route(RouteHandlerResult {
                         headers: ctx.response_headers,
-                        body: serde_json::to_string(&collection)?,
+                        body: Cow::Owned(serde_json::to_string(&collection)?),
                     }));
                 })
             })),
@@ -268,7 +268,7 @@ impl Routes {
 
                         return Ok(RouteResult::Route(RouteHandlerResult {
                             headers: ctx.response_headers,
-                            body: entry.serialize()?,
+                            body: Cow::Owned(entry.serialize()?),
                         }));
                     }
                     return Err(Box::<dyn Error + Send + Sync>::from("Task cannot be empty"));
@@ -305,7 +305,7 @@ impl Routes {
 
                         return Ok(RouteResult::Route(RouteHandlerResult {
                             headers: response_headers,
-                            body: String::new(),
+                            body: Cow::Owned(String::from("Ok")),
                         }));
                     }
 

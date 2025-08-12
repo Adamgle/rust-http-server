@@ -12,14 +12,11 @@ LOG_HISTORY: str = "./logs/history_logs.json"
 
 # Parses logs from the current session and from the history
 def parse_logs(
-    log_file: str = LOG_FILE,
-    log_history: str = LOG_HISTORY
+    log_file: str = LOG_FILE, log_history: str = LOG_HISTORY
 ) -> Dict[datetime.datetime, Dict[datetime.datetime, str]]:
     entries: Dict[datetime.datetime, Dict[datetime.datetime, str]] = (
         collections.defaultdict(dict)
     )
-
-    
 
     return entries
 

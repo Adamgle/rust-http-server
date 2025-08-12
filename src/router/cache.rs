@@ -323,7 +323,7 @@ impl OwnedRouteHandlerResult {
 
         let r = RouteHandlerResult {
             headers: self.headers.to_borrowed(),
-            body: self.body.clone(),
+            body: Cow::from(&self.body),
         };
 
         info!(
