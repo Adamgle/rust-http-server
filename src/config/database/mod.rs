@@ -4,7 +4,7 @@
 */
 #![allow(non_snake_case)]
 
-// SIDE NOTE: The main issue of why the performance of this web server is soo bad, is because of this database, which does have to read => deserialize => write to deserialize 
+// SIDE NOTE: The main issue of why the performance of this web server is soo bad, is because of this database, which does have to read => deserialize => write to deserialize
 // => write serialized every WAL_COMMAND_SIZE constant, making it roughly run in quadratic complexity of WAL file flush.
 
 // ### NOTES ###

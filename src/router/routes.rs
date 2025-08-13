@@ -1,5 +1,4 @@
-use serde_json::json;
-use std::{borrow::Cow, collections::HashMap, error::Error, f32::consts::E};
+use std::{borrow::Cow, collections::HashMap, error::Error};
 
 use crate::{
     config::{

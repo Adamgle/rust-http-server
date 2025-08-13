@@ -12,7 +12,6 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 use std::time::SystemTimeError;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use uuid::timestamp::context::ThreadLocalContext;
 
 // / We are using Strings as the keys to store uuids.
 type DatabaseStorage<T> = HashMap<String, T>;

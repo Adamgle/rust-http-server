@@ -78,8 +78,6 @@ pub mod tcp_handlers {
                     let task_error_writer = Arc::clone(&writer);
 
                     let task = tokio::spawn(async move {
-                        // let writer = Arc::clone(&writer);
-
                         if let Err(err) = self::handle_client(
                             &mut reader,
                             Arc::clone(&writer),
@@ -159,7 +157,7 @@ pub mod tcp_handlers {
         writer: Arc<Mutex<OwnedWriteHalf>>,
         config: Arc<Mutex<Config>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // let start = std::time::Instant::now();
+        let start = std::time::Instant::now();
 
         let config = Arc::clone(&config);
         let config = config.lock().await;
@@ -216,14 +214,15 @@ pub mod tcp_handlers {
         //         + ctx.request.body.as_ref().map(|v| v.len()).unwrap_or(0),
         // );
 
-        // response.write(&config, &mut writer).await?;
-
-        // info!("Route of {key:?} took: {} ms", start.elapsed().as_millis());
-
-        // return Ok(());
-
+        // That is not ideal, but do not care.
+        // It could be embedded in the Router::route, will keep it here. And also in real world application
+        // functionality like that would likely serve no purpose.
         tcp_handlers::set_default_headers(&mut headers);
 
-        return Ok(router.route(&config, &mut writer, request, headers).await?);
+        let r = Ok(router.route(&config, &mut writer, request, headers).await?);
+
+        info!("Route of {key:?} took: {} ms", start.elapsed().as_millis());
+
+        return r;
     }
 }
