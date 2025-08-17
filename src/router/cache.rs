@@ -1,10 +1,10 @@
 use std::{borrow::Cow, collections::HashMap};
 
 use dashmap::DashMap;
+use horrible_database::{Database, collections::DatabaseConfigEntry};
 use once_cell::sync::Lazy;
 
 use crate::{
-    config::{config_file::DatabaseConfigEntry, database::Database},
     http::{
         HeaderMap, HttpProtocol, HttpRequestHeaders, HttpRequestRequestLine, HttpResponseHeaders,
         HttpResponseStartLine,

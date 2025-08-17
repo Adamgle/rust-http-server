@@ -1,12 +1,14 @@
+pub mod models;
+
+use crate::router::controller::models::{
+    ClientSession, ClientTask, ClientUser, DatabaseSession, DatabaseUser,
+};
+
+use horrible_database::DatabaseEntryTrait;
+use log::info;
 use std::{borrow::Cow, error::Error};
 
-use log::info;
-
 use crate::{
-    config::database::{
-        DatabaseEntryTrait, DatabaseUser,
-        collections::{ClientSession, ClientTask, ClientUser, DatabaseSession},
-    },
     http::{HttpHeaders, HttpRequestError, HttpRequestMethod},
     router::{
         RouteContext, RouteHandlerFuture, RouteHandlerResult, RouteResult, RouteTableKey,
@@ -58,10 +60,9 @@ impl Controller {
         })
     }
 
+    /// Overwrites the the existing default handler for root rendering to additionally flush the database on that path.
     pub fn handle_root_render(mut ctx: RouteContext<'_>) -> RouteHandlerFuture {
         Box::pin(async move {
-            // We want to flush the database on the load of that route.
-
             let database = ctx.get_database()?;
             let mut database = database.lock().await;
 

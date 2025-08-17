@@ -26,7 +26,7 @@ use std::{
 use tokio::{net::tcp::OwnedWriteHalf, sync::Mutex};
 
 use crate::{
-    config::{Config, SpecialDirectories, config_file::DatabaseConfigEntry, database::Database},
+    config::{Config, SpecialDirectories},
     http::{HttpRequestError, HttpRequestHeaders, HttpRequestMethod, HttpResponseHeaders},
     http_request::HttpRequest,
     router::{
@@ -34,6 +34,8 @@ use crate::{
         routes::Routes,
     },
 };
+
+use horrible_database::{Database, collections::DatabaseConfigEntry};
 
 /// The `RouteTable` is a `HashMap` that maps the route key to the route value.
 ///

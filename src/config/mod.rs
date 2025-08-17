@@ -1,5 +1,3 @@
-pub mod database;
-
 use crate::prelude::*;
 
 use crate::http::HttpRequestMethod;
@@ -13,7 +11,7 @@ use std::sync::Arc;
 use strum::IntoEnumIterator;
 use tokio::sync::Mutex;
 
-use self::database::Database;
+use horrible_database::Database;
 
 #[derive(Debug)]
 /// `NOTE`: It would be good idea to document that
@@ -50,17 +48,6 @@ impl AppConfig {
         self.database.clone()
     }
 }
-
-// We will omit value of the routes HashMap to be printed as it is a function pointer
-// impl std::fmt::Debug for AppConfig {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         f.debug_struct("AppConfig")
-//             .field("url", &self.url)
-//             .field("routes", &self.router.get_routes())
-//             // .field("routes", &self.routes.0.keys().collect::<Vec<_>>())
-//             .finish()
-//     }
-// }
 
 // TODO: Config file should be generate when server is first started with some crap that is default and required
 // for server to work, like `protocol` field.
@@ -117,21 +104,11 @@ pub mod config_file {
         pub paths: Option<Vec<RedirectPathsEntry>>,
     }
 
-    // `protocol` is not optional because it is required for server to work
-    // and it will be set to defaults if not supplied
-    #[derive(serde::Deserialize, Debug, Clone)]
-    #[allow(non_snake_case)]
-    pub struct DatabaseConfigEntry {
-        /// `root` directory where paths are defined, relative to the server `/public`
-        pub root: PathBuf,
-        /// `wal` file path of write-ahead log, relative to the server `/public`
-        pub WAL: PathBuf,
-    }
-
     #[derive(serde::Deserialize, Debug, Clone)]
     pub struct ServerConfigFile {
         // This probably should not be public and maybe the database should not even be in the /public dir
-        pub database: Option<DatabaseConfigEntry>,
+        /// We are using the configuration required by a library, we could abstract away thought, or type alias it to local type.
+        pub database: Option<horrible_database::collections::DatabaseConfigEntry>,
         pub redirect: Option<RedirectEntry>,
         pub protocol: ConfigHttpProtocol,
         /// `TODO`: That should be renamed to `host` as that is host not domain, and any other fields using
@@ -406,7 +383,8 @@ impl Config {
                 })?,
             ))),
             None => {
-                println!("Database not configured in the config file under /database branch.");
+                info!("Database not configured in the config file under /database branch.");
+
                 None
             }
         };
@@ -466,7 +444,9 @@ impl Config {
         std::env::var("SERVER_PORT").expect("server_port not set in the SERVER_PORT env")
     }
 
-    pub fn get_database_config(&self) -> Option<&config_file::DatabaseConfigEntry> {
+    pub fn get_database_config(
+        &self,
+    ) -> Option<&horrible_database::collections::DatabaseConfigEntry> {
         self.config_file.database.as_ref()
     }
 

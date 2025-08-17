@@ -1,22 +1,20 @@
 use std::{borrow::Cow, collections::HashMap, error::Error};
 
+use horrible_database::{DatabaseEntryTrait, collections::DatabaseCollection};
+
 use crate::{
-    config::{
-        SpecialDirectories,
-        database::{
-            DatabaseEntryTrait, DatabaseTask, DatabaseUser,
-            collections::{ClientTask, ClientUser, DatabaseCollection},
-        },
-    },
+    config::SpecialDirectories,
     http::{HttpRequestError, HttpRequestMethod},
     prelude::*,
     router::{
         RouteContext, RouteEntry, RouteHandler, RouteHandlerResult, RouteResult, RouteTable,
         RouteTableKey,
         cache::{RouterCache, RouterCacheResult},
-        controller::{AppController, Controller},
+        controller::{AppController, Controller, models::DatabaseTask},
     },
 };
+
+use crate::router::controller::models::{ClientTask, ClientUser, DatabaseUser};
 
 /// Holds routes that client can get direct access to.
 #[derive(Debug)]

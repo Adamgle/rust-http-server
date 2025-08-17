@@ -385,17 +385,18 @@ def main():
         path="/database/tasks.json",
         # payload=build_task("a" * (1)),
         payload=build_task("a"),
-        sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
+        sessionId="4115b025-4294-4ff3-95ba-0cddff62700b",
         threads_count=10,
-        requests_count=1000,
+        requests_count=10000,
     )
 
-    # send_custom(
-    #     request=HttpMethod.POST,
-    #     path="/database/tasks.json",
-    #     payload=build_task("a" * (1024 * 1024 * 500)),
-    #     sessionId="b9b88ce5-7027-4d64-b6f3-f3b6aeb980b3",
-    # )
+    # for _ in range(1000):
+    #     send_custom(
+    #         request=HttpMethod.POST,
+    #         path="/database/tasks.json",
+    #         sessionId="4115b025-4294-4ff3-95ba-0cddff62700b",
+    #         payload=build_task("a"),
+    #     )
 
 
 if __name__ == "__main__":

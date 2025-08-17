@@ -14,7 +14,7 @@ LOG_HISTORY: str = "./logs/history_logs.json"
 
 
 class LogEntry:
-    # %Y-%m-%d %H:%M:%S%.3f
+    # %Y-%m-%d %H:%M:%S.%.3f
     DATE_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 
     def __init__(self, timestamp: datetime, level: str, source: str, message: str):
@@ -75,10 +75,16 @@ class Logs:
                 label_str = line[left + 1 : right].strip()
                 label_parts = label_str.split(" ")
 
+                if len(label_parts) != 4:
+                    if entry:
+                        entry.message += "\n" + line
+                    continue
+
                 # Extract time, level, source from label parts
-                time_part = " ".join(label_parts[0:2]) if len(label_parts) >= 2 else None
-                level = label_parts[2] if len(label_parts) > 2 else None
-                source = label_parts[3] if len(label_parts) > 3 else None
+                time_part = " ".join(label_parts[0:2])
+                level = label_parts[2]
+                # Doing source = label_parts[3:] would be better to account for spaces in the file name.
+                source = " ".join(label_parts[3:])
 
                 time_obj = None
 
@@ -86,15 +92,11 @@ class Logs:
                     try:
                         time_obj = datetime.strptime(time_part, LogEntry.DATE_FORMAT)
                     except ValueError:
+                        if entry:
+                            entry.message += "\n" + line
                         continue
 
-                if (
-                    time_obj is not None
-                    and level is not None
-                    and source is not None
-                    and " " not in level
-                    and ".rs" in source
-                ):
+                if time_obj is not None and " " not in level and ".rs" in source:
                     try:
                         source_path = Path(source).relative_to(Path.cwd())
                     except ValueError:
@@ -132,7 +134,7 @@ class Logs:
         return collections.defaultdict(
             list,
             {
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"): entries,
+                datetime.now().strftime(LogEntry.DATE_FORMAT): entries,
             },
         )
 
@@ -195,15 +197,19 @@ class Logs:
     def create_benchmarking_csv(
         benchmarking_logs: DefaultDict[str, DefaultDict[str, List[str]]],
     ) -> None:
-        # Prepare data as a list of dicts for pandas
+        MAX_COLS = 16384 - 2  # reserve 2 columns for "Time" and "Key"
+
         rows = []
+
         for time, entries in benchmarking_logs.items():
             for key, measurements in entries.items():
-                # Build the row: time + key + each measurement in separate columns
-                row = [time, key] + measurements
+                row = [time, key] + measurements[:MAX_COLS]
                 rows.append(row)
 
-        # Find the maximum number of measurements to name columns correctly
+        if not rows:
+            raise Exception("No rows found; possibly no benchmarking logs available.")
+
+        # Determine column names
         max_measurements = max(len(r) - 2 for r in rows)
         col_names = ["Time", "Key"] + [
             f"Measurement {i+1}" for i in range(max_measurements)
@@ -212,20 +218,28 @@ class Logs:
         # Convert to DataFrame
         df1 = pd.DataFrame(rows, columns=col_names)
 
-        time_key_rows = []
+        summations = []
 
         for r in rows:
-            row = []
-            row.append(f"{r[0]} - {r[1]}")
-            row.append(
-                f'{sum([float(measurement.strip(" ")[0]) for measurement in r[2:]])} {r[-1].split(" ")[-1]}'
+            row = [f"{r[0]} - {r[1]}"]
+
+            assert len(r) >= 3
+
+            # Take last measurement and extract the unit, all units are the same
+            unit = r[-1].split(" ")[-1]
+            values = map(
+                float, (measurement.strip().split(" ")[0] for measurement in r[2:])
             )
 
-            time_key_rows.append(row)
+            row.append(f"{sum(values)} {unit}")
+
+            assert len(row) == 2, "Row should have exactly two elements"
+
+            summations.append(row)
 
         # Sort alphabetically by Key
         df1 = df1.sort_values(by="Key")
-        df2 = pd.DataFrame(time_key_rows, columns=["Time - Key", "Total Duration"])
+        df2 = pd.DataFrame(summations, columns=["Time - Key", "Total Duration"])
 
         file = "./logs/benchmarking_stats.xlsx"
 
@@ -351,7 +365,4 @@ if __name__ == "__main__":
     # pprint.pprint(maxes)
 
     benchmarking_logs = Logs.extract_benchmarking_logs(logs.data)
-
     Logs.create_benchmarking_csv(benchmarking_logs)
-
-
