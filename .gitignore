@@ -1,5 +1,4 @@
 /target
-
 .vscode
 
 /benchmarks
@@ -7,8 +6,5 @@
 /logs
 /leetcode.py
 /public/database
-error.txt
-/error.txt
 /__pycache__
 run.bat
-/horrible-database

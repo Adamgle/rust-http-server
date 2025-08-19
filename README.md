@@ -29,7 +29,7 @@ Created to gain experience with:
   Supports redirecting requests for specific domains.
 
 - **Custom database**  
-  Bundled with a simple database originally written for this project (now isolated into a separate repository). While basic, it demonstrates persistence and integration.
+  Bundled with a simple database originally written for this project (now isolated into a separate repository). While basic, it demonstrates persistence and integration. It is not indexed on crates.io so it comes as a local crate.
 
 - **Router**
 

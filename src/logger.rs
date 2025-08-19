@@ -6,9 +6,9 @@ use std::{
 const DATE_FORMAT: &'static str = "%Y-%m-%d %H:%M:%S%.6f";
 
 pub fn init_logger() -> Result<(), Box<dyn Error + Send + Sync>> {
-    // if let Err(message) = save_previous_logs() {
-    // eprintln!("Failed to save previous logs: {}", message);
-    // }
+    if let Err(message) = save_previous_logs() {
+        eprintln!("Failed to save previous logs: {}", message);
+    }
 
     let target = Box::new(
         std::fs::OpenOptions::new()
@@ -75,6 +75,8 @@ pub fn init_logger() -> Result<(), Box<dyn Error + Send + Sync>> {
 ///
 /// We should expose command line argument to allow opting to that.
 fn save_previous_logs() -> Result<(), Box<dyn Error + Send + Sync>> {
+    println!("Saving previous logs under logs/history_logs.json");
+
     let logs = std::fs::read_to_string("logs/logs.log")?;
 
     if logs.is_empty() {
