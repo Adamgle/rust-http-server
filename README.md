@@ -110,5 +110,6 @@ The repository includes a simple demo CRUD application with API based on this se
 - Validate the **route existence for middleware** as currently there is a way to register middleware handler or middleware segment for route that does not exist.
   This is not an issue in practice (if the route handler does not resolve, neither can the middleware), but it wastes memory.
 - Implement **Transfer-Encoding: chunked** for large payloads.
+- Generate **default config file** when server starts up.
 
 ---
