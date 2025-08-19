@@ -23,3 +23,28 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     Ok(())
 }
+
+// async fn test() {
+//     use futures_util::{StreamExt, stream};
+
+//     #[tokio::main]
+//     async fn main() {
+//         let client = reqwest::ClientBuilder::new()
+//             .http2_adaptive_window(true)
+//             .build()
+//             .unwrap();
+
+//         stream::iter(0..1_000_000)
+//             .for_each_concurrent(10, |url| callback(&client, url))
+//             .await;
+//     }
+
+//     async fn callback(client: &reqwest::Client, url: u64) {
+//         let url = format!("http://127.0.0.1:8888/{}", url);
+
+//         let Ok(res) = client.get(url).send().await else {
+//             return;
+//         };
+//         let Ok(text) = res.text().await else { return };
+//     }
+// }

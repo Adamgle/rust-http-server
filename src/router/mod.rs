@@ -35,7 +35,7 @@ use crate::{
     },
 };
 
-use horrible_database::{Database, collections::DatabaseConfigEntry};
+use horrible_database::{Database, DatabaseConfigEntry};
 
 /// The `RouteTable` is a `HashMap` that maps the route key to the route value.
 ///
@@ -175,27 +175,6 @@ impl RouteTableKey {
         // We need to first try to resolve the path literally in the router and then try to normalize it if not found and lookup again.
     }
 
-    /// Normalizes the path, omits the validation of the `path`.
-    ///
-    /// Path should be validated and decoded, does not normalize the path.
-    ///
-    /// Validation runs under `HttpRequestRequestLine::new`, path is decoded in `HttpRequestHeaders::get_request_target_path`
-    /// if used in client code, otherwise that is used to .
-    // pub fn new_no_validate(
-    //     path: impl AsRef<Path>,
-    //     method: Option<HttpRequestMethod>,
-    //     kind: RouteKeyKind,
-    // ) -> Self {
-    //     if let (RouteKeyKind::Route, None) = (kind, &method) {
-    //         panic!("Cannot create a route table key with no method, please specify a method.");
-    //     }
-
-    //     Self {
-    //         path: PathBuf::from(path.as_ref()),
-    //         method,
-    //     }
-    // }
-
     pub fn get_path(&self) -> &Path {
         // Returns the path of the route table key.
         &self.path
@@ -240,14 +219,9 @@ impl std::fmt::Debug for RouteTableKey {
     }
 }
 
-/// Context for the route handler that takes a reference `HttpRequest`, a mutable reference to `HttpResponseHeaders, and a
-
-/// reference to `RouteTableKey`.
-///
-/// NOTE: The lifetimes here are a bit tricky. The `HttpRequest` and `HttpResponseHeaders` are tied to the request lifecycle.
+/// `NOTE`: The lifetimes here are a bit tricky. The `HttpRequest` and `HttpResponseHeaders` are tied to the request lifecycle.
 /// `RouteTableKey` even though is 'static in lifetime in the `RouteTable` it is not static in the parameters of the route handler
 /// as it is a reference to the key built in the `handle_client` entry point.
-
 #[derive(Clone, Debug)]
 pub struct RouteContext<'ctx> {
     pub request: HttpRequest<'ctx>,

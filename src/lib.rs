@@ -6,21 +6,16 @@ pub mod router;
 pub use http::http_request;
 pub use http::http_response;
 
-use std::error::Error;
-
+use crate::config::Config;
+use crate::http::{HttpHeaders, HttpResponseHeaders, HttpResponseStartLine};
 use crate::http_request::HttpRequest;
 use crate::prelude::*;
-
-// pub mod lib {
-// use super::http_request::HttpRequest;
-use crate::config::Config::{self};
-use crate::http::{HttpHeaders, HttpResponseHeaders, HttpResponseStartLine};
 use crate::router::RouteTableKey;
-// use crate::*;
 
 use http::HttpRequestError;
 use log::{error, info};
 use std::borrow::Cow;
+use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -110,7 +105,7 @@ pub async fn run_tcp_server(
                     }
                 });
 
-                // Timeout on each task
+                // // Timeout on each task
                 if let Err(err) =
                     tokio::time::timeout(tokio::time::Duration::from_secs(5), task).await
                 {
@@ -179,7 +174,6 @@ async fn handle_client(
 
     let router = config.get_router();
 
-    // That is not ideal, but do not care.
     // It could be embedded in the Router::route, will keep it here. And also in real world application
     // functionality like that would likely serve no purpose.
     set_default_headers(&mut headers);
@@ -190,4 +184,77 @@ async fn handle_client(
 
     return r;
 }
+
+// #[cfg(test)]
+// mod tests {
+//     use serde_json::json;
+//     use tokio::io::AsyncWriteExt;
+
+//     use futures::{StreamExt, stream::FuturesUnordered};
+
+//     // #[tokio::test]
+//     async fn test_concurrent_tasks() {
+//         let mut tasks: FuturesUnordered<tokio::task::JoinHandle<Result<(), String>>> =
+//             FuturesUnordered::new();
+
+//         // Too much will cause ephemeral port exhaustion.
+//         for _ in 0..100 {
+//             let payload = json!({
+//                 "value": "test"
+//             });
+
+//             let request = format!(
+//                 "POST /database/tasks.json HTTP/1.1\r\nContent-Type: application/json\r\nCookie: sessionId=f6a947d2-837c-41ca-a035-8308d0898eb6\r\nHost: localhost:5000\r\nContent-Length: {}\r\n\r\n{}",
+//                 payload.to_string().len(),
+//                 payload.to_string()
+//             );
+
+//             tasks.push(tokio::spawn(async move {
+//                 let Ok(mut stream) = tokio::net::TcpStream::connect("localhost:5000").await else {
+//                     return Err("Failed to connect to the server".into());
+//                 };
+
+//                 stream.write_all(request.as_bytes()).await.unwrap();
+//                 Ok(())
+//             }));
+
+//             if tasks.len() >= 100 {
+//                 // Wait for some tasks to complete before spawning more
+//                 let _ = tasks.next().await;
+//             }
+//         }
+
+//         for task in tasks {
+//             let _ = task.await;
+//         }
+//     }
+
+//     // #[tokio::test]
+//     // async fn test_concurrent() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+//     //     let client = reqwest::Client::new();
+//     //     let payload = json!({ "value": "test" }).to_string();
+
+//     //     let mut headers = reqwest::header::HeaderMap::new();
+//     //     headers.insert("Content-Type", "application/json".parse().unwrap());
+//     //     headers.insert(
+//     //         "cookie",
+//     //         "sessionId=f6a947d2-837c-41ca-a035-8308d0898eb6"
+//     //             .parse()
+//     //             .unwrap(),
+//     //     );
+
+//     //     for _ in 0..1000 {
+//     //         let res = client
+//     //             .post("http://localhost:5000/database/tasks.json")
+//     //             .headers(headers.clone())
+//     //             .body(payload.clone())
+//     //             .send()
+//     //             .await?;
+
+//     //         let body = res.text().await?;
+//     //         assert!(!body.contains("Bad Request"));
+//     //     }
+
+//     //     Ok(())
+//     // }
 // }

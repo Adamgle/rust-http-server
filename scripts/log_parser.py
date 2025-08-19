@@ -360,9 +360,9 @@ class BorrowedOwnedConversion:
 if __name__ == "__main__":
     logs = Logs()
 
-    # maxes = BorrowedOwnedConversion.get_maxes_borrowed_owned_conversions(logs.data)
+    maxes = BorrowedOwnedConversion.get_maxes_borrowed_owned_conversions(logs.data)
     # BorrowedOwnedConversion.create_maxes_csv(maxes)
-    # pprint.pprint(maxes)
+    pprint.pprint(maxes)
 
     benchmarking_logs = Logs.extract_benchmarking_logs(logs.data)
     Logs.create_benchmarking_csv(benchmarking_logs)

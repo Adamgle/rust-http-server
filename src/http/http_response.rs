@@ -57,7 +57,7 @@ impl<'a> HttpResponse<'a> {
         let content_length = self
             .headers
             .get("Content-Length")
-            .and_then(|v| v.parse::<usize>().ok())
+            .and_then(|v: &'a Cow<'_, str>| v.parse::<usize>().ok())
             .unwrap_or(0)
             + BUFFER_CAPACITY_OFFSET;
 

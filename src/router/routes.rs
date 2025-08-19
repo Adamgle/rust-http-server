@@ -141,14 +141,6 @@ impl Routes {
                         // If the size is specified, we can return the collection data with the size limit.
 
                         dynamic_fields.insert("size".to_string(), collection.len().to_string());
-
-                        // return Ok(RouteResult::Route(RouteHandlerResult {
-                        //     headers: response_headers,
-                        //     body: Cow::Owned(serde_json::to_string(&json!({
-                        //         "collection": collection_name,
-                        //         "size": collection.len().to_string(),
-                        //     }))?),
-                        // }));
                     }
 
                     // Return the size in bytes of the collection as the file and as stored in the database when deserialized.
@@ -169,34 +161,18 @@ impl Routes {
                                 })
                                 .to_string(),
                         );
-
-                        // return Ok(RouteResult::Route(RouteHandlerResult {
-                        //     headers: response_headers,
-                        //     body: Cow::Owned(serde_json::to_string(&json!({
-                        //         "collection": collection_name,
-                        //         "file_size": file_size.to_string(),
-                        //         "collection_size":
-                        //     }))?),
-                        // }));
                     }
 
-                    match dynamic_fields.is_empty() {
-                        true => {
-                            // If there are no dynamic fields, we can return the collection as is.
-                            let body = serde_json::to_string(&collection)?;
+                    let body = if dynamic_fields.is_empty() {
+                        serde_json::to_string(&collection)?
+                    } else {
+                        serde_json::to_string(&dynamic_fields)?
+                    };
 
-                            return Ok(RouteResult::Route(RouteHandlerResult {
-                                headers: response_headers,
-                                body: Cow::Owned(body),
-                            }));
-                        }
-                        false => {
-                            return Ok(RouteResult::Route(RouteHandlerResult {
-                                headers: response_headers,
-                                body: Cow::Owned(serde_json::to_string(&dynamic_fields)?),
-                            }));
-                        }
-                    }
+                    return Ok(RouteResult::Route(RouteHandlerResult {
+                        headers: response_headers,
+                        body: Cow::Owned(body),
+                    }));
                 })
             })),
         )?;

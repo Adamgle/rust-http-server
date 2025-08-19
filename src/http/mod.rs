@@ -500,7 +500,7 @@ pub trait HttpHeaders<'a> {
 
     /// Access header by key
     fn get(&'a self, key: &'a str) -> Option<&'a Cow<'a, str>> {
-        self.get_headers().get(key)
+        self.get_headers().get(key.to_lowercase().as_str())
     }
 
     /// That avoids overhead of implementing Iterator specifically for that struct, so for iteration use `iter()` method
@@ -520,7 +520,9 @@ pub trait HttpHeaders<'a> {
     /// Suck on this <Writes on a rock, SASSY office reference>
     /// Default impl uses `headers_mut()`
     fn add(&mut self, key: Cow<'a, str>, value: Cow<'a, str>) {
-        self.get_headers_mut().insert(key, value);
+        // We MUST lowercase only the key, we MUST NOT lowercase the body.
+        self.get_headers_mut()
+            .insert(key.to_lowercase().into(), value.into());
     }
 
     /// Parses String formatted as key-value pair delimited by ": ", validating the correctness
@@ -532,7 +534,7 @@ pub trait HttpHeaders<'a> {
             .try_into()
             .expect("Incorrect header. Request is malformed.");
 
-        self.add(key.into(), value.into());
+        self.add(key.to_lowercase().into(), value.into());
     }
 }
 

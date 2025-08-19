@@ -59,6 +59,10 @@ def test_get(path: str) -> int:
 
 SendCustomCallable = Callable[..., SendResult]
 
+import socket
+import time
+from typing import Optional, List
+
 
 def send_custom(
     request: HttpMethod = HttpMethod.GET,
@@ -69,9 +73,7 @@ def send_custom(
     sessionId: str = "",
     **kwargs,
 ) -> SendResult:
-
     injected_header = f"malicious-value{'x' * inject_size}"
-
     response_timestamps: Optional[List[float]] = kwargs.get("response_timestamps", None)
 
     match request:
@@ -87,6 +89,7 @@ def send_custom(
                 f"Injected-Header{injected_header}: {injected_header}\r\n\r\n"
                 f"{payload if payload else ''}"
             )
+
         case HttpMethod.GET:
             headers = (
                 f"GET {path} HTTP/1.1\r\n"
@@ -96,6 +99,7 @@ def send_custom(
                 "X-Custom-Header: valid-value\r\n"
                 f"Injected-Header: {injected_header}\r\n\r\n"
             )
+
         case _:
             headers = (
                 f"{request.value} {path} HTTP/1.1\r\n"
@@ -114,25 +118,22 @@ def send_custom(
                 s.sendall(message.encode())
 
                 response = []
-
                 while True:
                     chunk = s.recv(1024)
                     if not chunk:
                         break
-
                     response.extend(chunk)
 
-                # , errors='ignore'
                 return bytes(response).decode("utf-8")
+
             except OSError as e:
                 print(f"Socket error: {e}")
                 return "500"
 
     response = create_socket(headers)
 
-    if response:
-        if response_timestamps is not None:
-            response_timestamps.append(time.time())
+    if response and response_timestamps is not None:
+        response_timestamps.append(time.time())
 
     return {
         "payload_size": len(headers.encode()),
@@ -199,7 +200,7 @@ def run_multithreaded(
         all_response_timestamps.append(relative_timestamps)
         results.extend(thread_results)
 
-    for i in range(threads_count):
+    for _ in range(threads_count):
         thread = threading.Thread(target=worker)
         thread_list.append(thread)
         thread.start()
@@ -322,7 +323,15 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
     plt.figure(figsize=(10, 6))
     plt.xlabel("Request Number")
     plt.ylabel("Time since thread start (seconds)")
-    plt.title("Response Timestamps per Thread")
+
+    with open("./public/database/tasks.json") as f:
+        tasks = f.read()
+        tasks_bytes = len(tasks)
+        tasks = json.loads(tasks)
+
+    plt.title(
+        f"Response Timestamps per Thread | ~ size {tasks_bytes} bytes | ~ count {len(tasks)}"
+    )
     plt.grid()
 
     # for i, ts in enumerate(timestamps):
@@ -381,22 +390,15 @@ def plot_response_timestamps(timestamps: List[List[float]]) -> None:
 def main():
     run_multithreaded(
         callback=send_custom,
-        request=HttpMethod.POST,
-        path="/database/tasks.json",
-        # payload=build_task("a" * (1)),
-        payload=build_task("a"),
-        sessionId="4115b025-4294-4ff3-95ba-0cddff62700b",
+        # request=HttpMethod.POST,
+        request=HttpMethod.GET,
+        path="/",
+        # payload=build_task("payload"),
+        # path="assets/notes/note.txt",
+        # sessionId="f6a947d2-837c-41ca-a035-8308d0898eb6",
         threads_count=10,
-        requests_count=10000,
+        requests_count=10_000,
     )
-
-    # for _ in range(1000):
-    #     send_custom(
-    #         request=HttpMethod.POST,
-    #         path="/database/tasks.json",
-    #         sessionId="4115b025-4294-4ff3-95ba-0cddff62700b",
-    #         payload=build_task("a"),
-    #     )
 
 
 if __name__ == "__main__":

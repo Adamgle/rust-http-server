@@ -1,3 +1,4 @@
+use crate::config::config_file::ServerConfigFile;
 use crate::config::Config;
 use crate::http::{HttpResponseHeaders, RequestRedirected};
 use crate::router::cache::OwnedHttpRequest;
@@ -558,24 +559,20 @@ impl<'a> HttpRequest<'a> {
                         // NOTE: What if domain is invalid and the path is invalid
                         // then we would have to redirect both. That is we need path variable to be passed
 
-                        // NOTE: Macro for writing headers would be great
-                        let mut location = config.config_file.domain_to_url(
-                            &domain.to,
-                            &Config::get_server_port().parse::<u16>().map_err(|e| {
-                                HttpRequestError {
+                        let mut location = ServerConfigFile::domain_to_url(&domain.to) 
+                            .map_err(|e| {
+                                Box::<dyn Error + Send + Sync>::from(HttpRequestError {
                                     internals: Some(Box::<dyn Error + Send + Sync>::from(format!(
-                                        "Could not parse server port, not valid u16: {}",
-                                        e
+                                        "Got invalid domain: {} to construct URL for redirection; message: {}", domain.to, e
                                     ))),
                                     ..Default::default()
-                                }
-                            })?,
-                        )?;
+                                })
+                            })?;
 
                         // Could be problems if the path is not valid UTF-8
 
-                        println!("Redirecting from: {} | {}", domain.from, path);
-                        println!("Redirecting to: {} | {}", location, path);
+                        info!("Redirecting from: {} | {}", domain.from, path);
+                        info!("Redirecting to: {} | {}", location, path);
 
                         location.set_path(path.as_ref());
 

@@ -197,8 +197,6 @@ impl Controller {
             let cookies = ctx.request.get_cookies()?;
 
             if let Some(session_id) = cookies.get("sessionId") {
-                println!("Signing out user with sessionId: {}", session_id);
-
                 let mut database = database.lock().await;
 
                 database
@@ -300,14 +298,6 @@ impl MiddlewareController {
         Box::pin(async move {
             // Here we could initialize the database connection or any other resource
             // that we need for the middleware.
-
-            // println!(
-            //     "Size of ctx: request: {} | response_headers: {} | key: {} | database: {}",
-            //     ctx.request.get_body().map(|b| b.len()).unwrap_or(0),
-            //     ctx.response_headers.headers.headers.len(),
-            //     ctx.key.path.display(),
-            //     ctx.get_database().is_ok()
-            // );
 
             let res = ctx.get_response_headers();
 
@@ -555,12 +545,6 @@ impl AppController {
             .collections
             .insert::<DatabaseSession, ClientSession>(&serde_json::to_vec(&session)?)
             .await?;
-
-        println!(
-            "Session for user: {} created with id: {}",
-            user.get_id(),
-            session.get_id()
-        );
 
         // Mutate via mutable reference, that is not moved to the function.
         ctx.response_headers.add(

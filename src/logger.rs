@@ -3,14 +3,12 @@ use std::{
     io::{BufReader, Seek, Write},
 };
 
-use log::LevelFilter;
-
 const DATE_FORMAT: &'static str = "%Y-%m-%d %H:%M:%S%.6f";
 
 pub fn init_logger() -> Result<(), Box<dyn Error + Send + Sync>> {
-    if let Err(message) = save_previous_logs() {
-        eprintln!("Failed to save previous logs: {}", message);
-    }
+    // if let Err(message) = save_previous_logs() {
+    // eprintln!("Failed to save previous logs: {}", message);
+    // }
 
     let target = Box::new(
         std::fs::OpenOptions::new()
@@ -25,9 +23,10 @@ pub fn init_logger() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // For logging to stderr and file
 
-    env_logger::Builder::new()
+    // Full logging is default.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
         .target(env_logger::Target::Stderr) // Or Target::Stdout
-        .filter(None, LevelFilter::Debug)
+        // .filter(None, LevelFilter::Debug)
         // .filter(None, LevelFilter::Off)
         .format(move |buf, record| {
             let log_line = format!(
@@ -73,6 +72,8 @@ pub fn init_logger() -> Result<(), Box<dyn Error + Send + Sync>> {
 ///
 /// TODO: Almost the same functionality is used in the python script of Logs::parse_current_logs at log_parser.py.
 /// It could be nice if we could embed the rust code into the python to not repeat ourselves and explore that a little bit more.
+///
+/// We should expose command line argument to allow opting to that.
 fn save_previous_logs() -> Result<(), Box<dyn Error + Send + Sync>> {
     let logs = std::fs::read_to_string("logs/logs.log")?;
 

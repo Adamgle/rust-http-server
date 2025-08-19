@@ -1,7 +1,7 @@
 use std::{borrow::Cow, collections::HashMap};
 
 use dashmap::DashMap;
-use horrible_database::{Database, collections::DatabaseConfigEntry};
+use horrible_database::{Database, DatabaseConfigEntry};
 use once_cell::sync::Lazy;
 
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
     },
     http_request::HttpRequest,
     prelude::*,
-    router::{RouteContext, RouteHandlerResult, RouteResult, RouteTableKey},
+    router::{RouteContext, RouteHandlerResult, RouteTableKey},
 };
 
 // Goals for RouterCache:
@@ -340,21 +340,9 @@ pub struct OptionalOwnedRouteHandlerResult {
     /// We are keeping it as optional, as the AppController handlers do not have to define headers in the cached output, although it could if it is costly to compute them.
     /// Keep in mind that the headers would have to be in-place initialized there and do not rely on the `response_headers` filed on the `OwnedRouteContext` struct,
     /// as they could not even be related.
+    ///
+    /// If we would want to carry some headers here, we would include them in the OwnedRouteHandlerResult later on.
     pub headers: Option<OwnedHttpResponseHeaders>,
     /// We actually have to keep the body as mandatory, and we will treat it in the AppController as the return type of the particular handler.
     pub body: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct OptionalRouteHandlerResult<'ctx> {
-    /// We are keeping it as optional, as the AppController handlers do not have to define headers in the cached output, although it could if it is costly to compute them.
-    /// Keep in mind that the headers would have to be in-place initialized there and do not rely on the `response_headers` filed on the `RouteContext` struct,
-    /// as they could not even be related.
-    pub headers: Option<HttpResponseHeaders<'ctx>>,
-    /// We actually have to keep the body as mandatory, and we will treat it in the AppController as the return type of the particular handler.
-    pub body: String,
-}
-pub enum AnyRouteResult<'ctx> {
-    RouteResult(RouteResult<'ctx>),
-    OwnedRouteResult(OwnedRouteHandlerResult),
 }

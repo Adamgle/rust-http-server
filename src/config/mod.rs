@@ -1,3 +1,4 @@
+use crate::config::config_file::ServerConfigFile;
 use crate::prelude::*;
 
 use crate::http::HttpRequestMethod;
@@ -53,7 +54,7 @@ impl AppConfig {
 // for server to work, like `protocol` field.
 pub mod config_file {
     use super::Config;
-    use std::{error::Error, fs, path::PathBuf};
+    use std::{error::Error, fs};
 
     #[derive(Debug, Clone)]
     pub enum ConfigHttpProtocol {
@@ -108,7 +109,7 @@ pub mod config_file {
     pub struct ServerConfigFile {
         // This probably should not be public and maybe the database should not even be in the /public dir
         /// We are using the configuration required by a library, we could abstract away thought, or type alias it to local type.
-        pub database: Option<horrible_database::collections::DatabaseConfigEntry>,
+        pub database: Option<horrible_database::DatabaseConfigEntry>,
         pub redirect: Option<RedirectEntry>,
         pub protocol: ConfigHttpProtocol,
         /// `TODO`: That should be renamed to `host` as that is host not domain, and any other fields using
@@ -178,11 +179,12 @@ pub mod config_file {
 
         // NOTE: Work around, make domains practically invalids domain just to fit the requirement for the application
         // new field specific for that functionality should be created
-        pub fn domain_to_url(&self, domain: &str, port: &u16) -> Result<url::Url, url::ParseError> {
-            Ok(url::Url::parse(&format!(
-                "{}://{}:{}",
-                self.protocol, domain, port
-            ))?)
+        pub fn domain_to_url(domain: &str) -> Result<url::Url, url::ParseError> {
+            // Domain should be given with port name, as it is technically a host header.
+            let host = ServerConfigFile::suffix_domain_with_port(domain);
+            Ok(url::Url::parse(
+                &format!("http://{}", host),
+            )?)
         }
     }
 }
@@ -392,10 +394,18 @@ impl Config {
         // As the url::Url does not allow relative url parsing, we are initializing one to default url,
         // though only the path segment is the important part
 
+        // Call to ServerConfigFile::domain_to_url requires that the port to be already set in the env.
+        //
         let app = AppConfig {
-            url: config_file
-                .domain_to_url(&config_file.domain, &socket_address.port())
-                .inspect_err(|e| error!("Error parsing domain to URL: {}", e))?,
+            url: ServerConfigFile::domain_to_url(&config_file.domain)
+                .inspect_err(|e| {
+                    error!(
+                        "Error creating URL for url of App in AppConfig from domain: {} and port: {}: {}",
+                        config_file.domain,
+                        socket_address.port(),
+                        e
+                    );
+                })?,
             router: Router::new()?,
             database,
         };
@@ -444,9 +454,7 @@ impl Config {
         std::env::var("SERVER_PORT").expect("server_port not set in the SERVER_PORT env")
     }
 
-    pub fn get_database_config(
-        &self,
-    ) -> Option<&horrible_database::collections::DatabaseConfigEntry> {
+    pub fn get_database_config(&self) -> Option<&horrible_database::DatabaseConfigEntry> {
         self.config_file.database.as_ref()
     }
 

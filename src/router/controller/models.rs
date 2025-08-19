@@ -60,6 +60,7 @@ impl From<ClientTask> for DatabaseTask {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[allow(non_snake_case)]
 pub struct DatabaseUser {
     /// Primary key.
     id: String,
